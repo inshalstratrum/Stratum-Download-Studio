@@ -9,6 +9,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import uuid
 
 import pytest
 
@@ -756,7 +757,7 @@ def test_transfer_size_format_used_by_main_table_and_popup():
     assert stratrum_download_studio.format_transfer_size('5.00 MB', 'N/A') == '5.00 MB / unknown total'
 
 
-def test_finished_progress_hook_emits_100_percent(tmp_path):
+def test_finished_progress_hook_enters_postprocessing_not_completion(tmp_path):
     source = tmp_path / 'complete.mp4'
     source.touch()
     thread = stratrum_download_studio.DownloadThread('id', 'https://example.com', str(tmp_path / '%(title)s.%(ext)s'), 'best', 'mp4')
@@ -766,7 +767,7 @@ def test_finished_progress_hook_emits_100_percent(tmp_path):
         'status': 'finished', 'filename': str(source), 'downloaded_bytes': 100, 'total_bytes': 100,
     })
     assert events[0][2] == 100.0
-    assert events[0][7] == 'Completed'
+    assert events[0][7] == 'Postprocessing'
 
 
 def test_fragmented_media_uses_numeric_aggregate_progress():
@@ -875,3 +876,460 @@ def test_chromium_development_uses_single_unpacked_source():
     assert 'Choose this `browser_extension/` directory directly' in readme
     assert 'Do not install the unpacked source and an extracted submission package simultaneously' in readme
     assert 'Sleeping is not an error' in readme
+
+
+# Phase 2A.5 output profiles, final tracking, and resolution selection
+
+PROFILE_PROBES = {
+    'MP4': ('mov,mp4,m4a,3gp,3g2,mj2', ['video', 'audio']),
+    'MKV': ('matroska,webm', ['video', 'audio']),
+    'WEBM': ('matroska,webm', ['video', 'audio']),
+    'AVI': ('avi', ['video', 'audio']),
+    'MOV': ('mov,mp4,m4a,3gp,3g2,mj2', ['video', 'audio']),
+    'MP3': ('mp3', ['audio']),
+    'M4A': ('mov,mp4,m4a,3gp,3g2,mj2', ['audio']),
+    'WAV': ('wav', ['audio']),
+    'FLAC': ('flac', ['audio']),
+}
+
+
+def probe_result(format_name, stream_types):
+    payload = {
+        'format': {'format_name': format_name},
+        'streams': [{'codec_type': stream_type, 'codec_name': 'mock', 'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
+    }
+
+    def runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload).encode(), stderr=b'')
+
+    return runner
+
+
+@pytest.mark.parametrize('profile_name', list(PROFILE_PROBES))
+def test_each_output_profile_resolves_real_final_path(tmp_path, profile_name):
+    profile = stratrum_download_studio.output_profile(profile_name)
+    output = tmp_path / f'finished.{profile.extension}'
+    output.write_bytes(b'media')
+    format_name, streams = PROFILE_PROBES[profile_name]
+    resolved, probe = stratrum_download_studio.resolve_final_media(
+        {}, [str(output)], tmp_path, profile_name, probe_runner=probe_result(format_name, streams)
+    )
+    assert resolved == output.resolve()
+    assert resolved.suffix == f'.{profile.extension}'
+    assert probe['format_name'] == format_name
+
+
+@pytest.mark.parametrize('profile_name', list(PROFILE_PROBES))
+def test_mocked_extractor_pipeline_returns_requested_actual_output(tmp_path, profile_name, monkeypatch):
+    profile = stratrum_download_studio.output_profile(profile_name)
+    output = tmp_path / f'extractor-final.{profile.extension}'
+    format_name, stream_types = PROFILE_PROBES[profile_name]
+
+    class MockYDL:
+        def __init__(self, options): self.options = options; self.params = options
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def extract_info(self, url, download=True):
+            output.write_bytes(b'final-media')
+            for hook in self.options['postprocessor_hooks']:
+                hook({'status': 'finished', 'filepath': str(output), 'info_dict': {'filepath': str(output)}})
+            return {'filepath': str(output)}
+
+    monkeypatch.setattr(stratrum_download_studio.yt_dlp, 'YoutubeDL', MockYDL)
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda path, runner=None: {
+        'format_name': format_name,
+        'streams': [{'codec_type': stream_type, 'codec_name': 'mock', 'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
+    })
+    thread = stratrum_download_studio.DownloadThread(
+        'id', 'https://example.com/media', str(tmp_path / '%(title)s.%(ext)s'),
+        None, profile_name, requested_height=1080, metadata=sample_format_info(), save_dir=tmp_path,
+    )
+    events = []; thread.finished.connect(lambda *args: events.append(args)); thread.run()
+    assert events == [('id', True, '', str(output.resolve()))]
+    assert Path(events[0][3]).suffix == f'.{profile.extension}'
+
+
+def test_output_profiles_cover_exact_video_and_audio_sets():
+    assert set(stratrum_download_studio.OUTPUT_PROFILES) == {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV', 'MP3', 'M4A', 'WAV', 'FLAC'}
+    assert {name for name, profile in stratrum_download_studio.OUTPUT_PROFILES.items() if profile.media_kind == 'video'} == {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV'}
+    assert {name for name, profile in stratrum_download_studio.OUTPUT_PROFILES.items() if profile.media_kind == 'audio'} == {'MP3', 'M4A', 'WAV', 'FLAC'}
+
+
+def test_download_engine_never_changes_media_format_by_extension_rename():
+    source = inspect.getsource(stratrum_download_studio.DownloadThread.run)
+    assert 'os.replace' not in source
+    assert 'resolve_final_media' in source
+
+
+def test_download_template_uses_stable_job_suffix_for_no_overwrite():
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.start_new_download)
+    assert 'download_id[:8]' in source
+    assert "'overwrites': False" in inspect.getsource(stratrum_download_studio.build_download_options)
+
+
+def test_profile_options_use_real_postprocessors(tmp_path):
+    compatible = {'formats': [{'ext': 'mp4', 'vcodec': 'avc1.640028', 'height': 1080}, {'ext': 'm4a', 'acodec': 'mp4a.40.2'}]}
+    mp4 = stratrum_download_studio.build_download_options('MP4', 'out', 1080, compatible)
+    fallback_mp4 = stratrum_download_studio.build_download_options('MP4', 'out', 1080, {})
+    assert mp4['merge_output_format'] == 'mp4' and 'postprocessors' not in mp4
+    assert fallback_mp4['postprocessors'][0] == {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}
+    assert stratrum_download_studio.build_download_options('AVI', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoConvertor'
+    assert stratrum_download_studio.build_download_options('MOV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoConvertor'
+    assert stratrum_download_studio.build_download_options('MKV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoRemuxer'
+    assert stratrum_download_studio.build_download_options('WEBM', 'out')['merge_output_format'] == 'webm'
+    for audio in ('MP3', 'M4A', 'WAV', 'FLAC'):
+        options = stratrum_download_studio.build_download_options(audio, 'out')
+        assert options['postprocessors'][0]['preferredcodec'] == audio.lower()
+
+
+def test_postprocessor_hook_path_is_final_candidate():
+    event = {'status': 'finished', 'info_dict': {'filepath': 'C:/downloads/final.mp4'}}
+    assert stratrum_download_studio.postprocessor_output_path(event) == 'C:/downloads/final.mp4'
+    assert stratrum_download_studio.postprocessor_output_path({'status': 'started', 'filename': 'intermediate.webm'}) is None
+
+
+def test_thumbnail_is_rejected_as_completed_media(tmp_path):
+    thumbnail = tmp_path / 'video.webp'; thumbnail.touch()
+    with pytest.raises(ValueError, match='Thumbnail'):
+        stratrum_download_studio.validate_final_media(thumbnail, tmp_path, 'MP4')
+
+
+@pytest.mark.parametrize('filename,profile', [('video.f140.m4a', 'M4A'), ('video.f251.webm', 'WEBM')])
+def test_intermediate_stream_is_rejected(filename, profile, tmp_path):
+    intermediate = tmp_path / filename; intermediate.touch()
+    with pytest.raises(ValueError, match='Intermediate'):
+        stratrum_download_studio.validate_final_media(intermediate, tmp_path, profile)
+
+
+@pytest.mark.parametrize('profile,streams,error', [('MP4', ['audio'], 'video stream'), ('MP3', ['video'], 'audio stream')])
+def test_stream_validation_requires_requested_media_kind(profile, streams, error, tmp_path):
+    extension = stratrum_download_studio.output_profile(profile).extension
+    output = tmp_path / f'bad.{extension}'; output.touch()
+    format_name = PROFILE_PROBES[profile][0]
+    with pytest.raises(ValueError, match=error):
+        stratrum_download_studio.validate_final_media(output, tmp_path, profile, probe_runner=probe_result(format_name, streams))
+
+
+def test_wrong_container_is_rejected_even_with_matching_extension(tmp_path):
+    output = tmp_path / 'fake.mp4'; output.touch()
+    with pytest.raises(ValueError, match='container'):
+        stratrum_download_studio.validate_final_media(output, tmp_path, 'MP4', probe_runner=probe_result('matroska', ['video']))
+
+
+def test_preexisting_output_is_not_accepted_as_new_final(tmp_path):
+    output = tmp_path / 'existing.mp4'; output.touch()
+    candidates = stratrum_download_studio.collect_output_candidates({}, [str(output)], tmp_path, 'mp4', {str(output.resolve())})
+    assert candidates == []
+
+
+def test_postprocessing_failure_retains_intermediate_and_never_completes(tmp_path, monkeypatch):
+    intermediate = tmp_path / 'video.f140.m4a'
+
+    class FailingYDL:
+        def __init__(self, options): self.options = options; self.params = options
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def extract_info(self, url, download=True):
+            intermediate.write_bytes(b'useful partial')
+            raise RuntimeError('merge failed https://example.com/media?secret=hidden')
+
+    monkeypatch.setattr(stratrum_download_studio.yt_dlp, 'YoutubeDL', FailingYDL)
+    thread = stratrum_download_studio.DownloadThread('id', 'https://example.com/media', str(tmp_path / '%(title)s.%(ext)s'), 'best', 'MP4', save_dir=tmp_path)
+    statuses, events = [], []
+    thread.status.connect(lambda *args: statuses.append(args))
+    thread.finished.connect(lambda *args: events.append(args))
+    thread.run()
+    assert intermediate.exists()
+    assert events[0][1] is False
+    assert '[URL omitted]' in events[0][2]
+    assert all(status[1] != 'Completed' for status in statuses)
+
+
+def test_verified_success_removes_only_known_intermediates(tmp_path):
+    final = tmp_path / 'final.mp4'; final.touch()
+    video_part = tmp_path / 'video.f137.mp4'; video_part.touch()
+    audio_part = tmp_path / 'video.f140.m4a'; audio_part.touch()
+    unrelated = tmp_path / 'keep.txt'; unrelated.touch()
+    removed = stratrum_download_studio.cleanup_verified_intermediates(
+        [video_part, audio_part, unrelated], final, tmp_path
+    )
+    assert set(removed) == {video_part.resolve(), audio_part.resolve()}
+    assert final.exists() and unrelated.exists()
+
+
+def sample_format_info():
+    return {'formats': [
+        {'format_id': 'v2160', 'height': 2160, 'vcodec': 'vp9', 'acodec': 'none', 'ext': 'webm', 'filesize': 40_000_000},
+        {'format_id': 'v1080', 'height': 1080, 'vcodec': 'avc1', 'acodec': 'none', 'ext': 'mp4', 'filesize_approx': 20_000_000},
+        {'format_id': 'v720', 'height': 720, 'vcodec': 'avc1', 'acodec': 'none', 'ext': 'mp4', 'filesize': 10_000_000},
+        {'format_id': 'a1', 'vcodec': 'none', 'acodec': 'mp4a.40.2', 'ext': 'm4a', 'filesize': 2_000_000},
+    ]}
+
+
+def test_resolution_availability_uses_stream_height_and_details():
+    options = stratrum_download_studio.available_resolution_options(sample_format_info())
+    assert [item['height'] for item in options] == [2160, 1080, 720]
+    assert options[1]['vcodec'] == 'avc1' and options[1]['acodec'] == 'mp4a.40.2'
+    detail = stratrum_download_studio.format_resolution_detail(options[1])
+    assert '1080p / Full HD' in detail and 'avc1' in detail and 'mp4a' in detail and 'MB' in detail
+
+
+def test_unavailable_resolution_falls_back_to_highest_below():
+    options = stratrum_download_studio.available_resolution_options(sample_format_info())
+    assert stratrum_download_studio.choose_resolution(options, 1440)['height'] == 1080
+    assert stratrum_download_studio.choose_resolution(options, 4320)['height'] == 2160
+    assert stratrum_download_studio.choose_resolution(options, None)['height'] == 2160
+
+
+def test_format_selector_uses_height_not_width():
+    selector = stratrum_download_studio.build_format_selector('MP4', 1080)
+    assert '[height<=1080]' in selector
+    assert 'width' not in selector
+
+
+def test_audio_profile_disables_resolution_selection(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, '')
+    dialog = stratrum_download_studio.DownloadFileInfoDialog(app_config=config)
+    dialog.resolution_options = stratrum_download_studio.available_resolution_options(sample_format_info())
+    dialog.ext_combo.setCurrentText('MP3')
+    dialog.on_ext_changed('MP3')
+    assert not dialog.resolution_combo.isEnabled()
+    assert 'Audio-only profile' in dialog.info_lbl.text()
+    dialog.close()
+
+
+def test_format_discovery_is_debounced_and_stale_results_ignored(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, '')
+    dialog = stratrum_download_studio.DownloadFileInfoDialog(app_config=config)
+    dialog.schedule_format_fetch(); first = dialog.fetch_generation
+    dialog.schedule_format_fetch(); second = dialog.fetch_generation
+    assert second == first + 1 and dialog.fetch_timer.isActive()
+    dialog.on_formats_ready(first, sample_format_info())
+    assert dialog.format_info == {}
+    dialog.close()
+
+
+# Phase 2A.5 job model, queue, capabilities, and preferences
+
+def make_job(tmp_path, state=stratrum_download_studio.JobState.QUEUED.value, extension='mp4'):
+    final_path = tmp_path / f'final.{extension}'
+    if state == stratrum_download_studio.JobState.COMPLETED.value:
+        final_path.touch()
+    return stratrum_download_studio.DownloadJob(
+        job_id='job-' + uuid.uuid4().hex, package_id='package-1', source_url='https://example.com/media?token=secret',
+        save_dir=str(tmp_path), requested_format=extension.upper(), requested_resolution=1080,
+        final_output_path=str(final_path) if final_path.exists() else '', state=state,
+    )
+
+
+def test_explicit_job_states_include_pipeline_and_terminal_states():
+    assert {state.value for state in stratrum_download_studio.JobState} == {
+        'queued', 'resolving', 'connecting', 'downloading', 'paused', 'merging', 'converting',
+        'verifying', 'completed', 'cancelled', 'retrying', 'failed'
+    }
+
+
+def test_job_model_persists_required_foundation_fields(tmp_path):
+    job = make_job(tmp_path)
+    payload = job.to_dict()
+    for field_name in ('job_id', 'package_id', 'source_url', 'final_output_path', 'temporary_paths', 'requested_format',
+                       'requested_resolution', 'actual_format', 'total_bytes', 'downloaded_bytes', 'speed', 'eta',
+                       'priority', 'queue_name', 'state', 'retry_count', 'error_summary', 'resumable',
+                       'created_at', 'started_at', 'completed_at'):
+        assert field_name in payload
+
+
+@pytest.mark.parametrize('state,capability,expected', [
+    ('downloading', 'pause', True), ('paused', 'resume', True), ('completed', 'convert', True),
+    ('completed', 'open', True), ('converting', 'delete', False), ('queued', 'edit', True),
+])
+def test_capability_based_commands(state, capability, expected, tmp_path):
+    job = make_job(tmp_path, state)
+    assert stratrum_download_studio.job_capabilities(job)[capability] is expected
+
+
+def test_conversion_enablement_rejects_audio_to_video(tmp_path):
+    audio = tmp_path / 'audio.m4a'; audio.touch()
+    video = tmp_path / 'video.webm'; video.touch()
+    assert not stratrum_download_studio.conversion_supported(audio, 'mp4')
+    assert stratrum_download_studio.conversion_supported(audio, 'mp3')
+    assert stratrum_download_studio.conversion_supported(audio, 'wav')
+    assert stratrum_download_studio.conversion_supported(audio, 'm4a')
+    assert stratrum_download_studio.conversion_supported(video, 'mp4')
+
+
+@pytest.mark.parametrize(('source_ext', 'target_ext'), [('m4a', 'mp3'), ('m4a', 'wav'), ('webm', 'mp4')])
+def test_required_conversions_produce_unique_real_output(source_ext, target_ext, tmp_path, monkeypatch):
+    source = tmp_path / f'input.{source_ext}'; source.touch()
+
+    def successful_run(args, **kwargs):
+        Path(args[-1]).write_bytes(b'converted')
+        return subprocess.CompletedProcess(args, 0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', successful_run)
+    event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), target_ext))
+    assert event[1] is True
+    assert Path(event[3]).suffix == f'.{target_ext}'
+    assert Path(event[3]).is_file()
+
+
+def test_conversion_failure_includes_safe_ffmpeg_summary(tmp_path, monkeypatch):
+    source = tmp_path / 'input.m4a'; source.touch()
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout=b'', stderr=b'ffmpeg failed https://signed.example/file?token=secret'))
+    event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
+    assert event[1] is False
+    assert '[URL omitted]' in event[2]
+    assert 'token=secret' not in event[2]
+
+
+def test_conversion_can_be_cancelled_before_ffmpeg_starts(tmp_path, monkeypatch):
+    source = tmp_path / 'input.m4a'; source.touch()
+    called = []
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', lambda *args, **kwargs: called.append(args))
+    thread = stratrum_download_studio.ConvertThread('id', str(source), 'mp3'); thread.cancel()
+    event = run_conversion(thread)
+    assert event[1] is False and 'cancelled' in event[2].lower()
+    assert called == []
+
+
+def test_recent_folders_are_unique_mru_bounded_and_persisted(tmp_path):
+    config_root = tmp_path / 'config-root'; folders = []
+    config = stratrum_download_studio.initialize_runtime(config_root, TOKEN, '')
+    for index in range(12):
+        folder = tmp_path / f'folder-{index}'; folder.mkdir(); folders.append(folder)
+        assert config.add_recent_folder(folder)
+    config.add_recent_folder(folders[5])
+    assert len(config.recent_folders) == 10
+    assert config.recent_folders[0] == str(folders[5].resolve())
+    assert len(config.recent_folders) == len(set(config.recent_folders))
+    assert stratrum_download_studio.initialize_runtime(config_root).recent_folders == config.recent_folders
+
+
+def test_nonexistent_recent_folders_are_removed_and_clear_works(tmp_path):
+    existing = tmp_path / 'existing'; existing.mkdir()
+    root = tmp_path / 'root'; config_path = root / 'config' / 'config.json'; config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({'auth_token': TOKEN, 'allowed_origins': [], 'recent_folders': [str(existing), str(tmp_path / 'missing')]}), encoding='utf-8')
+    config = stratrum_download_studio.initialize_runtime(root)
+    assert config.recent_folders == [str(existing.resolve())]
+    config.clear_recent_folders(); assert config.recent_folders == []
+
+
+def test_download_manager_queue_priority_retry_and_recovery(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path / 'config', TOKEN, '')
+    queue_path = tmp_path / 'queue.json'; manager = stratrum_download_studio.DownloadManager(config, queue_path)
+    first, second = make_job(tmp_path), make_job(tmp_path)
+    manager.add_job(first); manager.add_job(second); manager.move(second.job_id, -1)
+    assert manager.queue[0] == second.job_id
+    manager.set_state(first.job_id, stratrum_download_studio.JobState.DOWNLOADING)
+    assert manager.active_count() == 1
+    manager.set_state(first.job_id, stratrum_download_studio.JobState.FAILED, 'network failed')
+    assert manager.retry(first.job_id) and first.retry_count == 1
+    recovered = stratrum_download_studio.DownloadManager(config, queue_path)
+    assert recovered.jobs[first.job_id].state in {'paused', 'queued'}
+
+
+def test_queue_concurrency_and_stop_after_current(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path / 'config', TOKEN, '')
+    config.max_simultaneous_downloads = 1
+    manager = stratrum_download_studio.DownloadManager(config, tmp_path / 'queue.json')
+    first, second = make_job(tmp_path), make_job(tmp_path); manager.add_job(first); manager.add_job(second)
+    manager.set_state(first.job_id, stratrum_download_studio.JobState.DOWNLOADING)
+    assert not manager.can_start_more()
+    manager.set_state(first.job_id, stratrum_download_studio.JobState.COMPLETED)
+    assert manager.can_start_more()
+    manager.stop_after_current = True
+    assert not manager.can_start_more()
+
+
+def test_sanitized_source_url_removes_credentials_query_and_fragment():
+    sanitized = stratrum_download_studio.sanitize_source_url('https://user:pass@example.com/video?id=secret#part')
+    assert sanitized == 'https://example.com/video'
+
+
+# Phase 2A.5 popup, menu, launcher, and responsive foundation
+
+def test_popup_pause_and_resume_route_exact_job_id():
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='job-123')
+    paused, resumed = [], []
+    popup.pause_requested.connect(paused.append); popup.resume_requested.connect(resumed.append)
+    popup.set_job_state('downloading'); popup.pause_btn.click()
+    popup.set_job_state('paused'); popup.pause_btn.click()
+    assert paused == ['job-123'] and resumed == ['job-123']
+    popup.close()
+
+
+def test_popup_cancel_routes_partial_choice(monkeypatch):
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='job-456')
+    emitted = []; popup.cancel_requested.connect(lambda *args: emitted.append(args))
+
+    class FakeMessageBox:
+        ButtonRole = stratrum_download_studio.QMessageBox.ButtonRole
+        def __init__(self, parent=None): self.buttons = []
+        def setWindowTitle(self, value): pass
+        def setText(self, value): pass
+        def addButton(self, text, role):
+            button = object(); self.buttons.append((text, button)); return button
+        def exec(self): pass
+        def clickedButton(self): return self.buttons[1][1]
+
+    monkeypatch.setattr(stratrum_download_studio, 'QMessageBox', FakeMessageBox)
+    popup.request_cancel()
+    assert emitted == [('job-456', True)]
+    popup.close()
+
+
+def test_popup_speed_limit_and_completion_actions():
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='job-speed')
+    limits = []; popup.speed_limit_changed.connect(lambda *args: limits.append(args))
+    popup.speed_unit_combo.setCurrentText('MB/s'); popup.speed_value_spin.setValue(2); popup.apply_speed_limit()
+    assert limits == [('job-speed', 2 * 1024 * 1024)]
+    index = popup.completion_combo.findData('convert_mp3'); popup.completion_combo.setCurrentIndex(index)
+    assert popup.completion_action() == 'convert_mp3'
+    assert not hasattr(popup, 'conn_table')
+    popup.close()
+
+
+def test_visible_menu_actions_are_functional_or_disabled():
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_ui)
+    for functional in ('Quick Start', 'Supported Sites', 'Open Logs / Diagnostics', 'About Stratrum Download Studio', 'Reset Column Layout'):
+        assert functional in source
+    assert 'setEnabled(False)' in source
+    assert 'coming soon' not in source.lower()
+
+
+def test_share_requires_selection_and_offers_copy_and_open():
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.share_link)
+    assert 'Select a download row' in source
+    assert 'Copy Source URL' in source
+    assert 'Open Source Page' in source
+
+
+def test_progress_updates_are_throttled_to_at_most_about_ten_hz():
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.update_progress)
+    assert '< 0.12' in source
+
+
+def test_ui_preferences_are_atomic_config_fields(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, '')
+    config.window_size = [900, 600]; config.splitter_sizes = [180, 720]; config.column_widths = [300, 50]
+    config.hidden_columns = [6]; config.preferred_format = 'MKV'; config.preferred_resolution = 720
+    config.max_simultaneous_downloads = 3; config.speed_limit_bps = 1024; config.completion_action = 'open_folder'; config.persist()
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    assert restored.window_size == [900, 600] and restored.splitter_sizes == [180, 720]
+    assert restored.hidden_columns == [6] and restored.preferred_format == 'MKV' and restored.preferred_resolution == 720
+    assert restored.max_simultaneous_downloads == 3 and restored.speed_limit_bps == 1024 and restored.completion_action == 'open_folder'
+
+
+def test_no_console_launcher_calls_testable_main_and_spec_stays_windowed():
+    launcher = Path('StratrumDownloadStudio.pyw').read_text(encoding='utf-8')
+    spec = Path('StratrumDownloadStudio.spec').read_text(encoding='utf-8')
+    assert 'from stratrum_download_studio import main' in launcher
+    assert 'SystemExit(main())' in launcher
+    assert 'console=False' in spec
+
+
+def test_diagnostics_and_properties_sanitize_sensitive_urls():
+    diagnostics = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.export_diagnostics)
+    properties = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.show_properties)
+    assert 'sanitize_source_url' in diagnostics and 'sanitize_source_url' in properties
+    assert 'auth_token' not in diagnostics and 'cookies' not in diagnostics

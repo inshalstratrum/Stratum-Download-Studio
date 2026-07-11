@@ -50,3 +50,22 @@ Status: not yet performed. Use only media and URLs the tester owns or is authori
 29. Run `Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue` and confirm no application listener remains.
 
 Chrome consumer release requires Chrome Web Store publication, Edge consumer release requires Edge Add-ons publication, and enterprise force-install policies are not a normal-customer installation path. A future desktop installer may offer a user-confirmed extension suggestion after installation, but silent consumer installation is not permitted.
+
+## Phase 2A.5 media-output and functional-control checks
+
+Use only local samples and online media the tester owns or is explicitly authorized to download.
+
+30. For one authorized video, download MP4, MKV, WebM, AVI, and MOV profiles. Use `ffprobe` to confirm each final file's real container, video stream, and requested extension. Confirm no thumbnail or `.f###` intermediate appears as a separate completed job.
+31. For one authorized audio/video source, download MP3, M4A, WAV, and FLAC profiles. Confirm each final file has an audio stream and the real requested codec/container.
+32. Force an FFmpeg/postprocessing failure with a disposable sample. Confirm useful intermediate files remain, the job is Failed rather than Complete, and the safe error distinguishes merge, conversion, or verification failure.
+33. Inspect a source with 2160p, 1080p, and 720p streams. Confirm only available heights appear, codec/container/estimated-size details are shown, and selecting unavailable 1440p falls back visibly to 1080p. Repeat with portrait video to confirm selection uses height, not width.
+34. Select an audio-only profile and confirm Resolution is disabled.
+35. Add more than ten valid save folders, reuse one, restart, and confirm only ten unique existing folders remain with the latest first. Use **Clear Recent Folders** in Options.
+36. Convert an authorized M4A to MP3 and WAV and a WebM video to MP4. Confirm unique names, no overwrite, real outputs, visible Converting state, success dialog, and Open Folder. Confirm audio-only to MP4 is unavailable.
+37. In a live download popup, Pause and Resume the exact job and confirm the partial file is reused. Cancel once while keeping partial data and once while removing it; neither cancellation may produce Complete.
+38. Apply Unlimited, KB/s, and MB/s limits to the current job and confirm the active limit is shown and affects transfer rate.
+39. Test every completion option: keep open, close popup, open folder, safely open media, supported conversion, and exit only after all jobs finish. Confirm the action executes before popup closure. Confirm no system-shutdown option exists.
+40. Verify View sidebar/toolbar toggles, column hide/restore/reset, Quick Start, Supported Sites, sanitized Diagnostics export, About, Properties, Share Copy/Open, queue Move Up/Down, Retry, and Stop After Current Jobs.
+41. Confirm Batch Download, Site Grabber, and Registration are visibly disabled with scope explanations and no normal-product "coming soon" popup appears.
+42. Start two downloads with maximum simultaneous downloads set to one. Confirm the second remains Queued, then starts after the first finishes. Interrupt the app during an incomplete job, restart, and confirm a recoverable Paused/Queued job appears.
+43. Double-click `StratrumDownloadStudio.pyw` on Windows and confirm no console window appears. Confirm packaged releases use `StratrumDownloadStudio.exe`; the `.py` source remains a development/test entrypoint only.

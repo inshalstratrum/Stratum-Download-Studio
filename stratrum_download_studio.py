@@ -14,7 +14,9 @@ import string
 import threading
 import time
 import math
-from dataclasses import dataclass, field
+import webbrowser
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 from pathlib import Path
 import yt_dlp
 
@@ -22,6 +24,9 @@ APP_NAME = "Stratrum Download Studio"
 MAX_REQUEST_BODY = 16 * 1024
 CONVERSION_TIMEOUT_SECONDS = 30 * 60
 MAX_PAIRED_ORIGINS = 6
+MAX_RECENT_FOLDERS = 10
+DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS = 2
+MAX_RETRY_ATTEMPTS = 3
 _conversion_name_lock = threading.Lock()
 
 
@@ -57,10 +62,10 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSystemTrayIcon, QMenu, QStyle, QSpinBox, QVBoxLayout,
     QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem,
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
-    QWidget, QGridLayout, QCheckBox
+    QWidget, QGridLayout, QCheckBox, QTextEdit
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl
-from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer
+from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices, QCursor
 
 # ==========================================
 # MODERN UI STYLESHEET
@@ -87,6 +92,13 @@ def get_ffmpeg_path():
     local_ffmpeg = os.path.join(base_dir, 'ffmpeg.exe')
     if os.path.exists(local_ffmpeg): return local_ffmpeg
     return 'ffmpeg'
+
+
+def get_ffprobe_path():
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, 'ffprobe.exe')
+    local_ffprobe = Path(__file__).resolve().parent / 'ffprobe.exe'
+    return str(local_ffprobe) if local_ffprobe.exists() else 'ffprobe'
 
 def validate_token(token):
     return isinstance(token, str) and len(token) == 64 and all(c in string.hexdigits for c in token)
@@ -147,6 +159,17 @@ class AppConfig:
     auth_token: str
     allowed_origins: list[str]
     rate_limiter: RateLimiter
+    recent_folders: list[str] = field(default_factory=list)
+    preferred_format: str = 'MP4'
+    preferred_resolution: int | None = None
+    max_simultaneous_downloads: int = DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS
+    speed_limit_bps: int = 0
+    completion_action: str = 'keep_open'
+    stop_after_current: bool = False
+    window_size: list[int] = field(default_factory=lambda: [1150, 680])
+    splitter_sizes: list[int] = field(default_factory=lambda: [200, 950])
+    column_widths: list[int] = field(default_factory=list)
+    hidden_columns: list[int] = field(default_factory=list)
     state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     @property
@@ -161,6 +184,17 @@ class AppConfig:
         return {
             'auth_token': self.auth_token,
             'allowed_origins': list(self.allowed_origins),
+            'recent_folders': list(self.recent_folders),
+            'preferred_format': self.preferred_format,
+            'preferred_resolution': self.preferred_resolution,
+            'max_simultaneous_downloads': self.max_simultaneous_downloads,
+            'speed_limit_bps': self.speed_limit_bps,
+            'completion_action': self.completion_action,
+            'stop_after_current': self.stop_after_current,
+            'window_size': list(self.window_size),
+            'splitter_sizes': list(self.splitter_sizes),
+            'column_widths': list(self.column_widths),
+            'hidden_columns': list(self.hidden_columns),
         }
 
     def persist(self):
@@ -210,6 +244,22 @@ class AppConfig:
                 raise
             return True
 
+    def add_recent_folder(self, folder):
+        candidate = Path(folder).expanduser()
+        if not candidate.is_dir():
+            return False
+        resolved = str(candidate.resolve())
+        with self.state_lock:
+            updated = [resolved] + [item for item in self.recent_folders if item != resolved and Path(item).is_dir()]
+            self.recent_folders = updated[:MAX_RECENT_FOLDERS]
+            self.persist()
+        return True
+
+    def clear_recent_folders(self):
+        with self.state_lock:
+            self.recent_folders.clear()
+            self.persist()
+
 
 class PairingLimitError(ValueError):
     pass
@@ -225,6 +275,32 @@ def normalize_allowed_origins(origins):
         if len(normalized) == MAX_PAIRED_ORIGINS:
             break
     return normalized
+
+
+def normalize_recent_folders(folders):
+    normalized = []
+    if not isinstance(folders, list):
+        return normalized
+    for folder in folders:
+        if not isinstance(folder, str):
+            continue
+        candidate = Path(folder).expanduser()
+        if not candidate.is_dir():
+            continue
+        resolved = str(candidate.resolve())
+        if resolved not in normalized:
+            normalized.append(resolved)
+        if len(normalized) == MAX_RECENT_FOLDERS:
+            break
+    return normalized
+
+
+def bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
@@ -264,6 +340,17 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         auth_token=selected_token,
         allowed_origins=selected_origins,
         rate_limiter=rate_limiter or RateLimiter(5, 1.0),
+        recent_folders=normalize_recent_folders(stored.get('recent_folders', [])),
+        preferred_format=stored.get('preferred_format', 'MP4') if stored.get('preferred_format', 'MP4') in {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV', 'MP3', 'M4A', 'WAV', 'FLAC'} else 'MP4',
+        preferred_resolution=stored.get('preferred_resolution') if stored.get('preferred_resolution') in {None, 240, 360, 480, 720, 1080, 1440, 2160, 4320} else None,
+        max_simultaneous_downloads=bounded_int(stored.get('max_simultaneous_downloads'), DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS, 1, 8),
+        speed_limit_bps=bounded_int(stored.get('speed_limit_bps'), 0, 0, 1024 * 1024 * 1024),
+        completion_action=stored.get('completion_action', 'keep_open'),
+        stop_after_current=bool(stored.get('stop_after_current', False)),
+        window_size=stored.get('window_size', [1150, 680]) if isinstance(stored.get('window_size', [1150, 680]), list) else [1150, 680],
+        splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
+        column_widths=stored.get('column_widths', []) if isinstance(stored.get('column_widths', []), list) else [],
+        hidden_columns=stored.get('hidden_columns', []) if isinstance(stored.get('hidden_columns', []), list) else [],
     )
     runtime.history_path.parent.mkdir(parents=True, exist_ok=True)
     runtime.persist()
@@ -445,6 +532,494 @@ def store_conversion_output(download_record, output_path):
     download_record['converted_output_path'] = str(converted_path)
     return converted_path
 
+
+VIDEO_EXTENSIONS = {'mp4', 'mkv', 'webm', 'avi', 'mov'}
+AUDIO_EXTENSIONS = {'mp3', 'm4a', 'wav', 'flac'}
+THUMBNAIL_EXTENSIONS = {'.webp', '.jpg', '.jpeg', '.png', '.gif'}
+RESOLUTION_LABELS = {
+    4320: '4320p / 8K (7680x4320)',
+    2160: '2160p / 4K (3840x2160)',
+    1440: '1440p (2560x1440)',
+    1080: '1080p / Full HD (1920x1080)',
+    720: '720p / HD (1280x720)',
+    480: '480p / SD (854x480)',
+    360: '360p (640x360)',
+    240: '240p (426x240)',
+}
+
+
+@dataclass(frozen=True)
+class OutputProfile:
+    extension: str
+    media_kind: str
+    container: str
+    audio_codec: str | None = None
+    explicit_conversion: bool = False
+
+
+OUTPUT_PROFILES = {
+    'MP4': OutputProfile('mp4', 'video', 'mp4'),
+    'MKV': OutputProfile('mkv', 'video', 'matroska'),
+    'WEBM': OutputProfile('webm', 'video', 'webm'),
+    'AVI': OutputProfile('avi', 'video', 'avi', explicit_conversion=True),
+    'MOV': OutputProfile('mov', 'video', 'mov', explicit_conversion=True),
+    'MP3': OutputProfile('mp3', 'audio', 'mp3', 'mp3'),
+    'M4A': OutputProfile('m4a', 'audio', 'm4a', 'm4a'),
+    'WAV': OutputProfile('wav', 'audio', 'wav', 'wav'),
+    'FLAC': OutputProfile('flac', 'audio', 'flac', 'flac'),
+}
+
+
+def output_profile(name):
+    try:
+        return OUTPUT_PROFILES[str(name).upper()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported output profile: {name}") from exc
+
+
+def format_resolution_detail(option):
+    size = format_bytes(option.get('estimated_size')) if option.get('estimated_size') else 'size unknown'
+    return (
+        f"{RESOLUTION_LABELS.get(option['height'], str(option['height']) + 'p')} — "
+        f"video {option.get('vcodec') or 'unknown'} / audio {option.get('acodec') or 'separate'} / "
+        f"{option.get('container') or 'unknown'} / {size}"
+    )
+
+
+def available_resolution_options(info):
+    formats = info.get('formats', []) if isinstance(info, dict) else []
+    best_audio = next((fmt for fmt in reversed(formats) if fmt.get('acodec') not in {None, 'none'}), {})
+    by_height = {}
+    for fmt in formats:
+        height = fmt.get('height')
+        if height not in RESOLUTION_LABELS or fmt.get('vcodec') in {None, 'none'}:
+            continue
+        size = fmt.get('filesize') or fmt.get('filesize_approx')
+        current = by_height.get(height)
+        if current is None or (size or 0) > (current.get('estimated_size') or 0):
+            by_height[height] = {
+                'height': height,
+                'format_id': fmt.get('format_id'),
+                'vcodec': fmt.get('vcodec'),
+                'acodec': fmt.get('acodec') if fmt.get('acodec') not in {None, 'none'} else best_audio.get('acodec'),
+                'container': fmt.get('ext'),
+                'estimated_size': size,
+            }
+    return [by_height[height] for height in sorted(by_height, reverse=True)]
+
+
+def choose_resolution(options, requested_height=None):
+    if not options:
+        return None
+    ordered = sorted(options, key=lambda item: item['height'], reverse=True)
+    if requested_height is None:
+        return ordered[0]
+    exact = next((item for item in ordered if item['height'] == requested_height), None)
+    if exact:
+        return exact
+    return next((item for item in ordered if item['height'] < requested_height), ordered[-1])
+
+
+def mp4_compatible_streams_available(info, height=None):
+    formats = info.get('formats', []) if isinstance(info, dict) else []
+    video = any(
+        fmt.get('ext') == 'mp4'
+        and str(fmt.get('vcodec', '')).lower().startswith(('avc', 'h264'))
+        and (height is None or not fmt.get('height') or fmt.get('height') <= height)
+        for fmt in formats
+    )
+    audio = any(
+        fmt.get('ext') in {'m4a', 'mp4'} and str(fmt.get('acodec', '')).lower().startswith(('aac', 'mp4a'))
+        for fmt in formats
+    )
+    return video and audio
+
+
+def build_format_selector(profile_name, height=None):
+    profile = output_profile(profile_name)
+    if profile.media_kind == 'audio':
+        return 'bestaudio/best'
+    height_filter = f'[height<={int(height)}]' if height else ''
+    if profile.extension == 'mp4':
+        return (
+            f'bestvideo{height_filter}[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/'
+            f'bestvideo{height_filter}+bestaudio/best{height_filter}/best'
+        )
+    if profile.extension == 'webm':
+        return f'bestvideo{height_filter}[ext=webm]+bestaudio[ext=webm]/bestvideo{height_filter}+bestaudio/best'
+    return f'bestvideo{height_filter}+bestaudio/best{height_filter}/best'
+
+
+def build_download_options(profile_name, outtmpl, height=None, metadata=None,
+                           progress_hooks=None, postprocessor_hooks=None, speed_limit_bps=0):
+    profile = output_profile(profile_name)
+    options = {
+        'outtmpl': outtmpl,
+        'format': build_format_selector(profile_name, height),
+        'progress_hooks': list(progress_hooks or []),
+        'postprocessor_hooks': list(postprocessor_hooks or []),
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'continuedl': True,
+        'overwrites': False,
+        'ffmpeg_location': get_ffmpeg_path(),
+        'concurrent_fragment_downloads': 10,
+        'buffersize': 1024 * 32,
+    }
+    if speed_limit_bps:
+        options['ratelimit'] = int(speed_limit_bps)
+    if profile.media_kind == 'audio':
+        options['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': profile.audio_codec,
+            'preferredquality': '192',
+        }]
+    elif profile.extension in {'avi', 'mov'}:
+        options['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': profile.extension}]
+    elif profile.extension == 'mp4':
+        options['merge_output_format'] = 'mp4'
+        if not mp4_compatible_streams_available(metadata or {}, height):
+            options['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
+    else:
+        options['merge_output_format'] = profile.extension
+        options['postprocessors'] = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': profile.extension}]
+    return options
+
+
+def postprocessor_output_path(event):
+    if not isinstance(event, dict) or event.get('status') != 'finished':
+        return None
+    info = event.get('info_dict') if isinstance(event.get('info_dict'), dict) else {}
+    return event.get('filepath') or event.get('filename') or info.get('filepath') or info.get('_filename')
+
+
+def collect_output_candidates(info, postprocessed_paths, save_dir, extension, preexisting=None):
+    candidates = []
+    candidates.extend(path for path in postprocessed_paths if path)
+    if isinstance(info, dict):
+        candidates.extend(info.get(key) for key in ('filepath', '_filename') if info.get(key))
+        moves = info.get('__files_to_move') if isinstance(info.get('__files_to_move'), dict) else {}
+        candidates.extend(moves.values())
+        downloads = info.get('requested_downloads') if isinstance(info.get('requested_downloads'), list) else []
+        for item in downloads:
+            if isinstance(item, dict):
+                candidates.extend(item.get(key) for key in ('filepath', '_filename') if item.get(key))
+    before = {str(Path(path).resolve()) for path in (preexisting or set())}
+    for path in Path(save_dir).glob(f'*.{extension}'):
+        if str(path.resolve()) not in before:
+            candidates.append(str(path))
+    unique = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            resolved = str(Path(candidate).resolve())
+        except OSError:
+            resolved = str(candidate)
+        if resolved in before:
+            continue
+        if str(candidate) not in unique:
+            unique.append(str(candidate))
+    return unique
+
+
+def probe_media_file(path, runner=None):
+    runner = runner or subprocess.run
+    command = [
+        get_ffprobe_path(), '-v', 'error', '-show_entries', 'format=format_name:stream=codec_type,codec_name,width,height',
+        '-of', 'json', str(path),
+    ]
+    kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'timeout': 30}
+    creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    if creation_flags:
+        kwargs['creationflags'] = creation_flags
+    result = runner(command, **kwargs)
+    if result.returncode != 0:
+        summary = clean_error_summary(result.stderr)
+        raise ValueError(f"ffprobe validation failed: {summary}")
+    try:
+        payload = json.loads(result.stdout.decode('utf-8') if isinstance(result.stdout, bytes) else result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("ffprobe returned malformed metadata") from exc
+    return {
+        'format_name': payload.get('format', {}).get('format_name', ''),
+        'streams': payload.get('streams', []),
+    }
+
+
+def validate_final_media(path, save_dir, profile_name, probe_runner=None):
+    profile = output_profile(profile_name)
+    candidate = Path(path).resolve(strict=True)
+    root = Path(save_dir).resolve(strict=True)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Final output is outside the selected save directory") from exc
+    if not candidate.is_file():
+        raise ValueError("Final output is not a file")
+    if candidate.suffix.lower() in THUMBNAIL_EXTENSIONS:
+        raise ValueError("Thumbnail files cannot be completed media outputs")
+    if candidate.suffix.lower() != f'.{profile.extension}':
+        raise ValueError(f"Final output extension does not match requested {profile.extension.upper()} profile")
+    if re.search(r'\.f\d+\.', candidate.name, re.IGNORECASE):
+        raise ValueError("Intermediate media stream cannot be reported as final output")
+    probe = probe_media_file(candidate, runner=probe_runner)
+    stream_types = {stream.get('codec_type') for stream in probe['streams'] if isinstance(stream, dict)}
+    required_stream = 'video' if profile.media_kind == 'video' else 'audio'
+    if required_stream not in stream_types:
+        raise ValueError(f"Final {profile.media_kind} output has no {required_stream} stream")
+    format_name = probe.get('format_name', '').lower()
+    expected_formats = {
+        'mp4': {'mp4', 'mov'}, 'mov': {'mp4', 'mov'}, 'm4a': {'mp4', 'mov', 'm4a'},
+        'mkv': {'matroska'}, 'webm': {'webm', 'matroska'}, 'avi': {'avi'},
+        'mp3': {'mp3'}, 'wav': {'wav'}, 'flac': {'flac'},
+    }[profile.extension]
+    if not any(token in format_name.split(',') for token in expected_formats):
+        raise ValueError(f"ffprobe container does not match requested {profile.extension.upper()} profile")
+    return candidate, probe
+
+
+def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None):
+    profile = output_profile(profile_name)
+    candidates = collect_output_candidates(info, postprocessed_paths, save_dir, profile.extension, preexisting)
+    valid = []
+    errors = []
+    for candidate in candidates:
+        try:
+            validated, probe = validate_final_media(candidate, save_dir, profile_name, probe_runner)
+            valid.append((validated.stat().st_mtime_ns, validated, probe))
+        except (OSError, ValueError) as exc:
+            errors.append(str(exc))
+    if not valid:
+        summary = errors[-1] if errors else f"No postprocessed .{profile.extension} output was produced"
+        raise ValueError(summary)
+    _, path, probe = max(valid, key=lambda item: item[0])
+    return path, probe
+
+
+def cleanup_verified_intermediates(paths, final_path, save_dir):
+    root = Path(save_dir).resolve(strict=True)
+    final = Path(final_path).resolve(strict=True)
+    removed = []
+    for raw_path in paths:
+        try:
+            candidate = Path(raw_path).resolve(strict=True)
+            candidate.relative_to(root)
+            if candidate == final or not candidate.is_file():
+                continue
+            if re.search(r'\.f\d+\.', candidate.name, re.IGNORECASE) or '.part' in candidate.name or candidate.suffix.lower() == '.ytdl':
+                candidate.unlink(); removed.append(candidate)
+        except (OSError, ValueError):
+            continue
+    return removed
+
+
+def clean_error_summary(value, limit=400):
+    text = value.decode('utf-8', errors='replace') if isinstance(value, bytes) else str(value or '')
+    text = ANSI_ESCAPE_RE.sub('', text) if 'ANSI_ESCAPE_RE' in globals() else re.sub(r'\x1b\[[0-9;]*m', '', text)
+    text = re.sub(r'https?://\S+', '[URL omitted]', text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return (lines[-1] if lines else 'No diagnostic details available')[:limit]
+
+
+class JobState(str, Enum):
+    QUEUED = 'queued'
+    RESOLVING = 'resolving'
+    CONNECTING = 'connecting'
+    DOWNLOADING = 'downloading'
+    PAUSED = 'paused'
+    MERGING = 'merging'
+    CONVERTING = 'converting'
+    VERIFYING = 'verifying'
+    COMPLETED = 'completed'
+    CANCELLED = 'cancelled'
+    RETRYING = 'retrying'
+    FAILED = 'failed'
+
+
+@dataclass
+class DownloadJob:
+    job_id: str
+    source_url: str
+    save_dir: str
+    requested_format: str
+    requested_resolution: int | None = None
+    package_id: str | None = None
+    final_output_path: str = ''
+    temporary_paths: list[str] = field(default_factory=list)
+    actual_format: str = ''
+    actual_resolution: int | None = None
+    total_bytes: int = 0
+    downloaded_bytes: int = 0
+    speed: float = 0.0
+    eta: int | None = None
+    priority: int = 0
+    queue_name: str = 'Default'
+    state: str = JobState.QUEUED.value
+    retry_count: int = 0
+    error_summary: str = ''
+    resumable: bool = True
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec='seconds'))
+    started_at: str = ''
+    completed_at: str = ''
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload):
+        allowed = cls.__dataclass_fields__.keys()
+        values = {key: payload[key] for key in allowed if key in payload}
+        job = cls(**values)
+        if job.state not in {state.value for state in JobState}:
+            job.state = JobState.FAILED.value
+            job.error_summary = 'Recovered job had an invalid state'
+        if job.state in {JobState.RESOLVING.value, JobState.CONNECTING.value, JobState.DOWNLOADING.value,
+                         JobState.MERGING.value, JobState.CONVERTING.value, JobState.VERIFYING.value,
+                         JobState.RETRYING.value}:
+            job.state = JobState.PAUSED.value if job.resumable else JobState.QUEUED.value
+            job.error_summary = 'Recovered after an unexpected application exit'
+        return job
+
+
+def job_capabilities(job):
+    state = JobState(job.state)
+    final_exists = bool(job.final_output_path and Path(job.final_output_path).is_file())
+    supported_input = Path(job.final_output_path).suffix.lower().lstrip('.') in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+    return {
+        'resume': state in {JobState.PAUSED, JobState.FAILED, JobState.RETRYING} and job.resumable,
+        'pause': state == JobState.DOWNLOADING,
+        'stop': state in {JobState.QUEUED, JobState.RESOLVING, JobState.CONNECTING, JobState.DOWNLOADING, JobState.RETRYING, JobState.CONVERTING},
+        'convert': state == JobState.COMPLETED and final_exists and supported_input,
+        'open': state == JobState.COMPLETED and final_exists,
+        'open_folder': state == JobState.COMPLETED and final_exists,
+        'delete': state not in {JobState.MERGING, JobState.CONVERTING, JobState.VERIFYING},
+        'edit': state in {JobState.QUEUED, JobState.PAUSED, JobState.FAILED},
+    }
+
+
+class DownloadManager(QObject):
+    job_changed = pyqtSignal(str, str)
+
+    def __init__(self, app_config, queue_path=None):
+        super().__init__()
+        self.app_config = app_config
+        self.queue_path = Path(queue_path) if queue_path else app_config.app_data_root / 'history' / 'queue.json'
+        self.jobs = {}
+        self.queue = []
+        self.stop_after_current = app_config.stop_after_current
+        self.load()
+
+    def add_job(self, job):
+        self.jobs[job.job_id] = job
+        if job.job_id not in self.queue:
+            self.queue.append(job.job_id)
+        self.persist()
+        self.job_changed.emit(job.job_id, job.state)
+        return job
+
+    def set_state(self, job_id, state, error=''):
+        job = self.jobs[job_id]
+        state_value = state.value if isinstance(state, JobState) else str(state)
+        job.state = state_value
+        if state_value == JobState.DOWNLOADING.value and not job.started_at:
+            job.started_at = datetime.now().isoformat(timespec='seconds')
+        if state_value == JobState.COMPLETED.value:
+            job.completed_at = datetime.now().isoformat(timespec='seconds')
+        if error:
+            job.error_summary = clean_error_summary(error)
+        self.persist()
+        self.job_changed.emit(job_id, state_value)
+
+    def update_progress(self, job_id, downloaded=0, total=0, speed=0, eta=None):
+        job = self.jobs[job_id]
+        job.downloaded_bytes = int(max(0, downloaded or 0))
+        job.total_bytes = int(max(0, total or 0))
+        job.speed = float(max(0, speed or 0))
+        job.eta = int(eta) if eta is not None else None
+
+    def move(self, job_id, offset):
+        index = self.queue.index(job_id)
+        target = max(0, min(len(self.queue) - 1, index + offset))
+        self.queue.insert(target, self.queue.pop(index))
+        self.persist()
+
+    def active_count(self):
+        active = {JobState.RESOLVING.value, JobState.CONNECTING.value, JobState.DOWNLOADING.value,
+                  JobState.MERGING.value, JobState.CONVERTING.value, JobState.VERIFYING.value}
+        return sum(job.state in active for job in self.jobs.values())
+
+    def pending_jobs(self):
+        return [self.jobs[job_id] for job_id in self.queue if self.jobs[job_id].state == JobState.QUEUED.value]
+
+    def can_start_more(self):
+        return not self.stop_after_current and self.active_count() < self.app_config.max_simultaneous_downloads
+
+    def retry(self, job_id):
+        job = self.jobs[job_id]
+        if job.retry_count >= MAX_RETRY_ATTEMPTS:
+            return False
+        job.retry_count += 1
+        self.set_state(job_id, JobState.RETRYING)
+        return True
+
+    def persist(self):
+        recoverable_states = {
+            JobState.QUEUED.value, JobState.RESOLVING.value, JobState.CONNECTING.value,
+            JobState.DOWNLOADING.value, JobState.PAUSED.value, JobState.MERGING.value,
+            JobState.CONVERTING.value, JobState.VERIFYING.value, JobState.RETRYING.value, JobState.FAILED.value,
+        }
+        recoverable = [job_id for job_id in self.queue if job_id in self.jobs and self.jobs[job_id].state in recoverable_states][-500:]
+        payload = {'queue': recoverable, 'jobs': [self.jobs[job_id].to_dict() for job_id in recoverable]}
+        atomic_write_json(self.queue_path, payload)
+
+    def load(self):
+        if not self.queue_path.exists():
+            return
+        if self.queue_path.stat().st_size > 2 * 1024 * 1024:
+            os.replace(self.queue_path, self.queue_path.with_suffix(self.queue_path.suffix + '.oversize'))
+            return
+        try:
+            payload = json.loads(self.queue_path.read_text(encoding='utf-8'))
+            for item in payload.get('jobs', []):
+                job = DownloadJob.from_dict(item)
+                self.jobs[job.job_id] = job
+            self.queue = [job_id for job_id in payload.get('queue', []) if job_id in self.jobs]
+            for job_id in self.jobs:
+                if job_id not in self.queue:
+                    self.queue.append(job_id)
+            self.persist()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            corrupt = self.queue_path.with_suffix(self.queue_path.suffix + '.corrupt')
+            try:
+                os.replace(self.queue_path, corrupt)
+            except OSError:
+                pass
+
+
+def sanitize_source_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname or ''
+        if parsed.port:
+            host = f'{host}:{parsed.port}'
+        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, '', ''))
+    except (TypeError, ValueError):
+        return '[invalid URL]'
+
+
+def conversion_supported(input_path, target_ext):
+    source_ext = Path(input_path).suffix.lower().lstrip('.')
+    target = str(target_ext).lower()
+    if target == 'mp4':
+        return source_ext in VIDEO_EXTENSIONS
+    if target in {'mp3', 'wav'}:
+        return source_ext in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+    if target == 'm4a':
+        return source_ext in AUDIO_EXTENSIONS
+    return False
+
 # ==========================================
 # 1. LOCAL SERVER
 # ==========================================
@@ -512,6 +1087,12 @@ class ConvertThread(QThread):
     def __init__(self, row_id, input_file, target_ext):
         super().__init__()
         self.row_id = row_id; self.input_file = input_file; self.target_ext = target_ext
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+        self.requestInterruption()
+
     def run(self):
         claim_path = None
         try:
@@ -520,10 +1101,12 @@ class ConvertThread(QThread):
                 self.finished.emit(self.row_id, False, "Input file does not exist", "")
                 return
 
-            valid_exts = {'mp4', 'mkv', 'avi', 'mov', 'webm', 'mp3', 'wav', 'flac', 'm4a'}
             target_ext = self.target_ext.lower()
-            if target_ext not in valid_exts:
-                self.finished.emit(self.row_id, False, f"Unsupported target format: {self.target_ext}", "")
+            if not conversion_supported(input_path, target_ext):
+                self.finished.emit(self.row_id, False, f"Unsupported conversion: {input_path.suffix} to {target_ext.upper()}", "")
+                return
+            if self.cancelled or self.isInterruptionRequested():
+                self.finished.emit(self.row_id, False, "Conversion cancelled", "")
                 return
 
             title = input_path.stem + "_converted"
@@ -555,9 +1138,11 @@ class ConvertThread(QThread):
                 run_kwargs['creationflags'] = creation_flags
             process = subprocess.run(command, **run_kwargs)
             if process.returncode != 0:
-                self.finished.emit(self.row_id, False, "Conversion failed", "")
+                self.finished.emit(self.row_id, False, f"Conversion failed: {clean_error_summary(process.stderr)}", "")
             elif not output_path.is_file():
                 self.finished.emit(self.row_id, False, "Conversion produced no output file", "")
+            elif self.cancelled or self.isInterruptionRequested():
+                self.finished.emit(self.row_id, False, "Conversion cancelled", "")
             else:
                 self.finished.emit(self.row_id, True, "Conversion complete", str(output_path))
         except subprocess.TimeoutExpired:
@@ -575,6 +1160,9 @@ class ConvertThread(QThread):
 # 3. DOWNLOAD ENGINE ("THE SPEED GRABBER")
 # ==========================================
 class PauseException(Exception): pass
+
+
+class CancelException(Exception): pass
 
 
 ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -677,190 +1265,331 @@ class DownloadThread(QThread):
     status = pyqtSignal(str, str)
     finished = pyqtSignal(str, bool, str, str)
     size_updated = pyqtSignal(str, str, str)
+    metrics = pyqtSignal(str, int, int, float, object)
 
-    def __init__(self, id, url, outtmpl, format_str, target_ext):
+    def __init__(self, id, url, outtmpl, format_str, target_ext, requested_height=None,
+                 metadata=None, save_dir=None, speed_limit_bps=0):
         super().__init__()
         self.id = id; self.url = url; self.outtmpl = outtmpl
-        self.format_str = format_str; self.target_ext = target_ext.lower()
-        self.paused = False; self.final_filename = ""
+        self.profile_name = str(target_ext).upper()
+        self.target_ext = output_profile(self.profile_name).extension
+        self.requested_height = requested_height
+        self.metadata = metadata or {}
+        self.save_dir = str(Path(save_dir or os.path.dirname(outtmpl)).resolve())
+        self.format_str = format_str or build_format_selector(self.profile_name, requested_height)
+        self.speed_limit_bps = int(speed_limit_bps or 0)
+        self.paused = False
+        self.cancelled = False
+        self.final_filename = ""
+        self.postprocessed_paths = []
+        self.temporary_paths = set()
+        self.ydl = None
+        self.final_probe = {}
+        self.current_stage = 'download'
+
+    def set_speed_limit(self, bytes_per_second):
+        self.speed_limit_bps = max(0, int(bytes_per_second or 0))
+        if self.ydl is not None:
+            self.ydl.params['ratelimit'] = self.speed_limit_bps or None
+
+    def cancel(self):
+        self.cancelled = True
+        self.requestInterruption()
+
+    def postprocessor_hook(self, event):
+        status = event.get('status') if isinstance(event, dict) else None
+        if status == 'started':
+            profile = output_profile(self.profile_name)
+            needs_conversion = profile.media_kind == 'audio' or profile.explicit_conversion or (
+                profile.extension == 'mp4' and not mp4_compatible_streams_available(self.metadata, self.requested_height)
+            )
+            state = 'Converting' if needs_conversion else 'Merging streams'
+            self.current_stage = 'conversion' if needs_conversion else 'merge'
+            self.status.emit(self.id, state)
+        path = postprocessor_output_path(event)
+        if path:
+            self.postprocessed_paths.append(path)
 
     def format_size(self, bytes):
         return format_bytes(bytes)
 
     def progress_hook(self, d):
         if self.paused: raise PauseException("Paused")
+        if self.cancelled or self.isInterruptionRequested(): raise CancelException("Cancelled")
         status = d.get('status') if isinstance(d, dict) else None
         if status == 'downloading':
             snapshot = build_progress_snapshot(d)
+            info_dict = d.get('info_dict') if isinstance(d.get('info_dict'), dict) else {}
+            has_video = info_dict.get('vcodec') not in {None, 'none'}
+            has_audio = info_dict.get('acodec') not in {None, 'none'}
+            if has_video and not has_audio:
+                download_status = 'Downloading video stream'
+            elif has_audio and not has_video:
+                download_status = 'Downloading audio stream'
+            else:
+                download_status = 'Downloading media'
+            downloaded_value = int(max(0, finite_number(d.get('downloaded_bytes')) or 0))
+            total_value = int(max(0, finite_number(d.get('total_bytes')) or finite_number(d.get('total_bytes_estimate')) or 0))
+            speed_value = max(0.0, finite_number(d.get('speed')) or 0.0)
+            eta_value = finite_number(d.get('eta'))
+            self.metrics.emit(self.id, downloaded_value, total_value, speed_value, int(eta_value) if eta_value is not None else None)
+            raw_path = d.get('filename') if isinstance(d, dict) else None
+            if raw_path:
+                self.temporary_paths.add(str(raw_path))
             if snapshot['total'] != "N/A":
                 self.size_updated.emit(self.id, snapshot['filename'], snapshot['total'])
-            self.status.emit(self.id, 'Downloading')
+            self.status.emit(self.id, download_status)
             self.progress.emit(
                 self.id, snapshot['filename'], snapshot['percent'], snapshot['downloaded'],
                 snapshot['total'], snapshot['speed'], snapshot['eta'], snapshot['status']
             )
         elif status == 'finished':
             info_dict = d.get('info_dict') if isinstance(d.get('info_dict'), dict) else {}
-            self.final_filename = info_dict.get('_filename') or d.get('filename', '')
+            intermediate = info_dict.get('_filename') or d.get('filename', '')
+            if intermediate:
+                self.temporary_paths.add(str(intermediate))
             snapshot = build_progress_snapshot(d)
-            self.status.emit(self.id, 'Completed')
+            self.status.emit(self.id, 'Postprocessing')
             self.progress.emit(
                 self.id, snapshot['filename'], 100.0, snapshot['downloaded'],
-                snapshot['total'], snapshot['speed'], snapshot['eta'], 'Completed'
+                snapshot['total'], snapshot['speed'], snapshot['eta'], 'Postprocessing'
             )
 
     def run(self):
         try:
-            ydl_opts = {
-                'outtmpl': self.outtmpl,
-                'format': self.format_str,
-                'progress_hooks': [self.progress_hook],
-                'quiet': True, 'no_warnings': True, 'noplaylist': True,
-                'ffmpeg_location': get_ffmpeg_path(),
-                # --- THE SPEED GRABBER MULTIPLEXING ---
-                'concurrent_fragment_downloads': 10,
-                'buffersize': 1024 * 32,
-            }
-
-            audio_formats = ['mp3', 'wav', 'flac', 'm4a']
-            if self.target_ext in audio_formats:
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': self.target_ext, 'preferredquality': '192'}]
-            else:
-                ydl_opts['merge_output_format'] = self.target_ext
-
+            profile = output_profile(self.profile_name)
+            preexisting = {str(path.resolve()) for path in Path(self.save_dir).glob(f'*.{profile.extension}')}
+            ydl_opts = build_download_options(
+                self.profile_name, self.outtmpl, self.requested_height, self.metadata,
+                [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+            )
+            self.format_str = ydl_opts['format']
+            self.status.emit(self.id, 'Connecting')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                self.ydl = ydl
                 info = ydl.extract_info(self.url, download=True)
-                title = info.get('title', 'download')
-
-            safe_final_path = generate_safe_filename(os.path.dirname(self.outtmpl), title, self.target_ext)
-
-            if self.final_filename and os.path.exists(self.final_filename):
-                os.replace(self.final_filename, safe_final_path)
-                self.final_filename = safe_final_path
-
-            if os.path.exists(self.final_filename):
-                self.size_updated.emit(self.id, os.path.basename(self.final_filename), self.format_size(os.path.getsize(self.final_filename)))
-
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
+            self.current_stage = 'verification'
+            self.status.emit(self.id, 'Verifying output')
+            final_path, probe = resolve_final_media(
+                info, self.postprocessed_paths, self.save_dir, self.profile_name, preexisting,
+            )
+            self.final_filename = str(final_path)
+            self.final_probe = probe
+            cleanup_verified_intermediates(self.temporary_paths, final_path, self.save_dir)
+            size = final_path.stat().st_size
+            self.metrics.emit(self.id, size, size, 0.0, 0)
+            self.size_updated.emit(self.id, final_path.name, self.format_size(size))
+            self.progress.emit(
+                self.id, final_path.name, 100.0, format_bytes(size), format_bytes(size),
+                '0 B/s', '00:00:00', 'Completed'
+            )
             self.status.emit(self.id, 'Completed')
             self.finished.emit(self.id, True, '', self.final_filename)
 
-        except PauseException: self.status.emit(self.id, 'Paused')
-        except Exception as e: self.status.emit(self.id, 'Error'); self.finished.emit(self.id, False, str(e), "")
+        except PauseException:
+            self.status.emit(self.id, 'Paused')
+        except CancelException:
+            self.status.emit(self.id, 'Cancelled')
+            self.finished.emit(self.id, False, 'Cancelled', "")
+        except Exception as e:
+            summary = f"{self.current_stage.capitalize()} failure: {clean_error_summary(e)}"
+            self.status.emit(self.id, 'Failed')
+            self.finished.emit(self.id, False, summary, "")
+        finally:
+            self.ydl = None
 
 # ==========================================
 # 4. STRATRUM DOWNLOAD STUDIO UI
 # ==========================================
 class DownloadFileInfoDialog(QDialog):
-    def __init__(self, parent=None, prefill_url=""):
+    def __init__(self, parent=None, prefill_url="", app_config=None):
         super().__init__(parent)
+        self.app_config = app_config
+        self.format_info = {}
+        self.resolution_options = []
+        self.fallback_from = None
+        self.fetch_generation = 0
+        self.fetchers = []
         self.setWindowTitle("Download File Info")
-        self.setFixedSize(650, 300)
+        self.setMinimumSize(760, 360)
 
-        layout = QVBoxLayout()
-
-        # Grid layout for exact spacing
+        layout = QVBoxLayout(self)
         grid = QGridLayout()
-
-        # 1. URL
         grid.addWidget(QLabel("URL"), 0, 0)
         self.url_edit = QLineEdit(prefill_url)
         grid.addWidget(self.url_edit, 0, 1, 1, 4)
 
-        # 2. Category & Format
         grid.addWidget(QLabel("Category"), 1, 0)
         self.category_combo = QComboBox()
-        self.category_combo.addItems(["General", "Compressed", "Documents", "Music", "Programs", "Video"])
-        grid.addWidget(self.category_combo, 1, 1, 1, 2)
-
-        grid.addWidget(QLabel("Format:"), 1, 3, alignment=Qt.AlignmentFlag.AlignRight)
+        self.category_combo.addItems(["Video", "Music"])
+        grid.addWidget(self.category_combo, 1, 1)
+        grid.addWidget(QLabel("Output profile"), 1, 2)
         self.ext_combo = QComboBox()
-        self.ext_combo.addItems(["MP4", "MKV", "AVI", "MOV", "WEBM", "MP3", "WAV", "FLAC", "M4A"])
-        grid.addWidget(self.ext_combo, 1, 4)
+        self.ext_combo.addItems(list(OUTPUT_PROFILES))
+        if app_config:
+            self.ext_combo.setCurrentText(app_config.preferred_format)
+        grid.addWidget(self.ext_combo, 1, 3, 1, 2)
 
-        # 3. Save As
-        grid.addWidget(QLabel("Save As"), 2, 0)
-        self.save_dir_edit = QLineEdit(os.path.join(os.path.expanduser('~'), 'Downloads'))
-        grid.addWidget(self.save_dir_edit, 2, 1, 1, 3)
-        browse_btn = QPushButton("...")
-        browse_btn.setFixedWidth(40)
+        grid.addWidget(QLabel("Resolution"), 2, 0)
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItem("Best available", None)
+        grid.addWidget(self.resolution_combo, 2, 1, 1, 4)
+
+        grid.addWidget(QLabel("Save folder"), 3, 0)
+        self.save_dir_combo = QComboBox()
+        self.save_dir_combo.setEditable(True)
+        downloads_dir = str((Path.home() / 'Downloads').resolve())
+        recent = app_config.recent_folders if app_config else []
+        self.save_dir_combo.addItems(recent or [downloads_dir])
+        self.save_dir_combo.setCurrentText(recent[0] if recent else downloads_dir)
+        grid.addWidget(self.save_dir_combo, 3, 1, 1, 3)
+        browse_btn = QPushButton("Browse...")
         browse_btn.clicked.connect(self.browse_dir)
-        grid.addWidget(browse_btn, 2, 4)
+        grid.addWidget(browse_btn, 3, 4)
 
-        # 4. Remember Path Checkbox
-        self.remember_cb = QCheckBox("Remember this path for category")
+        self.remember_cb = QCheckBox("Remember this output profile, resolution and folder")
         self.remember_cb.setChecked(True)
-        grid.addWidget(self.remember_cb, 3, 1, 1, 4)
-
-        # 5. Description
-        grid.addWidget(QLabel("Description"), 4, 0)
-        self.desc_edit = QLineEdit()
-        grid.addWidget(self.desc_edit, 4, 1, 1, 4)
-
+        grid.addWidget(self.remember_cb, 4, 1, 1, 4)
         layout.addLayout(grid)
 
-        # Size Preview
-        self.info_lbl = QLabel("Fetching File Data...")
+        self.info_lbl = QLabel("Enter a URL to inspect available formats.")
+        self.info_lbl.setWordWrap(True)
         self.info_lbl.setStyleSheet("color: #0078d7; font-weight: bold; margin-top: 10px;")
-        self.info_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.info_lbl)
 
-        # Buttons (Bottom)
-        btn_layout = QHBoxLayout()
-        self.dl_later_btn = QPushButton("Download Later")
-        self.dl_later_btn.clicked.connect(self.reject)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
         self.start_btn = QPushButton("Start Download")
         self.start_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.start_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
 
-        btn_layout.addWidget(self.dl_later_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.start_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-
+        self.fetch_timer = QTimer(self)
+        self.fetch_timer.setSingleShot(True)
+        self.fetch_timer.setInterval(450)
+        self.fetch_timer.timeout.connect(self.fetch_formats)
+        self.url_edit.textChanged.connect(self.schedule_format_fetch)
         self.ext_combo.currentTextChanged.connect(self.on_ext_changed)
-        if prefill_url: self.fetch_formats()
-        self.url_edit.textChanged.connect(self.fetch_formats)
-        self.on_ext_changed("MP4")
+        self.resolution_combo.currentIndexChanged.connect(self.on_resolution_changed)
+        self.on_ext_changed(self.ext_combo.currentText())
+        if prefill_url:
+            self.schedule_format_fetch()
 
     def on_ext_changed(self, text):
-        if text in ["MP3", "WAV", "FLAC", "M4A"]: self.category_combo.setCurrentText("Music")
-        elif text in ["MP4", "MKV", "AVI", "MOV", "WEBM"]: self.category_combo.setCurrentText("Video")
+        profile = output_profile(text)
+        self.category_combo.setCurrentText("Music" if profile.media_kind == 'audio' else "Video")
+        self.resolution_combo.setEnabled(profile.media_kind == 'video' and bool(self.resolution_options))
+        self.update_resolution_summary()
+
+    def schedule_format_fetch(self):
+        self.fetch_generation += 1
+        self.fetch_timer.start()
 
     def fetch_formats(self):
         url = self.url_edit.text().strip()
-        if not url: return
-        self.info_lbl.setText("Connecting to server...")
+        if not url:
+            return
+        generation = self.fetch_generation
+        self.info_lbl.setText("Resolving formats...")
         self.start_btn.setEnabled(False)
-        self.fetcher = FormatFetcherThread(url)
-        self.fetcher.formats_ready.connect(self.on_formats_ready)
-        self.fetcher.error_occurred.connect(self.on_fetch_error)
-        self.fetcher.start()
+        fetcher = FormatFetcherThread(url)
+        self.fetchers.append(fetcher)
+        fetcher.formats_ready.connect(lambda info, gen=generation: self.on_formats_ready(gen, info))
+        fetcher.error_occurred.connect(lambda error, gen=generation: self.on_fetch_error(gen, error))
+        fetcher.finished.connect(lambda worker=fetcher: self.fetchers.remove(worker) if worker in self.fetchers else None)
+        fetcher.start()
 
-    def on_formats_ready(self, info):
-        size = info.get('filesize_approx') or info.get('filesize')
-        size_str = f" | Size: {round(size/1024/1024, 2)} MB" if size else ""
-        self.info_lbl.setText(f"File Ready{size_str}")
+    def on_formats_ready(self, generation, info):
+        if generation != self.fetch_generation:
+            return
+        self.format_info = info
+        self.resolution_options = available_resolution_options(info)
+        self.resolution_combo.blockSignals(True)
+        self.resolution_combo.clear()
+        if self.resolution_options:
+            best = choose_resolution(self.resolution_options)
+            self.resolution_combo.addItem(f"Best available — {format_resolution_detail(best)}", None)
+            for option in self.resolution_options:
+                self.resolution_combo.addItem(format_resolution_detail(option), option['height'])
+            preferred = self.app_config.preferred_resolution if self.app_config else None
+            if preferred is not None:
+                actual = choose_resolution(self.resolution_options, preferred)
+                index = self.resolution_combo.findData(actual['height'])
+                if index >= 0:
+                    self.resolution_combo.setCurrentIndex(index)
+                self.fallback_from = preferred if actual['height'] != preferred else None
+        else:
+            self.resolution_combo.addItem("No video resolution metadata available", None)
+        self.resolution_combo.blockSignals(False)
+        self.on_ext_changed(self.ext_combo.currentText())
         self.start_btn.setEnabled(True)
 
-    def on_fetch_error(self, error_msg):
-        self.info_lbl.setText("Ready to Download (Dynamic Size)")
+    def on_fetch_error(self, generation, error_msg):
+        if generation != self.fetch_generation:
+            return
+        self.format_info = {}
+        self.resolution_options = []
+        self.resolution_combo.clear()
+        self.resolution_combo.addItem("Format metadata unavailable", None)
+        self.resolution_combo.setEnabled(False)
+        self.info_lbl.setText(f"Format inspection failed: {clean_error_summary(error_msg)}")
         self.start_btn.setEnabled(True)
+
+    def update_resolution_summary(self):
+        profile = output_profile(self.ext_combo.currentText())
+        if profile.media_kind == 'audio':
+            self.info_lbl.setText("Audio-only profile — resolution selection disabled")
+            return
+        requested = self.resolution_combo.currentData()
+        selected = choose_resolution(self.resolution_options, requested)
+        if selected:
+            if self.fallback_from:
+                prefix = f"Requested {self.fallback_from}p unavailable; actual selection: "
+            else:
+                fallback = requested is not None and selected['height'] != requested
+                prefix = "Actual fallback: " if fallback else "Selected: "
+            self.info_lbl.setText(prefix + format_resolution_detail(selected))
+
+    def on_resolution_changed(self):
+        self.fallback_from = None
+        self.update_resolution_summary()
 
     def browse_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Save Directory")
-        if directory: self.save_dir_edit.setText(directory)
+        if directory:
+            self.save_dir_combo.setCurrentText(directory)
+            if self.app_config:
+                self.app_config.add_recent_folder(directory)
 
     def get_data(self):
-        return self.url_edit.text().strip(), self.save_dir_edit.text().strip(), 0, self.ext_combo.currentText()
+        save_dir = self.save_dir_combo.currentText().strip()
+        if self.app_config and self.remember_cb.isChecked():
+            self.app_config.add_recent_folder(save_dir)
+            self.app_config.preferred_format = self.ext_combo.currentText()
+            self.app_config.preferred_resolution = self.resolution_combo.currentData()
+            self.app_config.persist()
+        return (
+            self.url_edit.text().strip(), save_dir, self.resolution_combo.currentData(),
+            self.ext_combo.currentText(), self.format_info,
+        )
 
 
 class DownloadProgressPopup(QDialog):
-    def __init__(self, filename, url, parent=None):
+    pause_requested = pyqtSignal(str)
+    resume_requested = pyqtSignal(str)
+    cancel_requested = pyqtSignal(str, bool)
+    speed_limit_changed = pyqtSignal(str, int)
+
+    def __init__(self, filename, url, parent=None, job_id='', app_config=None):
         super().__init__(parent)
+        self.job_id = job_id
+        self.app_config = app_config
+        self.job_state = JobState.CONNECTING.value
         self.setWindowTitle(f"0% {filename}")
         self.setFixedSize(500, 280) # Closed details state
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -907,6 +1636,49 @@ class DownloadProgressPopup(QDialog):
         status_layout.addRow("Resume capability", QLabel("Yes"))
         status_tab.setLayout(status_layout)
 
+        speed_layout = QFormLayout()
+        self.speed_unit_combo = QComboBox()
+        self.speed_unit_combo.addItems(["Unlimited", "KB/s", "MB/s"])
+        self.speed_value_spin = QSpinBox()
+        self.speed_value_spin.setRange(1, 100000)
+        self.speed_value_spin.setValue(1024)
+        apply_limit = QPushButton("Apply to this download")
+        apply_limit.clicked.connect(self.apply_speed_limit)
+        self.active_limit_lbl = QLabel("Unlimited")
+        if app_config and app_config.speed_limit_bps:
+            if app_config.speed_limit_bps % (1024 * 1024) == 0:
+                self.speed_unit_combo.setCurrentText("MB/s"); self.speed_value_spin.setValue(app_config.speed_limit_bps // (1024 * 1024))
+            else:
+                self.speed_unit_combo.setCurrentText("KB/s"); self.speed_value_spin.setValue(max(1, app_config.speed_limit_bps // 1024))
+            self.active_limit_lbl.setText(f"{self.speed_value_spin.value()} {self.speed_unit_combo.currentText()}")
+        speed_layout.addRow("Limit", self.speed_unit_combo)
+        speed_layout.addRow("Value", self.speed_value_spin)
+        speed_layout.addRow(apply_limit)
+        speed_layout.addRow("Active", self.active_limit_lbl)
+        speed_tab.setLayout(speed_layout)
+
+        completion_layout = QFormLayout()
+        self.completion_combo = QComboBox()
+        for label, value in (
+            ("Keep window open", "keep_open"),
+            ("Close progress window", "close"),
+            ("Open containing folder", "open_folder"),
+            ("Play/open safe media", "open_file"),
+            ("Convert to MP3", "convert_mp3"),
+            ("Convert to WAV", "convert_wav"),
+            ("Convert to MP4", "convert_mp4"),
+            ("Convert to M4A", "convert_m4a"),
+        ):
+            self.completion_combo.addItem(label, value)
+        if app_config:
+            index = self.completion_combo.findData(app_config.completion_action)
+            if index >= 0:
+                self.completion_combo.setCurrentIndex(index)
+        self.exit_when_idle_cb = QCheckBox("Exit application after all jobs finish")
+        completion_layout.addRow("On completion", self.completion_combo)
+        completion_layout.addRow(self.exit_when_idle_cb)
+        options_tab.setLayout(completion_layout)
+
         main_layout.addWidget(self.tabs)
 
         # Progress Bar
@@ -922,8 +1694,9 @@ class DownloadProgressPopup(QDialog):
         self.details_btn.clicked.connect(self.toggle_details)
 
         self.pause_btn = QPushButton("Pause")
+        self.pause_btn.clicked.connect(self.request_pause_resume)
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.clicked.connect(self.reject)
+        self.cancel_btn.clicked.connect(self.request_cancel)
 
         btn_layout.addWidget(self.details_btn)
         btn_layout.addStretch()
@@ -931,24 +1704,14 @@ class DownloadProgressPopup(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         main_layout.addLayout(btn_layout)
 
-        # Details Panel (Connections Table)
+        # Details Panel
         self.details_widget = QWidget()
         det_layout = QVBoxLayout()
-        det_layout.addWidget(QLabel("Start positions and download progress by connections"))
-
-        self.conn_table = QTableWidget(4, 3) # Dummy 4 connections to mimic UI
-        self.conn_table.setHorizontalHeaderLabels(["N.", "Downloaded", "Info"])
-        self.conn_table.verticalHeader().setVisible(False)
-        self.conn_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.conn_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self.conn_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        # Populate dummy multiplexing lines
-        for i in range(4):
-            self.conn_table.setItem(i, 0, QTableWidgetItem(str(i+1)))
-            self.conn_table.setItem(i, 1, QTableWidgetItem("Receiving..."))
-            self.conn_table.setItem(i, 2, QTableWidgetItem("Downloading data"))
-
-        det_layout.addWidget(self.conn_table)
+        det_layout.addWidget(QLabel("Job details and safe diagnostics"))
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setPlainText("No connection details are available yet.")
+        det_layout.addWidget(self.details_text)
         self.details_widget.setLayout(det_layout)
         self.details_widget.hide()
 
@@ -975,9 +1738,59 @@ class DownloadProgressPopup(QDialog):
         self.speed_lbl.setText(speed)
         self.time_lbl.setText(eta)
         self.status_lbl.setText(status)
+        self.set_job_state(status.lower())
         self.downloaded_lbl.setText(f"{format_transfer_size(downloaded, total)} ({percent:.1f}%)")
         if total != "N/A":
             self.size_lbl.setText(total)
+
+    def set_job_state(self, state):
+        normalized = str(state).lower().replace(' ', '')
+        self.job_state = normalized
+        if normalized == JobState.PAUSED.value:
+            self.pause_btn.setText("Resume")
+            self.pause_btn.setEnabled(True)
+        elif normalized in {JobState.DOWNLOADING.value, JobState.CONNECTING.value, JobState.RESOLVING.value}:
+            self.pause_btn.setText("Pause")
+            self.pause_btn.setEnabled(True)
+        else:
+            self.pause_btn.setEnabled(False)
+
+    def request_pause_resume(self):
+        if self.job_state == JobState.PAUSED.value:
+            self.resume_requested.emit(self.job_id)
+        else:
+            self.pause_requested.emit(self.job_id)
+
+    def request_cancel(self):
+        question = QMessageBox(self)
+        question.setWindowTitle("Cancel Download")
+        question.setText("Cancel this download and choose what happens to partial data.")
+        keep_button = question.addButton("Keep Partial Data", QMessageBox.ButtonRole.AcceptRole)
+        remove_button = question.addButton("Remove Partial Data", QMessageBox.ButtonRole.DestructiveRole)
+        question.addButton("Continue Download", QMessageBox.ButtonRole.RejectRole)
+        question.exec()
+        if question.clickedButton() == keep_button:
+            self.cancel_requested.emit(self.job_id, False)
+        elif question.clickedButton() == remove_button:
+            self.cancel_requested.emit(self.job_id, True)
+
+    def apply_speed_limit(self):
+        unit = self.speed_unit_combo.currentText()
+        if unit == "Unlimited":
+            limit = 0
+            label = "Unlimited"
+        else:
+            multiplier = 1024 if unit == "KB/s" else 1024 * 1024
+            limit = self.speed_value_spin.value() * multiplier
+            label = f"{self.speed_value_spin.value()} {unit}"
+        self.active_limit_lbl.setText(label)
+        self.speed_limit_changed.emit(self.job_id, limit)
+
+    def completion_action(self):
+        return self.completion_combo.currentData()
+
+    def set_details(self, text):
+        self.details_text.setPlainText(str(text))
 
 # ==========================================
 # 5. MAIN APP: STRATRUM DOWNLOAD STUDIO
@@ -1007,6 +1820,9 @@ class BrowserIntegrationDialog(QDialog):
         reset_button = QPushButton("Reset All Pairings")
         reset_button.clicked.connect(self.reset_all_pairings)
         actions.addWidget(reset_button)
+        clear_folders_button = QPushButton("Clear Recent Folders")
+        clear_folders_button.clicked.connect(self.clear_recent_folders)
+        actions.addWidget(clear_folders_button)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
         actions.addWidget(close_button)
@@ -1066,17 +1882,28 @@ class BrowserIntegrationDialog(QDialog):
             return
         self.refresh_origins()
 
+    def clear_recent_folders(self):
+        self.app_config.clear_recent_folders()
+        QMessageBox.information(self, "Recent Folders", "Recent save folders were cleared.")
+
 
 class StratrumDownloadStudio(QMainWindow):
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
+        self.download_manager = DownloadManager(app_config)
         self.setWindowTitle("Stratrum Download Studio")
-        self.setGeometry(100, 100, 1150, 680)
-        self.downloads = []; self.popups = {}
+        self.setMinimumSize(760, 480)
+        width, height = (app_config.window_size + [1150, 680])[:2]
+        self.setGeometry(100, 100, max(800, int(width)), max(520, int(height)))
+        self.downloads = []; self.popups = {}; self.converters = {}
+        self.progress_snapshots = {}
+        self.last_progress_paint = {}
+        self.history_writer = None
         self.init_ui()
         self.init_tray_icon()
         self.load_downloads_from_file()
+        self.load_recovered_queue_jobs()
         self.init_server()
 
     def init_tray_icon(self):
@@ -1112,14 +1939,17 @@ class StratrumDownloadStudio(QMainWindow):
         event.ignore(); self.hide()
 
     def force_quit(self):
-        self.save_downloads_to_file(); self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()
+        self.persist_ui_preferences()
+        self.save_downloads_to_file(wait=True)
+        self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()
 
-    def save_downloads_to_file(self):
+    def save_downloads_to_file(self, wait=False):
         save_data = []
         for row in range(self.table.rowCount()):
             bar = self.table.cellWidget(row, 3)
             status = bar.text() if bar else self.table.item(row, 3).text() if self.table.item(row, 3) else "Completed"
             if d_info := next((d for d in self.downloads if d['row'] == row), None):
+                job = d_info.get('job')
                 save_data.append({
                     'filename': self.table.item(row, 0).text(),
                     'size': self.table.item(row, 2).text() if self.table.item(row, 2) else "",
@@ -1127,25 +1957,37 @@ class StratrumDownloadStudio(QMainWindow):
                     'eta': self.table.item(row, 4).text() if self.table.item(row, 4) else "",
                     'speed': self.table.item(row, 5).text() if self.table.item(row, 5) else "",
                     'date': self.table.item(row, 6).text() if self.table.item(row, 6) else "",
-                    'url': self.table.item(row, 7).text() if self.table.item(row, 7) else "",
+                    'url': d_info.get('url', ''),
                     'id': d_info['id'], 'outtmpl': d_info['outtmpl'], 'save_dir': d_info.get('save_dir', ''),
                     'format': d_info['format'], 'ext': d_info['ext'], 'final_path': d_info.get('final_path', ''),
-                    'converted_output_path': d_info.get('converted_output_path', '')
+                    'converted_output_path': d_info.get('converted_output_path', ''),
+                    'requested_resolution': d_info.get('requested_resolution'),
+                    'state': job.state if job else d_info.get('state', JobState.QUEUED.value),
+                    'job': job.to_dict() if job else None,
                 })
-        try:
-            atomic_write_json(self.app_config.history_path, save_data)
-        except Exception as e:
-            print(f"Error saving history: {e}")
+        def write_history():
+            try:
+                atomic_write_json(self.app_config.history_path, save_data)
+            except Exception:
+                pass
+        self.history_writer = threading.Thread(target=write_history, name='StratrumHistoryWriter', daemon=False)
+        self.history_writer.start()
+        if wait:
+            self.history_writer.join(timeout=5)
 
     def load_downloads_from_file(self):
         history_file = self.app_config.history_path
         if not history_file.exists(): return
+        if history_file.stat().st_size > 2 * 1024 * 1024:
+            os.replace(history_file, str(history_file) + ".oversize")
+            return
         try:
             with history_file.open('r', encoding='utf-8') as f: save_data = json.load(f)
             for item in save_data:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(item.get('filename', '')))
+                filename_item = QTableWidgetItem(item.get('filename', '')); filename_item.setToolTip(item.get('filename', ''))
+                self.table.setItem(row, 0, filename_item)
                 self.table.setItem(row, 1, QTableWidgetItem(""))
                 self.table.setItem(row, 2, QTableWidgetItem(item.get('size', '')))
 
@@ -1157,14 +1999,33 @@ class StratrumDownloadStudio(QMainWindow):
                 self.table.setItem(row, 4, QTableWidgetItem(item.get('eta', '')))
                 self.table.setItem(row, 5, QTableWidgetItem(item.get('speed', '')))
                 self.table.setItem(row, 6, QTableWidgetItem(item.get('date', '')))
-                self.table.setItem(row, 7, QTableWidgetItem(item.get('url', '')))
+                source_display = sanitize_source_url(item.get('url', ''))
+                source_item = QTableWidgetItem(source_display); source_item.setToolTip(source_display)
+                self.table.setItem(row, 7, source_item)
 
+                stored_job = item.get('job') if isinstance(item.get('job'), dict) else None
+                if stored_job:
+                    job = DownloadJob.from_dict(stored_job)
+                else:
+                    job = DownloadJob(
+                        job_id=item.get('id', uuid.uuid4().hex), source_url=item.get('url', ''),
+                        save_dir=item.get('save_dir', str(Path(item.get('outtmpl', '.')).parent)),
+                        requested_format=item.get('ext', 'MP4'), requested_resolution=item.get('requested_resolution'),
+                        final_output_path=item.get('final_path', ''), state=item.get('state', JobState.COMPLETED.value),
+                    )
+                if job.job_id in self.download_manager.jobs:
+                    job = self.download_manager.jobs[job.job_id]
+                else:
+                    self.download_manager.add_job(job)
+                pb.setValue(100 if job.state == JobState.COMPLETED.value else 0)
+                pb.setFormat("Completed 100%" if job.state == JobState.COMPLETED.value else job.state.capitalize())
                 self.downloads.append({
-                    'id': item.get('id', ''), 'url': item.get('url', ''), 'outtmpl': item.get('outtmpl', ''),
+                    'id': job.job_id, 'url': item.get('url', ''), 'outtmpl': item.get('outtmpl', ''),
                     'save_dir': item.get('save_dir', str(Path(item.get('outtmpl', '.')).parent)),
                     'format': item.get('format', ''), 'ext': item.get('ext', ''), 'thread': None, 'row': row,
                     'final_path': item.get('final_path', ''),
-                    'converted_output_path': item.get('converted_output_path', '')
+                    'converted_output_path': item.get('converted_output_path', ''),
+                    'requested_resolution': item.get('requested_resolution'), 'job': job,
                 })
         except json.JSONDecodeError:
             print("History file is corrupted. Starting fresh.")
@@ -1172,47 +2033,93 @@ class StratrumDownloadStudio(QMainWindow):
         except Exception as e:
             print(f"Failed to load history: {e}")
 
+    def load_recovered_queue_jobs(self):
+        known = {record['id'] for record in self.downloads}
+        for job_id in self.download_manager.queue:
+            if job_id in known:
+                continue
+            job = self.download_manager.jobs[job_id]
+            row = self.table.rowCount(); self.table.insertRow(row)
+            filename = Path(job.final_output_path).name if job.final_output_path else "Recovered incomplete job"
+            filename_item = QTableWidgetItem(filename); filename_item.setToolTip(filename); self.table.setItem(row, 0, filename_item)
+            self.table.setItem(row, 1, QTableWidgetItem(str(job.priority)))
+            self.table.setItem(row, 2, QTableWidgetItem(format_transfer_size(format_bytes(job.downloaded_bytes), format_bytes(job.total_bytes) if job.total_bytes else 'N/A')))
+            bar = QProgressBar(); bar.setRange(0, 100)
+            percent = int(job.downloaded_bytes / job.total_bytes * 100) if job.total_bytes else 0
+            bar.setValue(max(0, min(100, percent))); bar.setFormat(f"{job.state.capitalize()} {bar.value()}%")
+            self.table.setCellWidget(row, 3, bar)
+            self.table.setItem(row, 4, QTableWidgetItem(format_eta(job.eta) if job.eta is not None else 'N/A'))
+            self.table.setItem(row, 5, QTableWidgetItem(f"{format_bytes(job.speed)}/s" if job.speed else '0 B/s'))
+            self.table.setItem(row, 6, QTableWidgetItem(job.created_at))
+            source = sanitize_source_url(job.source_url); source_item = QTableWidgetItem(source); source_item.setToolTip(source); self.table.setItem(row, 7, source_item)
+            self.downloads.append({
+                'id': job.job_id, 'url': job.source_url, 'outtmpl': str(Path(job.save_dir) / f'%(title)s [%(id)s]-{job.job_id[:8]}.%(ext)s'),
+                'save_dir': job.save_dir, 'format': build_format_selector(job.requested_format, job.requested_resolution),
+                'ext': job.requested_format, 'thread': None, 'row': row, 'final_path': job.final_output_path,
+                'converted_output_path': '', 'requested_resolution': job.requested_resolution, 'metadata': {}, 'job': job,
+            })
+
     def show_dummy_msg(self, title):
         if title == "Options":
             BrowserIntegrationDialog(self.app_config, self).exec()
-        else:
-            QMessageBox.information(self, "Stratrum Download Studio", f"'{title}' feature coming soon!")
 
     def init_ui(self):
         menubar = self.menuBar()
         tasks_menu = menubar.addMenu("Tasks")
         tasks_menu.addAction("Add new download").triggered.connect(lambda: self.open_add_dialog(""))
-        tasks_menu.addAction("Add batch download").triggered.connect(lambda: self.show_dummy_msg("Batch Download"))
-        tasks_menu.addAction("Run site grabber").triggered.connect(lambda: self.show_dummy_msg("Site Grabber"))
+        batch_action = tasks_menu.addAction("Batch Download (Phase 2B)"); batch_action.setEnabled(False)
+        batch_action.setToolTip("Batch input is deferred to Phase 2B.")
+        grabber_action = tasks_menu.addAction("Site Grabber (Phase 2C)"); grabber_action.setEnabled(False)
+        grabber_action.setToolTip("Full site crawling is deferred to Phase 2C.")
         tasks_menu.addSeparator(); tasks_menu.addAction("Exit").triggered.connect(self.force_quit)
 
         file_menu = menubar.addMenu("File")
-        file_menu.addAction("Stop Download").triggered.connect(self.pause_download)
-        file_menu.addAction("Remove").triggered.connect(self.delete_download)
-        file_menu.addAction("Download Now").triggered.connect(self.resume_download)
+        self.pause_action = file_menu.addAction("Pause Download"); self.pause_action.triggered.connect(self.pause_download)
+        self.resume_action = file_menu.addAction("Resume Download"); self.resume_action.triggered.connect(self.resume_download)
+        self.stop_action = file_menu.addAction("Cancel Download"); self.stop_action.triggered.connect(self.cancel_selected_download)
+        self.properties_action = file_menu.addAction("Properties / Details"); self.properties_action.triggered.connect(self.show_properties)
+        self.delete_action = file_menu.addAction("Remove"); self.delete_action.triggered.connect(self.delete_download)
 
         dl_menu = menubar.addMenu("Downloads")
-        dl_menu.addAction("Pause All").triggered.connect(self.pause_download)
+        dl_menu.addAction("Pause All").triggered.connect(self.pause_all_downloads)
         dl_menu.addAction("Delete All Completed").triggered.connect(self.delete_completed)
+        dl_menu.addAction("Move Up").triggered.connect(lambda: self.move_selected_job(-1))
+        dl_menu.addAction("Move Down").triggered.connect(lambda: self.move_selected_job(1))
+        dl_menu.addAction("Retry").triggered.connect(self.retry_selected_job)
+        stop_after = dl_menu.addAction("Stop After Current Jobs"); stop_after.setCheckable(True)
+        stop_after.setChecked(self.download_manager.stop_after_current); stop_after.toggled.connect(self.set_stop_after_current)
 
-        menubar.addMenu("View"); menubar.addMenu("Help"); menubar.addMenu("Registration")
+        view_menu = menubar.addMenu("View")
+        sidebar_action = view_menu.addAction("Category Sidebar"); sidebar_action.setCheckable(True); sidebar_action.setChecked(True)
+        toolbar_view_action = view_menu.addAction("Toolbar"); toolbar_view_action.setCheckable(True); toolbar_view_action.setChecked(True)
+        view_menu.addAction("Reset Column Layout").triggered.connect(self.reset_column_layout)
 
-        toolbar = QToolBar("Main Toolbar", self)
-        toolbar.setMovable(False); toolbar.setIconSize(toolbar.iconSize() * 1.5)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.addToolBar(toolbar)
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("Quick Start").triggered.connect(self.show_quick_start)
+        help_menu.addAction("Supported Sites").triggered.connect(self.show_supported_sites)
+        help_menu.addAction("Open Logs / Diagnostics").triggered.connect(self.export_diagnostics)
+        help_menu.addAction("About Stratrum Download Studio").triggered.connect(self.show_about)
 
-        toolbar.addAction("➕\nAdd URL").triggered.connect(lambda: self.open_add_dialog(""))
-        toolbar.addAction("▶\nResume").triggered.connect(self.resume_download)
-        toolbar.addAction("⏹\nStop").triggered.connect(self.pause_download)
-        toolbar.addAction("🛑\nStop All").triggered.connect(self.pause_download)
-        toolbar.addAction("❌\nDelete").triggered.connect(self.delete_download)
-        toolbar.addAction("🗑\nClear Done").triggered.connect(self.delete_completed)
-        toolbar.addAction("⚙\nOptions").triggered.connect(lambda: self.show_dummy_msg("Options"))
-        toolbar.addAction("🔗\nShare").triggered.connect(self.share_link)
+        registration_menu = menubar.addMenu("Registration")
+        registration_action = registration_menu.addAction("Registration unavailable pending licensing review")
+        registration_action.setEnabled(False)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(splitter)
+        self.toolbar = QToolBar("Main Toolbar", self)
+        self.toolbar.setMovable(False); self.toolbar.setIconSize(self.toolbar.iconSize() * 1.5)
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.addToolBar(self.toolbar)
+
+        self.toolbar.addAction("➕\nAdd URL").triggered.connect(lambda: self.open_add_dialog(""))
+        self.toolbar_resume_action = self.toolbar.addAction("▶\nResume"); self.toolbar_resume_action.triggered.connect(self.resume_download)
+        self.toolbar_pause_action = self.toolbar.addAction("⏸\nPause"); self.toolbar_pause_action.triggered.connect(self.pause_download)
+        self.toolbar.addAction("🛑\nPause All").triggered.connect(self.pause_all_downloads)
+        self.toolbar_delete_action = self.toolbar.addAction("❌\nDelete"); self.toolbar_delete_action.triggered.connect(self.delete_download)
+        self.toolbar.addAction("🗑\nClear Done").triggered.connect(self.delete_completed)
+        self.toolbar.addAction("⚙\nOptions").triggered.connect(lambda: self.show_dummy_msg("Options"))
+        self.toolbar.addAction("🔗\nShare").triggered.connect(self.share_link)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.setCentralWidget(self.splitter)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -1221,7 +2128,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.tree.addTopLevelItem(root_all); self.tree.addTopLevelItem(QTreeWidgetItem(["Unfinished"])); self.tree.addTopLevelItem(QTreeWidgetItem(["Finished"]))
         root_all.setExpanded(True)
         self.tree.itemClicked.connect(self.filter_by_category)
-        splitter.addWidget(self.tree)
+        self.splitter.addWidget(self.tree)
 
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"])
@@ -1232,40 +2139,248 @@ class StratrumDownloadStudio(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
+        self.table.itemSelectionChanged.connect(self.update_action_capabilities)
+        self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
 
-        splitter.addWidget(self.table)
-        splitter.setSizes([200, 950])
+        self.splitter.addWidget(self.table)
+        self.splitter.setSizes(self.app_config.splitter_sizes[:2])
+        sidebar_action.toggled.connect(self.tree.setVisible)
+        toolbar_view_action.toggled.connect(self.toolbar.setVisible)
+
+        columns_menu = view_menu.addMenu("Columns")
+        for index, name in enumerate(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"]):
+            action = columns_menu.addAction(name); action.setCheckable(True)
+            action.setChecked(index not in self.app_config.hidden_columns)
+            action.toggled.connect(lambda checked, col=index: self.table.setColumnHidden(col, not checked))
+            self.table.setColumnHidden(index, index in self.app_config.hidden_columns)
+        if self.app_config.column_widths:
+            for index, width in enumerate(self.app_config.column_widths[:self.table.columnCount()]):
+                self.table.setColumnWidth(index, max(40, int(width)))
+        self.update_action_capabilities()
+
+    def selected_record(self):
+        rows = self.table.selectionModel().selectedRows() if hasattr(self, 'table') else []
+        return next((item for item in self.downloads if rows and item['row'] == rows[0].row()), None)
+
+    def persist_ui_preferences(self):
+        self.app_config.window_size = [self.width(), self.height()]
+        self.app_config.splitter_sizes = self.splitter.sizes()
+        self.app_config.column_widths = [self.table.columnWidth(index) for index in range(self.table.columnCount())]
+        self.app_config.hidden_columns = [index for index in range(self.table.columnCount()) if self.table.isColumnHidden(index)]
+        self.app_config.persist()
+
+    def reset_column_layout(self):
+        for index in range(self.table.columnCount()):
+            self.table.setColumnHidden(index, False)
+            self.table.resizeColumnToContents(index)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+
+    def update_action_capabilities(self):
+        record = self.selected_record()
+        capabilities = job_capabilities(record['job']) if record and record.get('job') else {key: False for key in ('resume', 'pause', 'stop', 'delete')}
+        for action, key in (
+            (getattr(self, 'resume_action', None), 'resume'),
+            (getattr(self, 'pause_action', None), 'pause'),
+            (getattr(self, 'stop_action', None), 'stop'),
+            (getattr(self, 'delete_action', None), 'delete'),
+            (getattr(self, 'toolbar_resume_action', None), 'resume'),
+            (getattr(self, 'toolbar_pause_action', None), 'pause'),
+            (getattr(self, 'toolbar_delete_action', None), 'delete'),
+        ):
+            if action:
+                action.setEnabled(capabilities.get(key, False))
+
+    def show_quick_start(self):
+        QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
+
+    def show_supported_sites(self):
+        QMessageBox.information(self, "Supported Sites", "Stratrum uses yt-dlp extractors for authorized HTTP/HTTPS media. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
+
+    def show_about(self):
+        QMessageBox.information(self, "About Stratrum Download Studio", "Stratrum Download Studio — Phase 2A.5 media download foundation. Download only content you own or are authorized to save.")
+
+    def export_diagnostics(self):
+        logs_dir = self.app_config.app_data_root / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        destination = logs_dir / f"diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        payload = {
+            'application': APP_NAME,
+            'jobs': [{
+                **job.to_dict(),
+                'source_url': sanitize_source_url(job.source_url),
+                'error_summary': clean_error_summary(job.error_summary),
+            } for job in self.download_manager.jobs.values()],
+        }
+        def write_and_open():
+            atomic_write_json(destination, payload)
+            subprocess.Popen(['explorer', '/select,', str(destination)])
+        threading.Thread(target=write_and_open, name='StratrumDiagnosticWriter', daemon=True).start()
+
+    def show_properties(self):
+        record = self.selected_record()
+        if not record:
+            QMessageBox.information(self, "Properties", "Select a download job first.")
+            return
+        job = record['job']
+        editable = job_capabilities(job)['edit']
+        dialog = QDialog(self); dialog.setWindowTitle("Download Properties"); dialog.setMinimumWidth(620)
+        layout = QVBoxLayout(dialog); form = QFormLayout()
+        source_field = QLineEdit(sanitize_source_url(job.source_url)); source_field.setReadOnly(True)
+        folder_field = QLineEdit(job.save_dir); folder_field.setEnabled(editable)
+        format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES)); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
+        resolution_combo = QComboBox(); resolution_combo.addItem("Best available", None)
+        for height, label in RESOLUTION_LABELS.items(): resolution_combo.addItem(label, height)
+        idx = resolution_combo.findData(job.requested_resolution); resolution_combo.setCurrentIndex(max(0, idx)); resolution_combo.setEnabled(editable and output_profile(job.requested_format).media_kind == 'video')
+        format_combo.currentTextChanged.connect(lambda value: resolution_combo.setEnabled(editable and output_profile(value).media_kind == 'video'))
+        priority_spin = QSpinBox(); priority_spin.setRange(-100, 100); priority_spin.setValue(job.priority); priority_spin.setEnabled(editable)
+        form.addRow("Sanitized source", source_field); form.addRow("Save folder", folder_field)
+        form.addRow("Requested format", format_combo); form.addRow("Requested resolution", resolution_combo)
+        form.addRow("Queue", QLabel(job.queue_name)); form.addRow("Priority", priority_spin)
+        form.addRow("Actual format", QLabel(job.actual_format or "pending")); form.addRow("Actual resolution", QLabel(str(job.actual_resolution or "pending")))
+        form.addRow("Final output", QLabel(job.final_output_path or "pending"))
+        form.addRow("Transferred", QLabel(f"{format_bytes(job.downloaded_bytes)} / {format_bytes(job.total_bytes) if job.total_bytes else 'unknown'}"))
+        form.addRow("Resumable", QLabel("Yes" if job.resumable else "No")); form.addRow("State", QLabel(job.state))
+        form.addRow("Timestamps", QLabel(f"Created {job.created_at}; Started {job.started_at or '-'}; Completed {job.completed_at or '-'}"))
+        form.addRow("Last safe error", QLabel(job.error_summary or "None")); layout.addLayout(form)
+        buttons = QHBoxLayout(); buttons.addStretch()
+        if editable:
+            save_button = QPushButton("Save Safe Changes"); save_button.clicked.connect(dialog.accept); buttons.addWidget(save_button)
+        close_button = QPushButton("Close"); close_button.clicked.connect(dialog.reject); buttons.addWidget(close_button); layout.addLayout(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted and editable:
+            folder = Path(folder_field.text()).expanduser()
+            if not folder.is_dir():
+                QMessageBox.warning(self, "Properties", "The selected save folder does not exist.")
+                return
+            job.save_dir = str(folder.resolve()); job.requested_format = format_combo.currentText()
+            job.requested_resolution = resolution_combo.currentData() if output_profile(job.requested_format).media_kind == 'video' else None
+            job.priority = priority_spin.value(); record['save_dir'] = job.save_dir; record['ext'] = job.requested_format
+            record['requested_resolution'] = job.requested_resolution
+            record['outtmpl'] = str(Path(job.save_dir) / f'%(title)s [%(id)s]-{job.job_id[:8]}.%(ext)s')
+            record['format'] = build_format_selector(job.requested_format, job.requested_resolution)
+            self.download_manager.persist(); self.table.setItem(record['row'], 1, QTableWidgetItem(str(job.priority)))
+
+    def move_selected_job(self, offset):
+        record = self.selected_record()
+        if record:
+            self.download_manager.move(record['id'], offset)
+
+    def retry_selected_job(self):
+        record = self.selected_record()
+        if record and self.download_manager.retry(record['id']):
+            record['job'].state = JobState.QUEUED.value
+            self.start_queued_jobs()
+
+    def set_stop_after_current(self, enabled):
+        self.download_manager.stop_after_current = bool(enabled)
+        self.app_config.stop_after_current = bool(enabled)
+        self.app_config.persist()
+        self.download_manager.persist()
+        if not enabled:
+            self.start_queued_jobs()
+
+    def pause_all_downloads(self):
+        for record in self.downloads:
+            self.pause_job(record['id'])
+
+    def cancel_selected_download(self):
+        record = self.selected_record()
+        if not record:
+            QMessageBox.information(self, "Cancel Download", "Select a download job first.")
+            return
+        self.cancel_job(record['id'], False)
+
+    def pause_job(self, job_id):
+        record = self.get_download_by_id(job_id)
+        if not record or not job_capabilities(record['job'])['pause']:
+            return
+        if record.get('thread') and record['thread'].isRunning():
+            record['thread'].paused = True
+        self.download_manager.set_state(job_id, JobState.PAUSED)
+        if job_id in self.popups:
+            self.popups[job_id].set_job_state(JobState.PAUSED.value)
+        self.update_action_capabilities()
+        QTimer.singleShot(150, self.start_queued_jobs)
+
+    def resume_job(self, job_id):
+        record = self.get_download_by_id(job_id)
+        if record and job_capabilities(record['job'])['resume']:
+            record['job'].state = JobState.QUEUED.value
+            self.download_manager.persist()
+            self.start_queued_jobs()
+            self.update_action_capabilities()
+
+    def cancel_job(self, job_id, remove_partials=False):
+        record = self.get_download_by_id(job_id)
+        if not record:
+            return
+        thread = record.get('thread')
+        converter = self.converters.get(job_id)
+        if converter and converter.isRunning():
+            converter.cancel()
+            if bar := self.table.cellWidget(record['row'], 3): bar.setFormat("Cancelling conversion...")
+            return
+        if thread and thread.isRunning():
+            thread.cancel()
+        self.download_manager.set_state(job_id, JobState.CANCELLED)
+        if remove_partials and thread:
+            root = Path(record['save_dir']).resolve()
+            for partial in list(thread.temporary_paths):
+                try:
+                    path = Path(partial).resolve(strict=True)
+                    path.relative_to(root)
+                    if path.suffix.lower() in {'.part', '.ytdl'} or '.part' in path.name or re.search(r'\.f\d+\.', path.name, re.IGNORECASE):
+                        path.unlink()
+                except (OSError, ValueError):
+                    continue
+        if job_id in self.popups:
+            self.popups[job_id].set_job_state(JobState.CANCELLED.value)
+        self.update_action_capabilities()
+
+    def set_job_speed_limit(self, job_id, bytes_per_second):
+        record = self.get_download_by_id(job_id)
+        if record and record.get('thread'):
+            record['thread'].set_speed_limit(bytes_per_second)
+        self.app_config.speed_limit_bps = max(0, int(bytes_per_second or 0))
+        self.app_config.persist()
+
+    def update_job_metrics(self, job_id, downloaded, total, speed, eta):
+        if job_id in self.download_manager.jobs:
+            self.download_manager.update_progress(job_id, downloaded, total, speed, eta)
 
     def filter_by_category(self, item, column):
         category = item.text(0)
         for row in range(self.table.rowCount()):
             if category == "All Downloads": self.table.setRowHidden(row, False); continue
             filename = self.table.item(row, 0).text().lower()
-            bar = self.table.cellWidget(row, 3)
-            status = bar.text() if bar else self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            record = next((item for item in self.downloads if item['row'] == row), None)
+            state = record['job'].state if record and record.get('job') else JobState.QUEUED.value
             hidden = True
             if category == "Video" and filename.endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')): hidden = False
             elif category == "Audio" and filename.endswith(('.mp3', '.wav', '.flac', '.m4a')): hidden = False
             elif category == "Compressed" and filename.endswith(('.zip', '.rar', '.7z')): hidden = False
             elif category == "Documents" and filename.endswith(('.pdf', '.docx', '.txt')): hidden = False
-            elif category == "Finished" and "Complete" in status: hidden = False
-            elif category == "Unfinished" and "Complete" not in status: hidden = False
+            elif category == "Finished" and state == JobState.COMPLETED.value: hidden = False
+            elif category == "Unfinished" and state != JobState.COMPLETED.value: hidden = False
             self.table.setRowHidden(row, hidden)
 
     def show_context_menu(self, position):
+        record = self.selected_record()
+        capabilities = job_capabilities(record['job']) if record else {key: False for key in ('open', 'open_folder', 'convert', 'resume', 'pause', 'delete')}
         menu = QMenu()
-        menu.addAction("Open").triggered.connect(self.open_selected_file)
-        menu.addAction("Open folder").triggered.connect(self.open_selected_folder)
+        open_action = menu.addAction("Open"); open_action.setEnabled(capabilities['open']); open_action.triggered.connect(self.open_selected_file)
+        folder_action = menu.addAction("Open folder"); folder_action.setEnabled(capabilities['open_folder']); folder_action.triggered.connect(self.open_selected_folder)
+        menu.addAction("Properties / Details").triggered.connect(self.show_properties)
         menu.addSeparator()
         cv_menu = menu.addMenu("Convert Format...")
-        cv_menu.addAction("To MP4").triggered.connect(lambda: self.trigger_conversion("mp4"))
-        cv_menu.addAction("To MP3").triggered.connect(lambda: self.trigger_conversion("mp3"))
-        cv_menu.addAction("To WAV").triggered.connect(lambda: self.trigger_conversion("wav"))
+        for target in ('mp4', 'mp3', 'wav', 'm4a'):
+            action = cv_menu.addAction(f"To {target.upper()}")
+            action.setEnabled(bool(record and capabilities['convert'] and conversion_supported(record.get('final_path', ''), target)))
+            action.triggered.connect(lambda checked=False, ext=target: self.trigger_conversion(ext))
         menu.addSeparator()
-        menu.addAction("Resume Download").triggered.connect(self.resume_download)
-        menu.addAction("Stop Download").triggered.connect(self.pause_download)
+        resume_action = menu.addAction("Resume Download"); resume_action.setEnabled(capabilities['resume']); resume_action.triggered.connect(self.resume_download)
+        pause_action = menu.addAction("Pause Download"); pause_action.setEnabled(capabilities['pause']); pause_action.triggered.connect(self.pause_download)
         menu.addSeparator()
-        menu.addAction("Remove").triggered.connect(self.delete_download)
+        delete_action = menu.addAction("Remove"); delete_action.setEnabled(capabilities['delete']); delete_action.triggered.connect(self.delete_download)
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def is_dangerous_file(self, filepath):
@@ -1290,15 +2405,29 @@ class StratrumDownloadStudio(QMainWindow):
                     QMessageBox.warning(self, "Error", "The recorded file is missing or outside its configured download directory.")
 
     def share_link(self):
-        if selected := self.table.selectionModel().selectedRows():
-            QApplication.clipboard().setText(self.table.item(selected[0].row(), 7).text())
-            QMessageBox.information(self, "Link Copied", "URL copied to clipboard!")
+        record = self.selected_record()
+        if not record:
+            QMessageBox.information(self, "Share Source", "Select a download row to copy or open its source URL.")
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy Source URL")
+        open_action = menu.addAction("Open Source Page")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == copy_action:
+            QApplication.clipboard().setText(record['url'])
+            QMessageBox.information(self, "Source URL", "Source URL copied to the clipboard.")
+        elif chosen == open_action:
+            valid, _ = validate_url(record['url'])
+            if valid:
+                webbrowser.open(record['url'])
+            else:
+                QMessageBox.warning(self, "Source URL", "The stored source URL is invalid.")
 
     def delete_completed(self):
         for row in range(self.table.rowCount() - 1, -1, -1):
-            bar = self.table.cellWidget(row, 3)
-            if "Complete" in (bar.text() if bar else self.table.item(row, 3).text() if self.table.item(row, 3) else ""):
-                if d := next((d for d in self.downloads if d['row'] == row), None): self.downloads.remove(d)
+            record = next((item for item in self.downloads if item['row'] == row), None)
+            if record and record['job'].state == JobState.COMPLETED.value:
+                self.downloads.remove(record)
                 self.table.removeRow(row)
                 for other in self.downloads:
                     if other['row'] > row: other['row'] -= 1
@@ -1311,56 +2440,97 @@ class StratrumDownloadStudio(QMainWindow):
     def open_add_dialog(self, url=""):
         if isinstance(url, bool): url = ""
         self.show_normal()
-        dialog = DownloadFileInfoDialog(self, prefill_url=url)
+        dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            final_url, save_dir, quality_idx, target_ext = dialog.get_data()
-            if final_url: self.start_new_download(final_url, save_dir, quality_idx, target_ext)
+            final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
+            if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata)
 
-    def start_new_download(self, url, save_dir, quality_idx, target_ext):
+    def start_new_download(self, url, save_dir, requested_height, target_ext, metadata=None):
         download_id = uuid.uuid4().hex
-
-        if target_ext in ["MP3", "WAV", "FLAC", "M4A"]: format_str = 'bestaudio/best'
-        elif target_ext == "MP4": format_str = {0: 'bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 1: 'bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 2: 'bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 3: 'bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best'}.get(quality_idx, 'best')
-        else: format_str = {0: 'bestvideo+bestaudio/best', 1: 'bestvideo[height<=1080]+bestaudio/best', 2: 'bestvideo[height<=720]+bestaudio/best', 3: 'bestvideo[height<=480]+bestaudio/best'}.get(quality_idx, 'best')
-
-        outtmpl = os.path.join(save_dir, '%(title)s.%(ext)s') # yt-dlp will handle template, but we post-process filename
+        save_path = Path(save_dir).expanduser().resolve()
+        if not save_path.is_dir():
+            QMessageBox.warning(self, "Save Folder", "The selected save folder does not exist.")
+            return
+        profile = output_profile(target_ext)
+        format_str = build_format_selector(target_ext, requested_height)
+        outtmpl = str(save_path / f'%(title)s [%(id)s]-{download_id[:8]}.%(ext)s')
+        job = DownloadJob(
+            job_id=download_id, package_id=download_id, source_url=url, save_dir=str(save_path),
+            requested_format=str(target_ext).upper(), requested_resolution=requested_height,
+            priority=0, state=JobState.QUEUED.value,
+        )
+        self.download_manager.add_job(job)
+        self.app_config.add_recent_folder(save_path)
 
         row = self.table.rowCount()
         self.table.insertRow(row)
 
         pb = QProgressBar(); pb.setRange(0, 100); pb.setValue(0)
         self.table.setItem(row, 0, QTableWidgetItem("Connecting..."))
-        self.table.setItem(row, 1, QTableWidgetItem(""))
+        self.table.setItem(row, 1, QTableWidgetItem(str(job.priority)))
         self.table.setItem(row, 2, QTableWidgetItem("Calculating"))
         self.table.setCellWidget(row, 3, pb)
         self.table.setItem(row, 4, QTableWidgetItem("--:--"))
         self.table.setItem(row, 5, QTableWidgetItem("0 B/s"))
         self.table.setItem(row, 6, QTableWidgetItem(datetime.now().strftime("%b %d %H:%M:%S %Y")))
-        self.table.setItem(row, 7, QTableWidgetItem(url))
+        source_display = sanitize_source_url(url)
+        source_item = QTableWidgetItem(source_display); source_item.setToolTip(source_display)
+        self.table.setItem(row, 7, source_item)
 
-        thread = DownloadThread(download_id, url, outtmpl, format_str, target_ext)
+        record = {
+            'id': download_id, 'url': url, 'outtmpl': outtmpl, 'save_dir': str(save_path),
+            'format': format_str, 'ext': target_ext, 'thread': None, 'row': row,
+            'final_path': '', 'converted_output_path': '', 'requested_resolution': requested_height,
+            'metadata': metadata or {}, 'job': job,
+        }
+        self.downloads.append(record)
+
+        popup = DownloadProgressPopup("Queued", url, self, download_id, self.app_config)
+        popup.pause_requested.connect(self.pause_job)
+        popup.resume_requested.connect(self.resume_job)
+        popup.cancel_requested.connect(self.cancel_job)
+        popup.speed_limit_changed.connect(self.set_job_speed_limit)
+        popup.set_details(f"Requested profile: {target_ext}\nRequested resolution: {requested_height or 'Best'}\nSave folder: {save_path}")
+        popup.show()
+        self.popups[download_id] = popup
+        self.start_queued_jobs()
+
+    def create_download_thread(self, record):
+        thread = DownloadThread(
+            record['id'], record['url'], record['outtmpl'], record['format'], record['ext'],
+            record.get('requested_resolution'), record.get('metadata'), record['save_dir'],
+            self.app_config.speed_limit_bps,
+        )
         thread.progress.connect(self.update_progress)
         thread.status.connect(self.update_status)
         thread.finished.connect(self.download_finished)
         thread.size_updated.connect(self.update_size)
+        thread.metrics.connect(self.update_job_metrics)
+        return thread
 
-        self.downloads.append({
-            'id': download_id, 'url': url, 'outtmpl': outtmpl, 'save_dir': save_dir,
-            'format': format_str, 'ext': target_ext, 'thread': thread, 'row': row,
-            'final_path': '', 'converted_output_path': ''
-        })
-        thread.start()
-
-        popup = DownloadProgressPopup("Connecting...", url, self)
-        popup.show()
-        self.popups[download_id] = popup
+    def start_queued_jobs(self):
+        while self.download_manager.can_start_more():
+            pending = next((record for record in self.downloads if record['job'].state == JobState.QUEUED.value and not record.get('thread')), None)
+            if not pending:
+                break
+            thread = self.create_download_thread(pending)
+            pending['thread'] = thread
+            self.download_manager.set_state(pending['id'], JobState.RESOLVING)
+            if pending['id'] in self.popups:
+                self.popups[pending['id']].set_job_state(JobState.RESOLVING.value)
+            thread.start()
 
     def get_download_by_id(self, id): return next((d for d in self.downloads if d['id'] == id), None)
 
     def update_progress(self, id, filename, percent, downloaded, total, speed, eta, status):
         if d := self.get_download_by_id(id):
+            now = time.monotonic()
+            if status != 'Completed' and now - self.last_progress_paint.get(id, 0.0) < 0.12:
+                return
+            self.last_progress_paint[id] = now
             if filename and filename != "Connecting...":
-                self.table.setItem(d['row'], 0, QTableWidgetItem(filename))
+                item = QTableWidgetItem(filename); item.setToolTip(filename)
+                self.table.setItem(d['row'], 0, item)
 
             self.table.setItem(d['row'], 2, QTableWidgetItem(format_transfer_size(downloaded, total)))
             self.table.setItem(d['row'], 4, QTableWidgetItem(eta))
@@ -1377,14 +2547,45 @@ class StratrumDownloadStudio(QMainWindow):
 
     def update_status(self, id, status):
         if d := self.get_download_by_id(id):
+            state_map = {
+                'Connecting': JobState.CONNECTING, 'Downloading': JobState.DOWNLOADING,
+                'Postprocessing': JobState.MERGING, 'Merging streams': JobState.MERGING,
+                'Converting': JobState.CONVERTING, 'Verifying output': JobState.VERIFYING,
+                'Completed': JobState.COMPLETED, 'Paused': JobState.PAUSED,
+                'Cancelled': JobState.CANCELLED, 'Failed': JobState.FAILED, 'Error': JobState.FAILED,
+            }
+            if status.startswith('Downloading'):
+                state_map[status] = JobState.DOWNLOADING
+            if status in state_map and id in self.download_manager.jobs:
+                self.download_manager.set_state(id, state_map[status])
+            if status == 'Paused':
+                d['thread'] = None
+            if id in self.popups:
+                self.popups[id].set_job_state(state_map.get(status, status).value if isinstance(state_map.get(status), JobState) else status)
+                self.popups[id].set_details(
+                    f"State: {status}\nRequested profile: {d['job'].requested_format}\n"
+                    f"Requested resolution: {d['job'].requested_resolution or 'Best'}\n"
+                    f"Output: {d['job'].final_output_path or 'pending'}\n"
+                    f"Last safe error: {d['job'].error_summary or 'None'}"
+                )
             if bar := self.table.cellWidget(d['row'], 3):
+                color_map = {
+                    'Queued': '#808080', 'Connecting': '#0078d7', 'Downloading': '#0067b8',
+                    'Paused': '#ca5010', 'Postprocessing': '#8764b8', 'Merging streams': '#8764b8',
+                    'Converting': '#8764b8', 'Verifying output': '#498205', 'Completed': '#107c10',
+                    'Failed': '#a4262c', 'Error': '#a4262c', 'Cancelled': '#605e5c',
+                }
+                selected_color = color_map.get(status, '#0067b8' if status.startswith('Downloading') else None)
+                if selected_color:
+                    bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {selected_color}; }}")
                 if status == 'Completed':
                     bar.setValue(100)
                     bar.setFormat("Completed 100%")
-                elif status == 'Downloading' and bar.value() > 0:
-                    bar.setFormat(f"Downloading {bar.value()}%")
+                elif status.startswith('Downloading') and bar.value() > 0:
+                    bar.setFormat(f"{status} {bar.value()}%")
                 else:
                     bar.setFormat(status)
+            self.update_action_capabilities()
 
     def download_finished(self, id, success, error_msg, filepath):
         if d := self.get_download_by_id(id):
@@ -1397,11 +2598,24 @@ class StratrumDownloadStudio(QMainWindow):
                     if bar: bar.setFormat("Error: unsafe completed path")
                     d['final_path'] = ''
                     d['thread'] = None
+                    self.download_manager.set_state(id, JobState.FAILED, 'Unsafe completed output path')
+                    self.start_queued_jobs()
                     return
                 if bar: bar.setValue(100); bar.setFormat("Complete 100%")
+                thread = d.get('thread')
+                probe = thread.final_probe if thread else {}
+                video_stream = next((stream for stream in probe.get('streams', []) if stream.get('codec_type') == 'video'), {})
+                d['job'].final_output_path = str(safe_path)
+                d['job'].actual_format = safe_path.suffix.lower().lstrip('.')
+                d['job'].actual_resolution = video_stream.get('height')
+                d['job'].temporary_paths = list(thread.temporary_paths) if thread else []
+                self.download_manager.set_state(id, JobState.COMPLETED)
                 completed_size = format_bytes(safe_path.stat().st_size)
                 self.table.setItem(d['row'], 2, QTableWidgetItem(format_transfer_size(completed_size, completed_size)))
-                if id in self.popups: self.popups[id].close(); del self.popups[id]
+                popup = self.popups.get(id)
+                if popup:
+                    popup.update_stats(safe_path.name, 100.0, completed_size, completed_size, '0 B/s', '00:00:00', 'Completed')
+                    self.execute_completion_action(d, popup)
 
                 dlg = QMessageBox(self)
                 dlg.setWindowTitle("Download Complete")
@@ -1425,59 +2639,108 @@ class StratrumDownloadStudio(QMainWindow):
                     except (OSError, ValueError):
                         QMessageBox.warning(self, "Error", "The completed file can no longer be located safely.")
             else:
-                if bar: bar.setFormat(f"Error: {error_msg}")
+                cancelled = str(error_msg).lower() == 'cancelled'
+                state = JobState.CANCELLED if cancelled else JobState.FAILED
+                self.download_manager.set_state(id, state, error_msg)
+                if bar: bar.setFormat("Cancelled" if cancelled else f"Failed: {clean_error_summary(error_msg)}")
+                if id in self.popups:
+                    self.popups[id].set_job_state(state.value)
+                    self.popups[id].set_details(f"State: {state.value}\nSafe error: {clean_error_summary(error_msg)}\nPartial files were retained unless removal was explicitly requested.")
+                if not cancelled:
+                    QMessageBox.warning(self, "Download Failed", clean_error_summary(error_msg))
             d['thread'] = None
+            self.save_downloads_to_file()
+            self.update_action_capabilities()
+            self.start_queued_jobs()
+
+    def execute_completion_action(self, record, popup):
+        action = popup.completion_action()
+        self.app_config.completion_action = action
+        self.app_config.persist()
+        if action == 'open_folder':
+            try: open_download_folder(record)
+            except (OSError, ValueError): pass
+        elif action == 'open_file':
+            try: open_download_file(record)
+            except (OSError, ValueError, PermissionError): pass
+        elif action.startswith('convert_'):
+            self.start_conversion_for_record(record, action.split('_', 1)[1])
+        if action == 'close':
+            popup.close(); self.popups.pop(record['id'], None)
+        elif action != 'keep_open' and not action.startswith('convert_'):
+            popup.close(); self.popups.pop(record['id'], None)
+        if popup.exit_when_idle_cb.isChecked() and self.download_manager.active_count() == 0 and not self.download_manager.pending_jobs():
+            QTimer.singleShot(0, self.force_quit)
 
     def pause_download(self):
-        for idx in self.table.selectionModel().selectedRows():
-            if d := next((d for d in self.downloads if d['row'] == idx.row()), None):
-                if d['thread'] and d['thread'].isRunning(): d['thread'].paused = True
+        record = self.selected_record()
+        if record:
+            self.pause_job(record['id'])
 
     def resume_download(self):
-        for idx in self.table.selectionModel().selectedRows():
-            if d := next((d for d in self.downloads if d['row'] == idx.row()), None):
-                bar = self.table.cellWidget(d['row'], 3)
-                if bar and "Paused" in bar.text():
-                    thread = DownloadThread(d['id'], d['url'], d['outtmpl'], d['format'], d['ext'])
-                    thread.progress.connect(self.update_progress)
-                    thread.status.connect(self.update_status)
-                    thread.finished.connect(self.download_finished)
-                    thread.size_updated.connect(self.update_size)
-                    d['thread'] = thread
-                    thread.start()
+        record = self.selected_record()
+        if record:
+            self.resume_job(record['id'])
 
     def delete_download(self):
         for idx in sorted(self.table.selectionModel().selectedRows(), key=lambda x: x.row(), reverse=True):
             row = idx.row()
             if d := next((d for d in self.downloads if d['row'] == row), None):
-                if d['thread'] and d['thread'].isRunning(): d['thread'].paused = True
+                if not job_capabilities(d['job'])['delete']:
+                    continue
+                if d['thread'] and d['thread'].isRunning(): d['thread'].cancel()
                 self.table.removeRow(row); self.downloads.remove(d)
+                self.download_manager.jobs.pop(d['id'], None)
+                if d['id'] in self.download_manager.queue: self.download_manager.queue.remove(d['id'])
+                self.download_manager.persist()
                 for other in self.downloads:
                     if other['row'] > row: other['row'] -= 1
 
     def trigger_conversion(self, target_ext):
-        for idx in self.table.selectionModel().selectedRows():
-            if d := next((d for d in self.downloads if d['row'] == idx.row()), None):
-                bar = self.table.cellWidget(d['row'], 3)
-                if bar and bar.text() == "Complete" and d.get('final_path'):
-                    bar.setFormat("Converting...")
-                    self.converter = ConvertThread(d['id'], d['final_path'], target_ext)
-                    self.converter.finished.connect(self.conversion_done)
-                    self.converter.start()
+        record = self.selected_record()
+        if record:
+            self.start_conversion_for_record(record, target_ext)
+
+    def start_conversion_for_record(self, record, target_ext):
+        if not job_capabilities(record['job'])['convert'] or not conversion_supported(record.get('final_path', ''), target_ext):
+            QMessageBox.information(self, "Convert", "This completed input cannot be converted to the selected output.")
+            return False
+        if bar := self.table.cellWidget(record['row'], 3): bar.setFormat(f"Converting to {target_ext.upper()}...")
+        self.download_manager.set_state(record['id'], JobState.CONVERTING)
+        converter = ConvertThread(record['id'], record['final_path'], target_ext)
+        converter.finished.connect(self.conversion_done)
+        self.converters[record['id']] = converter
+        converter.start()
+        return True
 
     def conversion_done(self, row_id, success, msg, output_path):
         if d := self.get_download_by_id(row_id):
             bar = self.table.cellWidget(d['row'], 3)
             if not success:
-                if bar: bar.setFormat(msg)
+                self.download_manager.set_state(row_id, JobState.COMPLETED, f"Conversion failure: {msg}")
+                cancelled = 'cancelled' in str(msg).lower()
+                if bar: bar.setFormat("Conversion cancelled" if cancelled else f"Conversion failed: {clean_error_summary(msg)}")
+                if cancelled:
+                    QMessageBox.information(self, "Conversion Cancelled", "The original downloaded file remains available.")
+                else:
+                    QMessageBox.warning(self, "Conversion Failed", clean_error_summary(msg))
+                self.converters.pop(row_id, None)
+                self.start_queued_jobs()
                 return
             try:
                 converted_path = store_conversion_output(d, output_path)
             except (OSError, ValueError):
+                self.download_manager.set_state(row_id, JobState.COMPLETED, 'Conversion failure: output missing or unsafe')
                 if bar: bar.setFormat("Conversion output missing or unsafe")
+                QMessageBox.warning(self, "Conversion Failed", "The conversion output is missing or outside the download folder.")
+                self.converters.pop(row_id, None)
+                self.start_queued_jobs()
                 return
-            if bar: bar.setFormat("Complete")
+            self.download_manager.set_state(row_id, JobState.COMPLETED)
+            if bar: bar.setFormat("Completed 100%")
             self.save_downloads_to_file()
+            self.converters.pop(row_id, None)
+            self.start_queued_jobs()
 
             dialog = QMessageBox(self)
             dialog.setWindowTitle("Conversion Complete")
@@ -1491,12 +2754,16 @@ class StratrumDownloadStudio(QMainWindow):
                 except (OSError, ValueError):
                     QMessageBox.warning(self, "Error", "The converted output can no longer be located safely.")
 
-if __name__ == "__main__":
+def main(argv=None):
     runtime_config = initialize_runtime()
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(list(argv) if argv is not None else sys.argv)
     app.setStyleSheet(MODERN_STYLE)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 9))
     window = StratrumDownloadStudio(runtime_config)
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
