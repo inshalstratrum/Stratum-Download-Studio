@@ -1,4 +1,10 @@
+if (!globalThis.StratumMediaCandidates && typeof importScripts === "function") {
+  importScripts("media_candidates.js");
+}
+
 const extensionApi = globalThis.browser || globalThis.chrome;
+const candidateApi = globalThis.StratumMediaCandidates;
+const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
 const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
@@ -20,6 +26,10 @@ async function readLocalStorage(keys) {
 }
 
 async function sendToDesktopApp(url, action) {
+  const safeUrl = candidateApi.safeUrl(url);
+  if (!safeUrl) {
+    return { success: false, code: "invalid_url", message: "Stratum rejected an unsafe or unsupported URL." };
+  }
   const stored = await readLocalStorage(["authToken"]);
   const token = stored.authToken || "";
   if (!token) {
@@ -39,7 +49,7 @@ async function sendToDesktopApp(url, action) {
         "Content-Type": "application/json",
         "X-Stratrum-Auth": token
       },
-      body: JSON.stringify({ url, action }),
+      body: JSON.stringify({ url: safeUrl.href, action }),
       signal: controller.signal
     });
 
@@ -85,12 +95,18 @@ async function showResultInTab(tabId, result) {
         message: result.message
       });
     } catch (error) {
-      // Some restricted pages cannot host content scripts.
+      // Restricted pages and frames may not host content scripts.
     }
   }
   if (result.code === "missing_token") {
     await extensionApi.runtime.openOptionsPage();
   }
+}
+
+function observeFromMessage(message, sender) {
+  const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+  const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+  return candidateStore.observe({ ...message.candidate, tabId, frameId });
 }
 
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -107,9 +123,54 @@ extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "stratrum-download-request") {
+  if (!message || typeof message !== "object") return false;
+  if (message.type === "stratrum-candidate-observed") {
+    sendResponse({ candidate: observeFromMessage(message, sender) });
     return false;
   }
-  sendToDesktopApp(message.url, "default").then(sendResponse);
-  return true;
+  if (message.type === "stratrum-get-candidates") {
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+    const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+    sendResponse({ candidates: candidateStore.list({ tabId, frameId, pageUrl: message.pageUrl }) });
+    return false;
+  }
+  if (message.type === "stratrum-remove-candidates") {
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+    const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+    candidateStore.removeIds(message.ids, { tabId, frameId });
+    sendResponse({ success: true });
+    return false;
+  }
+  if (message.type === "stratrum-download-request") {
+    sendToDesktopApp(message.url, "default").then(sendResponse);
+    return true;
+  }
+  return false;
 });
+
+if (extensionApi.tabs && extensionApi.tabs.onRemoved) {
+  extensionApi.tabs.onRemoved.addListener((tabId) => candidateStore.removeTab(tabId));
+}
+
+if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
+  extensionApi.webRequest.onHeadersReceived.addListener((details) => {
+    if (details.tabId < 0 || candidateApi.isSegmentUrl(details.url)) return;
+    const headers = details.responseHeaders || [];
+    const headerValue = (name) => {
+      const header = headers.find((item) => String(item.name || "").toLowerCase() === name);
+      return header ? String(header.value || "") : "";
+    };
+    const contentType = headerValue("content-type");
+    const contentDisposition = headerValue("content-disposition");
+    if (!candidateApi.isUsefulResponseEvidence(contentType, contentDisposition) && !/\.(?:m3u8|mpd)(?:$|[?#])/i.test(details.url)) return;
+    candidateStore.observe({
+      tabId: details.tabId,
+      frameId: Number.isInteger(details.frameId) ? details.frameId : 0,
+      pageUrl: details.documentUrl || details.initiator || details.url,
+      url: details.url,
+      contentType,
+      contentDisposition,
+      evidence: "webRequest-response"
+    });
+  }, { urls: ["http://*/*", "https://*/*"] }, ["responseHeaders"]);
+}

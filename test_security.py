@@ -842,31 +842,34 @@ def test_chromium_manifest_enables_http_https_media_detection():
     assert manifest['manifest_version'] == 3
     assert manifest['background'] == {'service_worker': 'background.js'}
     assert manifest['content_scripts'][0]['matches'] == ['http://*/*', 'https://*/*']
-    assert manifest['content_scripts'][0]['js'] == ['content.js']
+    assert manifest['content_scripts'][0]['js'] == ['media_candidates.js', 'content.js']
+    assert manifest['content_scripts'][0]['all_frames'] is True
+    assert 'webRequest' in manifest['permissions']
 
 
 def test_firefox_manifest_has_stable_id_and_background_script():
     manifest = json.loads(Path('firefox_extension/manifest.json').read_text(encoding='utf-8'))
     gecko = manifest['browser_specific_settings']['gecko']
     assert manifest['manifest_version'] == 3
-    assert manifest['background'] == {'scripts': ['background.js']}
+    assert manifest['background'] == {'scripts': ['media_candidates.js', 'background.js']}
     assert gecko['id'] == 'stratrum-download-studio@stratrum.local'
     assert gecko['data_collection_permissions']['required'] == ['none']
 
 
 def test_media_content_script_is_dynamic_deduplicated_and_click_driven():
     content = Path('browser_extension/content.js').read_text(encoding='utf-8')
-    for required in ('MutationObserver', 'addedNodes', 'video, audio', 'mediaButtons.has', 'currentSrc', 'addEventListener("click"', 'stratrum-download-request'):
+    model = Path('browser_extension/media_candidates.js').read_text(encoding='utf-8')
+    for required in ('MutationObserver', 'addedNodes', 'video, audio', 'mediaControls.has', 'currentSrc', 'addEventListener("click"', 'stratrum-download-request'):
         assert required in content
-    request_body = content.split('async function requestDownload', 1)[1].split('function positionButtons', 1)[0]
-    assert 'chooseDownloadUrl(mediaElement)' in request_body
+    assert 'class CandidateStore' in model and 'this.items = new Map()' in model
 
 
 def test_media_content_script_uses_page_fallback_without_sensitive_reads():
     content = Path('browser_extension/content.js').read_text(encoding='utf-8')
+    model = Path('browser_extension/media_candidates.js').read_text(encoding='utf-8')
     assert 'window.location.href' in content
-    assert 'm3u8|mpd|m4s' in content
-    assert 'mediaElement.srcObject' in content
+    assert 'HLS_EXTENSION' in model and 'DASH_EXTENSION' in model and 'SEGMENT_PATH' in model
+    assert 'element.srcObject' in content
     for forbidden in ('document.cookie', 'localStorage', 'browsingData', 'history.search', 'querySelectorAll("input'):
         assert forbidden not in content
 

@@ -1,6 +1,6 @@
 # Firefox Development and Distribution
 
-The Firefox package reuses `background.js`, `content.js`, `options.html`, and `options.js` from `browser_extension/`; only this manifest and Firefox-specific documentation differ.
+The Firefox package reuses `media_candidates.js`, `background.js`, `content.js`, `options.html`, and `options.js` from `browser_extension/`; only this manifest and Firefox-specific documentation differ.
 
 For development, run `browser_extension/package_extension.ps1`, open `about:debugging`, choose **This Firefox** > **Load Temporary Add-on**, and select the generated Firefox ZIP. Temporary add-ons disappear when Firefox restarts.
 
