@@ -1,5 +1,4 @@
 const extensionApi = globalThis.browser || globalThis.chrome;
-const candidateApi = globalThis.StratumMediaCandidates;
 const mediaControls = new Map();
 const elementCandidateIds = new WeakMap();
 const elementEvidence = new WeakMap();
@@ -42,12 +41,9 @@ function mediaKindFor(element) {
 }
 
 function elementCandidates(element, evidence = "dom-media") {
-  if (element.tagName === "IFRAME") {
-    const iframeUrl = element.getAttribute("src") || "";
-    return candidateApi.isExtractorPage(iframeUrl) ? [rawCandidate(iframeUrl, "video", "embedded-frame", { title: element.title || pageTitle() })] : [];
-  }
   if (element.tagName === "A") {
-    return [rawCandidate(element.href, "video", "media-link", { title: element.textContent || element.title || pageTitle() })];
+    const kind = /\.(?:mp3|m4a|aac|ogg|oga|opus|wav|flac)(?:$|[?#])/i.test(element.href || "") ? "audio" : "video";
+    return [rawCandidate(element.href, kind, "media-link", { title: element.textContent || element.title || pageTitle() })];
   }
 
   if (drmMedia.has(element) || element.mediaKeys) return [];
@@ -68,7 +64,9 @@ function elementCandidates(element, evidence = "dom-media") {
       contentType: source.type,
       blobOnly,
       allowPage: true,
-      title: element.getAttribute("aria-label") || element.title || pageTitle()
+      title: element.getAttribute("aria-label") || element.title || pageTitle(),
+      width: Number(element.videoWidth) || 0,
+      height: Number(element.videoHeight) || 0
     }));
   }
   if (element.srcObject || candidates.length === 0) {
@@ -132,8 +130,7 @@ function closePicker() {
 }
 
 function candidateLabel(candidate) {
-  const type = { page: "Page", direct_media: "Direct", hls: "HLS", dash: "DASH" }[candidate.type] || "Media";
-  return `${candidate.title} — ${type} ${candidate.mediaKind}`;
+  return candidate.label || `${candidate.mediaKind === "audio" ? "Audio" : "Video"} • Media`;
 }
 
 function showPicker(candidates, button) {
@@ -150,7 +147,7 @@ function showPicker(candidates, button) {
     const choice = document.createElement("button");
     choice.type = "button";
     choice.textContent = candidateLabel(candidate);
-    choice.title = candidate.url;
+    choice.title = candidate.safeTarget || candidateLabel(candidate);
     choice.setAttribute("role", "menuitem");
     Object.assign(choice.style, {
       display: "block", width: "100%", padding: "7px 8px", border: "0", borderRadius: "4px",
@@ -238,10 +235,10 @@ function isMediaLink(element) {
 function scanNode(node) {
   if (!showMediaButtons || !(node instanceof Element)) return;
   const consider = (element) => {
-    if (element.matches("video, audio") || (element.matches("iframe") && candidateApi.isExtractorPage(element.src)) || isMediaLink(element)) attachControl(element);
+    if (element.matches("video, audio") || isMediaLink(element)) attachControl(element);
   };
   consider(node);
-  node.querySelectorAll("video, audio, iframe, a[href]").forEach(consider);
+  node.querySelectorAll("video, audio, a[href]").forEach(consider);
 }
 
 function removeAllControls() {
@@ -255,13 +252,21 @@ function removeAllControls() {
 }
 
 function observeDirectPage() {
-  reportCandidate(rawCandidate(window.location.href, "video", "page-url"));
+  const contentType = String(document.contentType || "").toLowerCase();
+  const mediaKind = contentType.startsWith("audio/") ? "audio" : "video";
+  const topLevelDocument = window.top === window;
+  reportCandidate(rawCandidate(window.location.href, mediaKind, topLevelDocument ? "top-level-media-document" : "frame-document-url", {
+    contentType,
+    topLevelDocument,
+    title: pageTitle()
+  }));
 }
 
 function handleNavigation() {
   if (lastPageUrl === window.location.href) return;
   lastPageUrl = window.location.href;
   closePicker();
+  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href }).catch(() => {});
   observeDirectPage();
   scanNode(document.documentElement);
 }
@@ -280,6 +285,7 @@ function installNavigationHooks() {
 }
 
 if (supportedPageUrl()) {
+  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href }).catch(() => {});
   extensionApi.storage.local.get(["showMediaButtons"]).then((stored) => {
     showMediaButtons = stored.showMediaButtons !== false;
     observeDirectPage();
@@ -328,7 +334,7 @@ if (supportedPageUrl()) {
     try {
       const performanceObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          reportCandidate(rawCandidate(entry.name, "video", "performance-resource"));
+          reportCandidate(rawCandidate(entry.name, null, "performance-resource"));
         }
       });
       performanceObserver.observe({ type: "resource", buffered: true });

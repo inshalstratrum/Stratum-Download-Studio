@@ -27,7 +27,7 @@ def test_deterministic_media_candidate_model():
 def test_event_driven_dom_detection_and_picker_contract():
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     for required in (
-        'video, audio, iframe, a[href]',
+        'video, audio, a[href]',
         'querySelectorAll("source")',
         "MutationObserver",
         'attributeFilter: ["src", "poster", "href"]',
@@ -42,6 +42,35 @@ def test_event_driven_dom_detection_and_picker_contract():
     ):
         assert required in content
     assert "setInterval" not in content
+    assert 'element.matches("iframe")' not in content
+
+
+def test_direct_media_document_and_trusted_frame_contract():
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+    background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    assert "document.contentType" in content
+    assert '"top-level-media-document"' in content
+    assert "window.top === window" in content
+    assert "topLevelDocument," in content
+    assert "candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId)" in background
+    assert 'details.type === "main_frame" ? "webRequest-main-frame"' in background
+    assert "trustedSenderPage(message.pageUrl, sender)" in background
+    assert "reassignFramePage(tabId, frameId, stable)" in background
+
+
+def test_picker_uses_safe_model_labels_not_raw_signed_urls():
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+    picker = content.split("function candidateLabel", 1)[1].split("async function handleControlClick", 1)[0]
+    assert "candidate.label" in picker
+    assert "candidate.safeTarget" in picker
+    assert "choice.title = candidate.url" not in picker
+
+
+def test_one_token_and_desktop_default_action_are_unchanged():
+    background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    assert background.count('"authToken"') == 1
+    assert '"X-Stratrum-Auth": token' in background
+    assert 'sendToDesktopApp(message.url, "default")' in background
 
 
 def test_manifest_frame_and_webrequest_detection_contract():

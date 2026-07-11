@@ -17,6 +17,8 @@
   const MEDIA_DISPOSITION = /filename\*?\s*=\s*(?:UTF-8''|["'])?[^;"']+\.(?:mp4|webm|mov|mkv|avi|mp3|m4a|aac|ogg|oga|opus|wav|flac|m3u8|mpd)/i;
   const MAX_TITLE_LENGTH = 160;
   const MAX_URL_LENGTH = 8192;
+  const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata", "media-link"]);
+  const TRANSIENT_QUERY_KEYS = /^(?:token|access_token|auth|authorization|signature|sig|expires?|expiry|exp|e|policy|key-pair-id|hdnts|hdntl|hdnea|hmac|jwt|session|sessionid|acl|ip|ipbits|st|__gda__|x-amz-.+|x-goog-.+|range|rn|rbuf|sq)$/i;
 
   function safeUrl(value, baseUrl) {
     if (typeof value !== "string" || !value.trim() || value.length > MAX_URL_LENGTH) {
@@ -62,6 +64,20 @@
       }
     }
     parsed.hash = "";
+    return parsed.href;
+  }
+
+  function canonicalCandidateUrl(value) {
+    const extractor = stablePageUrl(value);
+    if (!extractor) return null;
+    if (isExtractorPage(extractor)) return extractor;
+    const parsed = safeUrl(extractor);
+    parsed.hash = "";
+    const retained = Array.from(parsed.searchParams.entries())
+      .filter(([key]) => !TRANSIENT_QUERY_KEYS.test(key))
+      .sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    parsed.search = "";
+    for (const [key, value] of retained) parsed.searchParams.append(key, value);
     return parsed.href;
   }
 
@@ -133,20 +149,96 @@
 
   function finish(url, type, mediaKind, raw, evidence, pageUrl) {
     const cleanEvidence = Array.from(new Set(evidence.filter((item) => typeof item === "string" && item).map((item) => item.slice(0, 80))));
-    const title = String(raw.title || raw.label || "").replace(/\s+/g, " ").trim().slice(0, MAX_TITLE_LENGTH);
+    const title = sanitizeTitle(raw.title || raw.label || "");
+    const canonicalUrl = canonicalCandidateUrl(url);
+    const priority = candidatePriority(type, url, cleanEvidence, raw);
+    const kindConfidence = raw.mediaKind === "audio" || raw.mediaKind === "video" || /^(?:audio|video)\//i.test(String(raw.contentType || "")) ? 3 : 1;
+    const metadata = candidateMetadata(url, type, mediaKind, raw, contentFormat(raw, url, type, mediaKind));
     return {
-      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${type}|${mediaKind}|${url}`),
+      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${type}|${canonicalUrl}`),
       tabId: Number.isInteger(raw.tabId) ? raw.tabId : -1,
       frameId: Number.isInteger(raw.frameId) ? raw.frameId : 0,
       pageUrl: pageUrl || url,
       url,
+      canonicalUrl,
       type,
       mediaKind,
       title: title || defaultLabel(type, mediaKind),
+      format: metadata.format,
+      resolution: metadata.resolution,
+      bitrateKbps: metadata.bitrateKbps,
+      safeTarget: metadata.safeTarget,
+      label: buildLabel(type, mediaKind, title, metadata),
+      priority,
+      kindConfidence,
       evidence: cleanEvidence,
       firstObserved: Number(raw.firstObserved) || Date.now(),
       lastObserved: Number(raw.lastObserved) || Date.now()
     };
+  }
+
+  function sanitizeTitle(value) {
+    return String(value || "")
+      .replace(/https?:\/\/[^\s]+/gi, (match) => {
+        const parsed = safeUrl(match);
+        return parsed ? `${parsed.origin}${parsed.pathname}` : "[URL]";
+      })
+      .replace(/\b(?:token|access_token|authorization|signature|sig|policy|key-pair-id|expires?)\s*=\s*[^\s&]+/gi, "[redacted]")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, MAX_TITLE_LENGTH);
+  }
+
+  function candidatePriority(type, url, evidence, raw) {
+    if (type === "page" && isExtractorPage(url)) return 1;
+    if (type === "hls" || type === "dash") return 2;
+    if (type === "direct_media" && evidence.some((item) => DOM_EVIDENCE.has(item))) return 3;
+    if (type === "direct_media" && (raw.topLevelDocument || evidence.includes("top-level-media-document") || evidence.includes("webRequest-main-frame"))) return 4;
+    if (type === "direct_media") return 5;
+    return 6;
+  }
+
+  function contentFormat(raw, url, type, mediaKind) {
+    if (type === "hls") return "HLS";
+    if (type === "dash") return "DASH";
+    const contentType = String(raw.contentType || "").split(";", 1)[0].toLowerCase();
+    const subtype = contentType.split("/", 2)[1] || "";
+    const parsed = safeUrl(url);
+    const extension = parsed && parsed.pathname.match(/\.([a-z0-9]{2,5})$/i);
+    const value = String(raw.format || (extension && extension[1]) || subtype.split("+")[0] || "").toUpperCase();
+    return value.replace("X-M4A", "M4A").replace("MPEG", mediaKind === "audio" ? "MP3" : "MPEG").slice(0, 12);
+  }
+
+  function candidateMetadata(url, type, mediaKind, raw, format) {
+    const parsed = safeUrl(url);
+    const rawFilename = parsed ? parsed.pathname.split("/").filter(Boolean).pop() || "" : "";
+    let filename = rawFilename;
+    try { filename = decodeURIComponent(rawFilename); } catch (error) { /* Keep the safe encoded path component. */ }
+    const hostname = parsed ? parsed.hostname.replace(/^www\./, "") : "";
+    const width = Number(raw.width) || 0;
+    const height = Number(raw.height) || 0;
+    const bitrate = Number(raw.bitrateKbps || raw.bitrate) || 0;
+    return {
+      format,
+      resolution: width > 0 && height > 0 ? `${Math.round(width)}×${Math.round(height)}` : "",
+      bitrateKbps: bitrate > 0 ? Math.round(bitrate) : 0,
+      safeTarget: type === "direct_media" && filename ? filename.slice(0, 100) : hostname.slice(0, 100),
+      pageDescriptor: /(^|\.)youtu(?:be\.com|\.be)$/.test(hostname) || /(^|\.)youtube-nocookie\.com$/.test(hostname) ? "YouTube page" : /(^|\.)vimeo\.com$/.test(hostname) ? "Vimeo page" : "Page",
+      mediaKind
+    };
+  }
+
+  function buildLabel(type, mediaKind, title, metadata) {
+    const parts = [mediaKind === "audio" ? "Audio" : "Video"];
+    if (type === "page") parts.push(metadata.pageDescriptor);
+    if (type === "direct_media") parts.push(`Direct${metadata.format ? ` ${metadata.format}` : ""}`);
+    if (type === "hls") parts.push("HLS manifest");
+    if (type === "dash") parts.push("DASH manifest");
+    if (metadata.resolution) parts.push(metadata.resolution);
+    if (metadata.bitrateKbps) parts.push(`${metadata.bitrateKbps} kbps`);
+    if (metadata.safeTarget) parts.push(metadata.safeTarget);
+    if (type === "page" && title) parts.push(title.slice(0, 100));
+    return parts.join(" • ");
   }
 
   function defaultLabel(type, mediaKind) {
@@ -177,32 +269,87 @@
       const now = this.clock();
       const candidate = classifyCandidate({ ...raw, firstObserved: now, lastObserved: now });
       if (!candidate) return null;
+      if ((candidate.priority === 5 || candidate.priority === 6) && this.hasDominantCandidate(candidate)) return null;
       const existing = this.items.get(candidate.id);
       if (existing) {
+        const existingPageWasSelf = existing.pageUrl === existing.url;
         existing.lastObserved = now;
         existing.title = candidate.title || existing.title;
-        if (existing.pageUrl === existing.url && candidate.pageUrl !== candidate.url) existing.pageUrl = candidate.pageUrl;
+        existing.url = candidate.url;
+        existing.priority = Math.min(existing.priority, candidate.priority);
+        const existingMetadata = (existing.resolution ? 2 : 0) + (existing.bitrateKbps ? 1 : 0);
+        const candidateMetadata = (candidate.resolution ? 2 : 0) + (candidate.bitrateKbps ? 1 : 0);
+        if (candidate.kindConfidence > existing.kindConfidence || (candidate.kindConfidence === existing.kindConfidence && candidateMetadata > existingMetadata)) {
+          existing.mediaKind = candidate.mediaKind;
+          existing.format = candidate.format;
+          existing.resolution = candidate.resolution || existing.resolution;
+          existing.bitrateKbps = candidate.bitrateKbps || existing.bitrateKbps;
+          existing.safeTarget = candidate.safeTarget || existing.safeTarget;
+          existing.label = candidate.label;
+          existing.kindConfidence = candidate.kindConfidence;
+        }
+        if (existingPageWasSelf && candidate.pageUrl !== candidate.url) existing.pageUrl = candidate.pageUrl;
         existing.evidence = Array.from(new Set(existing.evidence.concat(candidate.evidence)));
         return { ...existing, evidence: [...existing.evidence] };
       }
       this.items.set(candidate.id, candidate);
+      if (candidate.priority <= 2) this.removeDominatedCandidates(candidate);
       this.prune(now);
       return { ...candidate, evidence: [...candidate.evidence] };
     }
 
     list(filter = {}) {
       this.prune(this.clock());
-      return Array.from(this.items.values())
+      let candidates = Array.from(this.items.values())
         .filter((item) => filter.tabId === undefined || item.tabId === filter.tabId)
         .filter((item) => filter.frameId === undefined || item.frameId === filter.frameId)
-        .filter((item) => !filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl))
-        .sort((left, right) => right.lastObserved - left.lastObserved)
-        .map((item) => ({ ...item, evidence: [...item.evidence] }));
+        .filter((item) => !filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl));
+      const extractorPages = candidates.filter((item) => item.priority === 1);
+      if (extractorPages.length) candidates = extractorPages;
+      const manifests = candidates.filter((item) => item.priority === 2);
+      if (manifests.length) candidates = candidates.filter((item) => item.priority !== 5 && item.priority !== 6);
+      if (candidates.some((item) => item.priority < 6)) candidates = candidates.filter((item) => item.priority < 6);
+      candidates.sort((left, right) => left.priority - right.priority || right.lastObserved - left.lastObserved || left.id.localeCompare(right.id));
+      return distinctLabels(candidates).map((item) => ({ ...item, evidence: [...item.evidence] }));
+    }
+
+    sameOwner(left, right) {
+      return left.tabId === right.tabId && left.frameId === right.frameId && left.pageUrl === right.pageUrl;
+    }
+
+    hasDominantCandidate(candidate) {
+      for (const item of this.items.values()) {
+        if (!this.sameOwner(item, candidate)) continue;
+        if (item.priority === 1 || item.priority === 2) return true;
+        if (candidate.priority === 6 && item.priority < 6) return true;
+      }
+      return false;
+    }
+
+    removeDominatedCandidates(candidate) {
+      for (const [id, item] of this.items) {
+        if (id === candidate.id || !this.sameOwner(item, candidate)) continue;
+        if (candidate.priority === 1 || item.priority === 5 || item.priority === 6) this.items.delete(id);
+      }
     }
 
     removeTab(tabId) {
       for (const [id, item] of this.items) {
         if (item.tabId === tabId) this.items.delete(id);
+      }
+    }
+
+    removeFrame(tabId, frameId) {
+      for (const [id, item] of this.items) {
+        if (item.tabId === tabId && item.frameId === frameId) this.items.delete(id);
+      }
+    }
+
+    reassignFramePage(tabId, frameId, pageUrl) {
+      const stable = stablePageUrl(pageUrl);
+      if (!stable) return;
+      for (const item of this.items.values()) {
+        if (item.tabId === tabId && item.frameId === frameId) item.pageUrl = stable;
       }
     }
 
@@ -228,9 +375,32 @@
     }
   }
 
+  function distinctLabels(candidates) {
+    const groups = new Map();
+    for (const item of candidates) {
+      const group = groups.get(item.label) || [];
+      group.push(item);
+      groups.set(item.label, group);
+    }
+    return candidates.map((item) => {
+      const group = groups.get(item.label);
+      if (group.length === 1) return item;
+      const ordered = [...group].sort((left, right) => left.id.localeCompare(right.id));
+      return { ...item, label: `${item.label} • Source ${ordered.indexOf(item) + 1}` };
+    });
+  }
+
+  function applyTrustedOwner(raw, tabId, frameId) {
+    return {
+      ...(raw && typeof raw === "object" ? raw : {}),
+      tabId: Number.isInteger(tabId) ? tabId : -1,
+      frameId: Number.isInteger(frameId) ? frameId : 0
+    };
+  }
+
   function isUsefulResponseEvidence(contentType, contentDisposition) {
     return MEDIA_CONTENT_TYPE.test(String(contentType || "")) || MANIFEST_CONTENT_TYPE.test(String(contentType || "")) || MEDIA_DISPOSITION.test(String(contentDisposition || ""));
   }
 
-  return { CandidateStore, classifyCandidate, isExtractorPage, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl };
+  return { CandidateStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl };
 });

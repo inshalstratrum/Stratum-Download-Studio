@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CandidateStore,
+  applyTrustedOwner,
+  canonicalCandidateUrl,
   classifyCandidate,
   isSegmentUrl,
   isUsefulResponseEvidence,
@@ -34,8 +36,13 @@ test("uses response evidence for extensionless media", () => {
 });
 
 test("classifies one HLS or DASH manifest", () => {
-  assert.equal(classify("https://cdn.test/master.m3u8").type, "hls");
-  assert.equal(classify("https://cdn.test/manifest.mpd").type, "dash");
+  const hls = classify("https://cdn.test/master.m3u8");
+  const dash = classify("https://cdn.test/manifest.mpd", { contentType: "application/dash+xml" });
+  assert.equal(hls.type, "hls");
+  assert.equal(hls.priority, 2);
+  assert.match(hls.label, /Video • HLS manifest • cdn\.test/);
+  assert.equal(dash.type, "dash");
+  assert.equal(dash.priority, 2);
   assert.equal(classify("https://cdn.test/live", { contentType: "application/vnd.apple.mpegurl" }).type, "hls");
 });
 
@@ -56,6 +63,10 @@ test("normalizes YouTube and embedded YouTube to one stable page", () => {
   assert.equal(watch, "https://www.youtube.com/watch?v=AbCdEf12345");
   assert.equal(embed, watch);
   assert.equal(classify(embed).type, "page");
+  assert.notEqual(
+    classify("https://www.youtube.com/embed/AbCdEf12345").id,
+    classify("https://www.youtube.com/embed/ZyXwVu98765").id
+  );
 });
 
 test("rejects unsupported schemes and supports blob page fallback", () => {
@@ -112,4 +123,105 @@ test("removes only candidates owned by the addressed tab and frame", () => {
   const second = store.observe({ tabId: 1, frameId: 2, pageUrl, url: "https://cdn.test/two.mp4", evidence: "fixture" });
   store.removeIds([first.id, second.id], { tabId: 1, frameId: 0 });
   assert.deepEqual(store.list().map((item) => item.id), [second.id]);
+});
+
+test("creates a direct top-level MP4 document candidate", () => {
+  const byExtension = classifyCandidate({
+    tabId: 8,
+    frameId: 0,
+    pageUrl: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+    url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+    topLevelDocument: true,
+    evidence: "top-level-media-document"
+  });
+  const byContentType = classifyCandidate({
+    tabId: 8, frameId: 0, pageUrl: "https://media.test/play", url: "https://media.test/play",
+    contentType: "video/mp4", topLevelDocument: true, evidence: "top-level-media-document"
+  });
+  const byVerifiedResponse = classifyCandidate({
+    tabId: 8, frameId: 0, pageUrl: "https://media.test/file", url: "https://media.test/file",
+    contentType: "video/mp4", evidence: "webRequest-main-frame"
+  });
+  for (const item of [byExtension, byContentType, byVerifiedResponse]) {
+    assert.equal(item.type, "direct_media");
+    assert.equal(item.priority, 4);
+  }
+  assert.equal(byExtension.label, "Video • Direct MP4 • flower.mp4");
+});
+
+test("captures MPD response evidence and prefers it over DASH segments", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 5, frameId: 3, pageUrl: "https://reference.dashif.org/player" };
+  store.observe({ ...owner, url: "https://dash.test/audio/track.m4a", contentType: "audio/mp4", evidence: "webRequest-response" });
+  const manifest = store.observe({ ...owner, url: "https://dash.test/stream/manifest.mpd", contentType: "application/dash+xml", evidence: "webRequest-response" });
+  store.observe({ ...owner, url: "https://dash.test/video/representation.mp4?range=1-500", contentType: "video/mp4", evidence: "performance-resource" });
+  assert.equal(manifest.type, "dash");
+  assert.deepEqual(store.list(owner).map((item) => item.url), [manifest.url]);
+});
+
+test("prefers a Shaka manifest over its unsupported page fallback", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 6, frameId: 0, pageUrl: "https://shaka-player-demo.appspot.com/demo/" };
+  store.observe({ ...owner, url: owner.pageUrl, blobOnly: true, evidence: "dom-media" });
+  const manifest = store.observe({ ...owner, url: "https://storage.test/asset/manifest.mpd?token=secret", contentType: "application/dash+xml", evidence: "webRequest-response" });
+  const listed = store.list(owner);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].id, manifest.id);
+  assert.doesNotMatch(listed[0].label, /token|secret/i);
+});
+
+test("does not grow a segment list after a manifest exists", () => {
+  let now = 0;
+  const store = new CandidateStore({ maxCandidates: 200, clock: () => now });
+  const owner = { tabId: 7, frameId: 0, pageUrl: "https://player.test/demo" };
+  store.observe({ ...owner, url: "https://cdn.test/master.m3u8", contentType: "application/vnd.apple.mpegurl", evidence: "webRequest-response" });
+  for (let index = 0; index < 500; index += 1) {
+    now += 120;
+    store.observe({ ...owner, url: `https://cdn.test/audio/adaptive-${index}.m4a?token=${index}`, contentType: "audio/mp4", evidence: "webRequest-response" });
+    store.observe({ ...owner, url: `https://cdn.test/video/chunk-${index}.m4s`, contentType: "video/mp4", evidence: "performance-resource" });
+  }
+  assert.equal(store.items.size, 1);
+  assert.equal(store.list(owner)[0].type, "hls");
+});
+
+test("YouTube page candidate suppresses network fragments", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 9, frameId: 4, pageUrl: "https://www.youtube.com/embed/AbCdEf12345" };
+  store.observe({ ...owner, url: "https://cdn.other.test/adaptive-video.mp4?signature=secret", contentType: "video/mp4", evidence: "performance-resource" });
+  const page = store.observe({ ...owner, url: owner.pageUrl, title: "First video", evidence: "page-url" });
+  assert.deepEqual(store.list({ tabId: 9, frameId: 4 }).map((item) => item.id), [page.id]);
+});
+
+test("player-local frame lists cannot see sibling iframe candidates", () => {
+  const store = new CandidateStore();
+  const first = store.observe({ tabId: 10, frameId: 21, pageUrl: "https://www.youtube.com/embed/AbCdEf12345", url: "https://www.youtube.com/embed/AbCdEf12345", title: "First", evidence: "page-url" });
+  const second = store.observe({ tabId: 10, frameId: 22, pageUrl: "https://www.youtube.com/embed/ZyXwVu98765", url: "https://www.youtube.com/embed/ZyXwVu98765", title: "Second", evidence: "page-url" });
+  assert.deepEqual(store.list({ tabId: 10, frameId: 21 }).map((item) => item.id), [first.id]);
+  assert.deepEqual(store.list({ tabId: 10, frameId: 22 }).map((item) => item.id), [second.id]);
+});
+
+test("trusted sender ownership overrides page-supplied identifiers", () => {
+  const owned = applyTrustedOwner({ tabId: 999, frameId: 888, url: "https://cdn.test/movie.mp4" }, 12, 34);
+  assert.equal(owned.tabId, 12);
+  assert.equal(owned.frameId, 34);
+});
+
+test("candidate labels are useful, distinct, and query-safe", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 11, frameId: 0, pageUrl };
+  store.observe({ ...owner, url: "https://one.test/path/movie.mp4?token=secret", evidence: "dom-media", width: 1920, height: 1080 });
+  store.observe({ ...owner, url: "https://two.test/other/movie.mp4?signature=hidden", evidence: "dom-media", width: 1920, height: 1080 });
+  const labels = store.list(owner).map((item) => item.label);
+  assert.equal(new Set(labels).size, 2);
+  assert.ok(labels.every((label) => /Video • Direct MP4 • 1920×1080 • movie\.mp4 • Source [12]/.test(label)));
+  assert.ok(labels.every((label) => !/secret|hidden|token|signature/i.test(label)));
+  assert.equal(canonicalCandidateUrl("https://one.test/path/movie.mp4?token=a&id=public"), "https://one.test/path/movie.mp4?id=public");
+});
+
+test("late trusted frame-page binding keeps an early manifest owned by its player", () => {
+  const store = new CandidateStore();
+  const manifest = store.observe({ tabId: 13, frameId: 2, pageUrl: "https://shaka.test/", url: "https://cdn.test/manifest.mpd", contentType: "application/dash+xml", evidence: "webRequest-response" });
+  store.reassignFramePage(13, 2, "https://shaka.test/demo/player");
+  store.observe({ tabId: 13, frameId: 2, pageUrl: "https://shaka.test/demo/player", url: "https://shaka.test/demo/player", blobOnly: true, evidence: "dom-media" });
+  assert.deepEqual(store.list({ tabId: 13, frameId: 2, pageUrl: "https://shaka.test/demo/player" }).map((item) => item.id), [manifest.id]);
 });

@@ -1,13 +1,14 @@
 # Current State
 
-- Phase: 2A.6C — broad secure browser media detection restored.
-- Branch: `phase-2a6c-media-detection`.
-- Commit: `Phase 2A.6C: Restore broad secure media detection` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Phase: 2A.6C.1 — manifest selection and player-scoped candidate quality corrected.
+- Branch: `phase-2a6c1-candidate-quality`.
+- Commit: `Phase 2A.6C.1: Fix manifest selection and player-scoped candidates` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
 - Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
-- Test command: `python -m pytest -q`; current expected count: 248 passed.
-- Working features: Phase 2A.6B desktop-controlled default action and one-token authenticated delivery remain intact. Chromium/Firefox MV3 content scripts now run in permitted frames and use event-driven HTML5/source/iframe/SPA/resource detection plus non-blocking media-response evidence. Candidates are stable, deduplicated, frame-aware, bounded, expiring, and routed as safe page, direct media, HLS, or DASH choices through a small picker when needed.
-- Safety boundaries: segment and Google Video fragment floods, unsupported schemes, tiny/tracking media, credentials in URLs, oversized URLs, and DRM/EME media are suppressed. No cookies, authorization headers, request bodies, or private page contents are sent to the desktop. General files and Phase 2B behavior remain out of scope.
-- Unresolved blockers: no automated blockers. Manual Chrome/Edge/Firefox checks on representative local deterministic pages and authorized live media remain required; no live-site or DRM-bypass testing was performed.
+- Test command: `python -m pytest -q`; current expected count: 251 passed.
+- Working features: Phase 2A.6B one-token delivery and desktop-controlled default action remain intact. Direct media documents are detected from URL, document type, or verified response evidence. Extractor pages and HLS/DASH manifests deterministically outrank direct/network/page fallbacks; adaptive segments are removed or suppressed once the owning frame has a manifest. Trusted sender tab/frame identity scopes player buttons, including separate embedded YouTube frames.
+- Candidate quality: canonical IDs discard transient signed parameters while preserving public identifiers; labels identify media kind, route type, format, reliable resolution/bitrate, and a query-safe hostname or filename. Duplicate labels receive a stable safe distinction, and candidate storage remains bounded and expiring.
+- Safety boundaries: unsupported schemes, Google Video/adaptive fragments, tiny/tracking media, credential-bearing or oversized URLs, and DRM/EME media remain suppressed. No desktop/converter or Phase 2B general-file code changed.
+- Unresolved blockers: no automated blockers. Manual retesting remains required for direct top-level MP4, DASH-IF, Shaka, two-iframe ownership, and representative Chrome/Edge/Firefox media pages.
 - Next task: Phase 2B only when explicitly authorized.
 
 ## Roadmap — record only

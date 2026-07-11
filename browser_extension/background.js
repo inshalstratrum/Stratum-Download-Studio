@@ -5,6 +5,7 @@ if (!globalThis.StratumMediaCandidates && typeof importScripts === "function") {
 const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
 const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
+const framePageUrls = new Map();
 const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
@@ -106,7 +107,32 @@ async function showResultInTab(tabId, result) {
 function observeFromMessage(message, sender) {
   const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
   const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
-  return candidateStore.observe({ ...message.candidate, tabId, frameId });
+  const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.candidate && message.candidate.pageUrl, sender));
+  return candidateStore.observe(candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId));
+}
+
+function frameKey(tabId, frameId) {
+  return `${tabId}:${frameId}`;
+}
+
+function trustedSenderPage(requestedPageUrl, sender) {
+  const senderUrl = candidateApi.safeUrl(sender && sender.url || "");
+  const requested = candidateApi.safeUrl(requestedPageUrl || "");
+  if (senderUrl && requested && senderUrl.origin === requested.origin) return requested.href;
+  if (senderUrl) return senderUrl.href;
+  if (sender && sender.frameId === 0 && sender.tab) return sender.tab.url;
+  return null;
+}
+
+function bindFramePage(tabId, frameId, pageUrl) {
+  const stable = candidateApi.stablePageUrl(pageUrl || "");
+  if (!stable) return framePageUrls.get(frameKey(tabId, frameId)) || null;
+  const key = frameKey(tabId, frameId);
+  const previous = framePageUrls.get(key);
+  if (!previous) candidateStore.reassignFramePage(tabId, frameId, stable);
+  else if (previous !== stable) candidateStore.removeFrame(tabId, frameId);
+  framePageUrls.set(key, stable);
+  return stable;
 }
 
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -128,10 +154,18 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ candidate: observeFromMessage(message, sender) });
     return false;
   }
+  if (message.type === "stratrum-frame-page") {
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+    const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+    bindFramePage(tabId, frameId, trustedSenderPage(message.pageUrl, sender));
+    sendResponse({ success: true });
+    return false;
+  }
   if (message.type === "stratrum-get-candidates") {
     const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
-    sendResponse({ candidates: candidateStore.list({ tabId, frameId, pageUrl: message.pageUrl }) });
+    const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.pageUrl, sender));
+    sendResponse({ candidates: candidateStore.list({ tabId, frameId, pageUrl }) });
     return false;
   }
   if (message.type === "stratrum-remove-candidates") {
@@ -149,12 +183,18 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 if (extensionApi.tabs && extensionApi.tabs.onRemoved) {
-  extensionApi.tabs.onRemoved.addListener((tabId) => candidateStore.removeTab(tabId));
+  extensionApi.tabs.onRemoved.addListener((tabId) => {
+    candidateStore.removeTab(tabId);
+    for (const key of framePageUrls.keys()) if (key.startsWith(`${tabId}:`)) framePageUrls.delete(key);
+  });
 }
 
 if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
   extensionApi.webRequest.onHeadersReceived.addListener((details) => {
     if (details.tabId < 0 || candidateApi.isSegmentUrl(details.url)) return;
+    const frameId = Number.isInteger(details.frameId) ? details.frameId : 0;
+    const isFrameDocument = details.type === "main_frame" || details.type === "sub_frame";
+    if (isFrameDocument) bindFramePage(details.tabId, frameId, details.url);
     const headers = details.responseHeaders || [];
     const headerValue = (name) => {
       const header = headers.find((item) => String(item.name || "").toLowerCase() === name);
@@ -165,12 +205,13 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
     if (!candidateApi.isUsefulResponseEvidence(contentType, contentDisposition) && !/\.(?:m3u8|mpd)(?:$|[?#])/i.test(details.url)) return;
     candidateStore.observe({
       tabId: details.tabId,
-      frameId: Number.isInteger(details.frameId) ? details.frameId : 0,
-      pageUrl: details.documentUrl || details.initiator || details.url,
+      frameId,
+      pageUrl: isFrameDocument ? details.url : framePageUrls.get(frameKey(details.tabId, frameId)) || details.documentUrl || details.initiator || details.url,
       url: details.url,
       contentType,
       contentDisposition,
-      evidence: "webRequest-response"
+      topLevelDocument: details.type === "main_frame",
+      evidence: details.type === "main_frame" ? "webRequest-main-frame" : "webRequest-response"
     });
   }, { urls: ["http://*/*", "https://*/*"] }, ["responseHeaders"]);
 }
