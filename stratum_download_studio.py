@@ -67,7 +67,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
     QWidget, QGridLayout, QCheckBox, QTextEdit
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices, QCursor
 
 # ==========================================
@@ -3168,17 +3168,42 @@ class StratrumDownloadStudio(QMainWindow):
             'quick': 'quick_download',
             'options': 'download_with_options',
         }.get(action, action)
-        if resolved_action == 'quick_download' and self.quick_download_defaults_valid():
+        if resolved_action == 'quick_download':
             self.show_normal(request_foreground=True)
-            self.start_new_download(url, self.app_config.recent_folders[0], self.app_config.preferred_resolution,
-                                    self.app_config.preferred_format)
+            try:
+                save_dir, requested_resolution, target_format = self.quick_download_defaults()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Quick Download Unavailable", str(exc))
+                return False
+            self.start_new_download(url, save_dir, requested_resolution, target_format)
             return True
         self.open_add_dialog(url, request_foreground=True)
         return True
 
+    def quick_download_defaults(self, home_directory=None):
+        target_format = self.app_config.preferred_format if self.app_config.preferred_format in OUTPUT_PROFILES else 'MP4'
+        requested_resolution = self.app_config.preferred_resolution
+        if requested_resolution not in {None, 240, 360, 480, 720, 1080, 1440, 2160, 4320}:
+            requested_resolution = None
+        candidates = [Path(folder).expanduser() for folder in self.app_config.recent_folders]
+        if home_directory is not None:
+            candidates.append(Path(home_directory) / 'Downloads')
+        else:
+            system_downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+            if system_downloads:
+                candidates.append(Path(system_downloads))
+            candidates.append(Path.home() / 'Downloads')
+        save_dir = next((candidate.resolve() for candidate in candidates if candidate.is_dir()), None)
+        if save_dir is None:
+            raise ValueError("Quick Download cannot start because the saved folder and your Downloads folder are unavailable. Choose a valid folder in Download with Options first.")
+        return str(save_dir), requested_resolution, target_format
+
     def quick_download_defaults_valid(self):
-        return bool(self.app_config.preferred_format in OUTPUT_PROFILES and self.app_config.recent_folders and
-                    Path(self.app_config.recent_folders[0]).is_dir())
+        try:
+            self.quick_download_defaults()
+            return True
+        except ValueError:
+            return False
 
     def open_add_dialog(self, url="", request_foreground=False):
         if isinstance(url, bool): url = ""

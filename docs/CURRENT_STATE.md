@@ -1,11 +1,11 @@
 # Current State
 
-- Phase: 2A.6B.1 — browser download-mode ownership centralized in desktop Browser Integration settings.
+- Phase: 2A.6B.2 — desktop-controlled Quick Download routing corrected with safe defaults.
 - Branch: `phase-2a6b-quick-download`.
-- Commit: `Phase 2A.6B.1: Centralize browser download mode in desktop settings` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Commit: `Phase 2A.6B.2: Fix desktop-controlled quick download routing` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
 - Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
-- Test command: `python -m pytest -q`; current expected count: 239 passed.
-- Working features: Phase 2A.6B behavior remains intact; desktop Browser Integration is the single source of truth for the ordinary extension-button action; the extension sends neutral `default`, retains one shared token and extension-specific controls, and keeps explicit Quick/Options context-menu overrides compatible.
+- Test command: `python -m pytest -q`; current expected count: 243 passed.
+- Working features: Phase 2A.6B behavior remains intact; desktop Browser Integration immediately controls the next neutral `default` request; Quick Download starts with saved values or safe MP4/Best/system Downloads defaults and reports a clear error only when no safe folder exists; explicit overrides and the shared token remain unchanged.
 - Unresolved blockers: no automated blockers. Manual Windows GUI, drag/drop, pause/resume/cancel, close-during-conversion, open-output, and authorized live-download checks remain required.
 - Next task: Phase 2A.6C only when explicitly authorized.
 

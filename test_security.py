@@ -1546,23 +1546,23 @@ def test_quick_download_starts_immediately_with_valid_desktop_defaults(tmp_path)
     fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
         'start_new_download': lambda self, *args: calls.append(('start', args)),
         'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
-        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+        'quick_download_defaults': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults})()
     assert stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/v', 'quick_download')
     assert [item[0] for item in calls] == ['show', 'start']
 
 
-def test_download_with_options_waits_for_start_and_missing_defaults_fall_back(tmp_path):
+def test_download_with_options_waits_for_start_and_quick_uses_safe_defaults(tmp_path):
     config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
     config.recent_folders = []
     calls = []
     fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
         'start_new_download': lambda self, *args: calls.append(('start', args)),
         'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
-        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+        'quick_download_defaults': lambda self: (str(tmp_path), None, 'MP4')})()
     method = stratrum_download_studio.StratrumDownloadStudio.handle_browser_request
     method(fake, 'https://example.com/a', 'download_with_options')
     method(fake, 'https://example.com/b', 'quick_download')
-    assert [item[0] for item in calls] == ['options', 'options']
+    assert [item[0] for item in calls] == ['options', 'show', 'start']
 
 
 def test_browser_requests_route_via_qt_signal_and_intentional_foreground_only():
@@ -1635,7 +1635,7 @@ def test_desktop_resolves_default_action_from_saved_preference(tmp_path, desktop
     fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
         'start_new_download': lambda self, *args: calls.append(('start', args)),
         'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
-        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+        'quick_download_defaults': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults})()
     stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/video', 'default')
     assert [call[0] for call in calls] == expected
 
@@ -1654,7 +1654,7 @@ def test_explicit_action_compatibility_does_not_change_desktop_default(tmp_path,
     fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
         'start_new_download': lambda self, *args: calls.append(('start', args)),
         'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
-        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+        'quick_download_defaults': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults})()
     stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/video', action)
     assert [call[0] for call in calls] == expected
     assert config.primary_browser_action == 'download_with_options'
@@ -1686,3 +1686,54 @@ def test_quick_and_options_flow_remains_start_vs_confirmation_gated():
     assert 'self.start_new_download' in handler
     assert 'dialog.exec() == QDialog.DialogCode.Accepted' in dialog
     assert 'self.start_new_download' in dialog
+
+
+# Phase 2A.6B.2 end-to-end default routing regression
+
+def test_combo_selection_persists_quick_immediately_in_memory_and_on_disk(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.primary_browser_action = 'download_with_options'; config.persist()
+    dialog = stratrum_download_studio.BrowserIntegrationDialog(config)
+    dialog.default_action_combo.setCurrentIndex(dialog.default_action_combo.findData('quick_download'))
+    assert config.primary_browser_action == 'quick_download'
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    assert restored.primary_browser_action == 'quick_download' and restored.auth_token == TOKEN
+    dialog.close()
+
+
+def test_initially_absent_quick_preferences_use_downloads_mp4_and_best(tmp_path):
+    downloads = tmp_path / 'Downloads'; downloads.mkdir()
+    config = stratrum_download_studio.initialize_runtime(tmp_path / 'config-root', TOKEN, ORIGIN)
+    config.recent_folders = []
+    config.preferred_format = 'invalid'
+    config.preferred_resolution = 999
+    fake = type('Window', (), {'app_config': config})()
+    defaults = stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults(fake, home_directory=tmp_path)
+    assert defaults == (str(downloads.resolve()), None, 'MP4')
+
+
+def test_default_setting_change_affects_the_next_request_without_restart(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.recent_folders = [str(tmp_path)]
+    config.primary_browser_action = 'download_with_options'
+    calls = []
+    fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append('show'),
+        'start_new_download': lambda self, *args: calls.append('start'),
+        'open_add_dialog': lambda self, *args, **kw: calls.append('options'),
+        'quick_download_defaults': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults})()
+    handler = stratrum_download_studio.StratrumDownloadStudio.handle_browser_request
+    handler(fake, 'https://example.com/first', 'default')
+    config.primary_browser_action = 'quick_download'; config.persist()
+    handler(fake, 'https://example.com/second', 'default')
+    assert calls == ['options', 'show', 'start']
+    assert config.auth_token == TOKEN
+
+
+def test_quick_reports_clear_error_only_when_no_safe_folder_exists(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path / 'config-root', TOKEN, ORIGIN)
+    config.recent_folders = [str(tmp_path / 'missing')]
+    fake = type('Window', (), {'app_config': config})()
+    with pytest.raises(ValueError, match='saved folder and your Downloads folder are unavailable'):
+        stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults(fake, home_directory=tmp_path)
+    handler = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.handle_browser_request)
+    assert 'Quick Download Unavailable' in handler and 'open_add_dialog' not in handler.split("if resolved_action == 'quick_download':", 1)[1].split('return True', 1)[0]
