@@ -418,6 +418,55 @@ def run_conversion(thread):
     return events[0]
 
 
+VIDEO_PROBE = {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2', 'duration': 10.0, 'major_brand': 'isom', 'streams': [
+    {'codec_type': 'video', 'codec_name': 'h264', 'width': 320, 'height': 180},
+    {'codec_type': 'audio', 'codec_name': 'aac'},
+]}
+AUDIO_PROBE = {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2', 'duration': 10.0, 'major_brand': 'M4A ', 'streams': [
+    {'codec_type': 'audio', 'codec_name': 'aac'},
+]}
+
+
+def mock_conversion_pipeline(monkeypatch, probe, returncode=0, stderr='', write_output=True, progress=None):
+    commands = []
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            commands.append(args)
+            if write_output:
+                Path(args[-1]).write_bytes(b'converted-media')
+            lines = progress or ['out_time_us=5000000\n', 'progress=continue\n', 'out_time_us=10000000\n', 'progress=end\n']
+            self.stdout = io.StringIO(''.join(lines)); self.stderr = io.StringIO(stderr)
+            if hasattr(kwargs.get('stderr'), 'write'):
+                kwargs['stderr'].write(stderr); kwargs['stderr'].flush()
+            self.returncode = returncode
+
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): return self.returncode
+        def terminate(self): self.returncode = -15
+        def kill(self): self.returncode = -9
+
+    format_by_extension = {
+        '.mp4': ('mov,mp4,m4a,3gp,3g2,mj2', 'isom'), '.mov': ('mov,mp4,m4a,3gp,3g2,mj2', 'qt  '),
+        '.mkv': ('matroska,webm', ''), '.webm': ('matroska,webm', ''), '.avi': ('avi', ''),
+        '.mp3': ('mp3', ''), '.m4a': ('mov,mp4,m4a,3gp,3g2,mj2', 'M4A '), '.aac': ('aac', ''),
+        '.wav': ('wav', ''), '.flac': ('flac', ''), '.ogg': ('ogg', ''), '.opus': ('ogg', ''),
+    }
+
+    def mocked_probe(path, *args, **kwargs):
+        candidate = Path(path)
+        if candidate.exists() and candidate.stat().st_size == 0:
+            return probe
+        format_name, brand = format_by_extension[candidate.suffix.lower()]
+        audio_target = candidate.suffix.lower().lstrip('.') in stratrum_download_studio.AUDIO_EXTENSIONS
+        streams = [{'codec_type': 'audio', 'codec_name': 'mock'}] if audio_target else VIDEO_PROBE['streams']
+        return {'format_name': format_name, 'major_brand': brand, 'duration': 10.0, 'streams': streams}
+
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', mocked_probe)
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'Popen', FakePopen)
+    return commands
+
+
 def test_conversion_missing_input(tmp_path):
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(tmp_path / 'missing.mp4'), 'mp3'))
     assert event[1] is False
@@ -437,40 +486,25 @@ def test_conversion_unique_output(tmp_path, monkeypatch):
     source.touch()
     (tmp_path / 'video_converted.mp3').touch()
 
-    def successful_run(args, **kwargs):
-        Path(args[-1]).touch()
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', successful_run)
+    mock_conversion_pipeline(monkeypatch, VIDEO_PROBE)
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
     assert event[1] is True
     assert event[3].endswith('video_converted_1.mp3')
 
 
-def test_conversion_never_uses_y(tmp_path, monkeypatch):
+def test_conversion_uses_y_only_for_unique_temporary_output(tmp_path, monkeypatch):
     source = tmp_path / 'video.mp4'
     source.touch()
-    commands = []
-
-    def successful_run(args, **kwargs):
-        commands.append(args)
-        Path(args[-1]).touch()
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', successful_run)
+    commands = mock_conversion_pipeline(monkeypatch, VIDEO_PROBE)
     assert run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))[1] is True
-    assert '-y' not in commands[0]
-    assert '-n' in commands[0]
+    assert '-y' in commands[0] and '.partial-' in Path(commands[0][-1]).name
+    assert Path(commands[0][-1]) != source
 
 
 def test_failed_ffmpeg_does_not_report_success(tmp_path, monkeypatch):
     source = tmp_path / 'video.mp4'
     source.touch()
-    monkeypatch.setattr(
-        stratrum_download_studio.subprocess,
-        'run',
-        lambda args, **kwargs: subprocess.CompletedProcess(args, 1),
-    )
+    mock_conversion_pipeline(monkeypatch, VIDEO_PROBE, returncode=1, stderr='ffmpeg failed')
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
     assert event[1] is False
     assert event[3] == ''
@@ -491,11 +525,7 @@ def test_successful_conversion_output_path_is_stored(tmp_path):
 def test_conversion_output_must_exist_before_success(tmp_path, monkeypatch):
     source = tmp_path / 'video.mp4'
     source.touch()
-    monkeypatch.setattr(
-        stratrum_download_studio.subprocess,
-        'run',
-        lambda args, **kwargs: subprocess.CompletedProcess(args, 0),
-    )
+    mock_conversion_pipeline(monkeypatch, VIDEO_PROBE, write_output=False)
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
     assert event[1] is False
     assert event[3] == ''
@@ -505,10 +535,8 @@ def test_conversion_timeout_reports_failure(tmp_path, monkeypatch):
     source = tmp_path / 'video.mp4'
     source.touch()
 
-    def timeout(args, **kwargs):
-        raise subprocess.TimeoutExpired(args, kwargs['timeout'])
-
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', timeout)
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda *args, **kwargs: VIDEO_PROBE)
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'Popen', lambda args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args, 1)))
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
     assert event[1] is False
     assert 'timed out' in event[2].lower()
@@ -888,18 +916,22 @@ PROFILE_PROBES = {
     'MOV': ('mov,mp4,m4a,3gp,3g2,mj2', ['video', 'audio']),
     'MP3': ('mp3', ['audio']),
     'M4A': ('mov,mp4,m4a,3gp,3g2,mj2', ['audio']),
+    'AAC': ('aac', ['audio']),
     'WAV': ('wav', ['audio']),
     'FLAC': ('flac', ['audio']),
+    'OGG': ('ogg', ['audio']),
+    'OPUS': ('ogg', ['audio']),
 }
 
 
 def probe_result(format_name, stream_types):
+    brand_by_extension = {'.mp4': 'isom', '.mov': 'qt  ', '.m4a': 'M4A '}
     payload = {
-        'format': {'format_name': format_name},
         'streams': [{'codec_type': stream_type, 'codec_name': 'mock', 'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
     }
 
     def runner(command, **kwargs):
+        payload['format'] = {'format_name': format_name, 'tags': {'major_brand': brand_by_extension.get(Path(command[-1]).suffix.lower(), '')}}
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload).encode(), stderr=b'')
 
     return runner
@@ -938,6 +970,7 @@ def test_mocked_extractor_pipeline_returns_requested_actual_output(tmp_path, pro
     monkeypatch.setattr(stratrum_download_studio.yt_dlp, 'YoutubeDL', MockYDL)
     monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda path, runner=None: {
         'format_name': format_name,
+        'major_brand': {'MP4': 'isom', 'MOV': 'qt  ', 'M4A': 'M4A '}.get(profile_name, ''),
         'streams': [{'codec_type': stream_type, 'codec_name': 'mock', 'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
     })
     thread = stratrum_download_studio.DownloadThread(
@@ -950,9 +983,9 @@ def test_mocked_extractor_pipeline_returns_requested_actual_output(tmp_path, pro
 
 
 def test_output_profiles_cover_exact_video_and_audio_sets():
-    assert set(stratrum_download_studio.OUTPUT_PROFILES) == {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV', 'MP3', 'M4A', 'WAV', 'FLAC'}
+    assert set(stratrum_download_studio.OUTPUT_PROFILES) == {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV', 'MP3', 'M4A', 'AAC', 'WAV', 'FLAC', 'OGG', 'OPUS'}
     assert {name for name, profile in stratrum_download_studio.OUTPUT_PROFILES.items() if profile.media_kind == 'video'} == {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV'}
-    assert {name for name, profile in stratrum_download_studio.OUTPUT_PROFILES.items() if profile.media_kind == 'audio'} == {'MP3', 'M4A', 'WAV', 'FLAC'}
+    assert {name for name, profile in stratrum_download_studio.OUTPUT_PROFILES.items() if profile.media_kind == 'audio'} == {'MP3', 'M4A', 'AAC', 'WAV', 'FLAC', 'OGG', 'OPUS'}
 
 
 def test_download_engine_never_changes_media_format_by_extension_rename():
@@ -977,9 +1010,10 @@ def test_profile_options_use_real_postprocessors(tmp_path):
     assert stratrum_download_studio.build_download_options('MOV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoConvertor'
     assert stratrum_download_studio.build_download_options('MKV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoRemuxer'
     assert stratrum_download_studio.build_download_options('WEBM', 'out')['merge_output_format'] == 'webm'
-    for audio in ('MP3', 'M4A', 'WAV', 'FLAC'):
+    for audio in ('MP3', 'M4A', 'AAC', 'WAV', 'FLAC', 'OGG', 'OPUS'):
         options = stratrum_download_studio.build_download_options(audio, 'out')
-        assert options['postprocessors'][0]['preferredcodec'] == audio.lower()
+        expected_codec = {'OGG': 'vorbis'}.get(audio, audio.lower())
+        assert options['postprocessors'][0]['preferredcodec'] == expected_codec
 
 
 def test_postprocessor_hook_path_is_final_candidate():
@@ -1014,6 +1048,15 @@ def test_wrong_container_is_rejected_even_with_matching_extension(tmp_path):
     output = tmp_path / 'fake.mp4'; output.touch()
     with pytest.raises(ValueError, match='container'):
         stratrum_download_studio.validate_final_media(output, tmp_path, 'MP4', probe_runner=probe_result('matroska', ['video']))
+
+
+@pytest.mark.parametrize('filename,profile,brand', [('fake.mp4', 'MP4', 'qt  '), ('fake.mov', 'MOV', 'isom')])
+def test_mp4_and_mov_brand_mismatch_is_rejected(filename, profile, brand, tmp_path):
+    output = tmp_path / filename; output.touch()
+    payload = {'format': {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2', 'tags': {'major_brand': brand}}, 'streams': [{'codec_type': 'video'}]}
+    runner = lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload).encode(), stderr=b'')
+    with pytest.raises(ValueError, match='brand'):
+        stratrum_download_studio.validate_final_media(output, tmp_path, profile, probe_runner=runner)
 
 
 def test_preexisting_output_is_not_accepted_as_new_final(tmp_path):
@@ -1151,22 +1194,18 @@ def test_capability_based_commands(state, capability, expected, tmp_path):
 def test_conversion_enablement_rejects_audio_to_video(tmp_path):
     audio = tmp_path / 'audio.m4a'; audio.touch()
     video = tmp_path / 'video.webm'; video.touch()
-    assert not stratrum_download_studio.conversion_supported(audio, 'mp4')
-    assert stratrum_download_studio.conversion_supported(audio, 'mp3')
-    assert stratrum_download_studio.conversion_supported(audio, 'wav')
-    assert stratrum_download_studio.conversion_supported(audio, 'm4a')
-    assert stratrum_download_studio.conversion_supported(video, 'mp4')
+    assert stratrum_download_studio.conversion_supported(audio, 'mp4', AUDIO_PROBE)
+    assert not stratrum_download_studio.conversion_supported(audio, 'mkv', AUDIO_PROBE)
+    assert stratrum_download_studio.conversion_supported(audio, 'mp3', AUDIO_PROBE)
+    assert stratrum_download_studio.conversion_supported(audio, 'wav', AUDIO_PROBE)
+    assert stratrum_download_studio.conversion_supported(audio, 'm4a', AUDIO_PROBE)
+    assert stratrum_download_studio.conversion_supported(video, 'mp4', VIDEO_PROBE)
 
 
 @pytest.mark.parametrize(('source_ext', 'target_ext'), [('m4a', 'mp3'), ('m4a', 'wav'), ('webm', 'mp4')])
 def test_required_conversions_produce_unique_real_output(source_ext, target_ext, tmp_path, monkeypatch):
     source = tmp_path / f'input.{source_ext}'; source.touch()
-
-    def successful_run(args, **kwargs):
-        Path(args[-1]).write_bytes(b'converted')
-        return subprocess.CompletedProcess(args, 0, stdout=b'', stderr=b'')
-
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', successful_run)
+    mock_conversion_pipeline(monkeypatch, AUDIO_PROBE if source_ext == 'm4a' else VIDEO_PROBE)
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), target_ext))
     assert event[1] is True
     assert Path(event[3]).suffix == f'.{target_ext}'
@@ -1175,7 +1214,7 @@ def test_required_conversions_produce_unique_real_output(source_ext, target_ext,
 
 def test_conversion_failure_includes_safe_ffmpeg_summary(tmp_path, monkeypatch):
     source = tmp_path / 'input.m4a'; source.touch()
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout=b'', stderr=b'ffmpeg failed https://signed.example/file?token=secret'))
+    mock_conversion_pipeline(monkeypatch, AUDIO_PROBE, returncode=1, stderr='ffmpeg failed https://signed.example/file?token=secret')
     event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
     assert event[1] is False
     assert '[URL omitted]' in event[2]
@@ -1185,11 +1224,115 @@ def test_conversion_failure_includes_safe_ffmpeg_summary(tmp_path, monkeypatch):
 def test_conversion_can_be_cancelled_before_ffmpeg_starts(tmp_path, monkeypatch):
     source = tmp_path / 'input.m4a'; source.touch()
     called = []
-    monkeypatch.setattr(stratrum_download_studio.subprocess, 'run', lambda *args, **kwargs: called.append(args))
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'Popen', lambda *args, **kwargs: called.append(args))
     thread = stratrum_download_studio.ConvertThread('id', str(source), 'mp3'); thread.cancel()
     event = run_conversion(thread)
     assert event[1] is False and 'cancelled' in event[2].lower()
     assert called == []
+
+
+@pytest.mark.parametrize('target', list(stratrum_download_studio.OUTPUT_PROFILES))
+def test_table_driven_conversion_command_for_every_target(target, tmp_path):
+    source = tmp_path / 'input.mp4'; source.touch()
+    plan = stratrum_download_studio.build_conversion_plan(source, target, tmp_path, VIDEO_PROBE)
+    profile = stratrum_download_studio.output_profile(target)
+    assert plan.destination.suffix == f'.{profile.extension}'
+    assert '-progress' in plan.command and 'pipe:1' in plan.command and '-nostats' in plan.command
+    assert tuple(profile.ffmpeg_video_args if profile.media_kind == 'video' else profile.ffmpeg_audio_args)
+    assert str(plan.temporary_output) == plan.command[-1] and '.partial-' in plan.temporary_output.name
+
+
+def test_probe_based_video_audio_and_same_format_capabilities():
+    video_caps = stratrum_download_studio.conversion_target_capabilities(VIDEO_PROBE)
+    audio_caps = stratrum_download_studio.conversion_target_capabilities(AUDIO_PROBE)
+    assert all(item['enabled'] for item in video_caps.values())
+    assert audio_caps['MP4']['enabled'] and audio_caps['OPUS']['enabled']
+    assert not audio_caps['MKV']['enabled'] and 'video stream' in audio_caps['MKV']['reason']
+    assert audio_caps['M4A']['enabled'] and 'new file' in audio_caps['M4A']['reason']
+
+
+def test_audio_only_mp4_plan_uses_audio_stream_and_never_source(tmp_path):
+    source = tmp_path / 'source.m4a'; source.touch()
+    plan = stratrum_download_studio.build_conversion_plan(source, 'MP4', tmp_path, AUDIO_PROBE)
+    assert plan.required_stream == 'audio' and '-vn' in plan.command
+    assert plan.destination != source
+
+
+def test_progress_parser_reports_percent_elapsed_and_eta():
+    snapshot = stratrum_download_studio.parse_ffmpeg_progress({'out_time_us': '2500000', 'progress': 'continue'}, 10, 100, 102)
+    assert snapshot['percent'] == 25.0 and snapshot['elapsed'] == 2
+    assert snapshot['eta'] == 6
+    assert stratrum_download_studio.parse_ffmpeg_progress({'progress': 'end'}, 10, 100, 104)['percent'] == 100
+
+
+def test_verification_failure_removes_incomplete_temporary_output(tmp_path, monkeypatch):
+    source = tmp_path / 'input.mp4'; source.touch()
+    commands = mock_conversion_pipeline(monkeypatch, VIDEO_PROBE)
+    monkeypatch.setattr(stratrum_download_studio, 'validate_final_media', lambda *args, **kwargs: (_ for _ in ()).throw(ValueError('wrong container')))
+    event = run_conversion(stratrum_download_studio.ConvertThread('id', str(source), 'mp3'))
+    assert not event[1] and 'wrong container' in event[2]
+    assert commands and not Path(commands[0][-1]).exists()
+
+
+def test_running_conversion_cancellation_terminates_and_cleans_temp(tmp_path, monkeypatch):
+    source = tmp_path / 'input.mp4'; source.touch(); holder = {}
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda *args, **kwargs: VIDEO_PROBE)
+
+    class CancellingPopen:
+        def __init__(self, args, **kwargs):
+            self.args = args; self.returncode = None; self.stderr = io.StringIO(''); Path(args[-1]).write_bytes(b'partial')
+            self.stdout = self
+        def __iter__(self):
+            yield 'out_time_us=1000000\n'
+            holder['thread'].cancel()
+            yield 'progress=continue\n'
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): return self.returncode if self.returncode is not None else 0
+        def terminate(self): self.returncode = -15
+        def kill(self): self.returncode = -9
+
+    monkeypatch.setattr(stratrum_download_studio.subprocess, 'Popen', CancellingPopen)
+    thread = stratrum_download_studio.ConvertThread('id', str(source), 'mp3'); holder['thread'] = thread
+    event = run_conversion(thread)
+    assert not event[1] and 'cancelled' in event[2].lower()
+    assert not list(tmp_path.glob('*.partial-*.mp3'))
+
+
+def test_dedicated_converter_job_creation_uses_shared_plans_and_unique_names(tmp_path, monkeypatch):
+    first = tmp_path / 'one' / 'clip.mp4'; second = tmp_path / 'two' / 'clip.mp4'; output = tmp_path / 'out'
+    first.parent.mkdir(); second.parent.mkdir(); output.mkdir(); first.touch(); second.touch()
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda *args, **kwargs: VIDEO_PROBE)
+    jobs = stratrum_download_studio.create_converter_jobs([first, second], 'MP3', output)
+    assert len(jobs) == 2 and len({job['job_id'] for job in jobs}) == 2
+    assert jobs[0]['plan'].destination != jobs[1]['plan'].destination
+    assert all(job['plan'].target_name == 'MP3' for job in jobs)
+
+
+def test_converter_overwrite_behaviors_are_explicit(tmp_path):
+    source = tmp_path / 'source.wav'; source.touch(); existing = tmp_path / 'source_converted.mp3'; existing.touch()
+    unique = stratrum_download_studio.conversion_destination_for_behavior(source, 'MP3', tmp_path, 'unique')
+    assert unique.name == 'source_converted_1.mp3'
+    with pytest.raises(FileExistsError, match='Skipped'):
+        stratrum_download_studio.conversion_destination_for_behavior(source, 'MP3', tmp_path, 'skip')
+    with pytest.raises(PermissionError, match='Confirmation'):
+        stratrum_download_studio.conversion_destination_for_behavior(source, 'MP3', tmp_path, 'ask')
+
+
+def test_local_converter_is_available_from_toolbar_and_tasks_menu(tmp_path):
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_ui)
+    assert 'Convert local media...' in source and 'Converter' in source
+    assert stratrum_download_studio.LocalConverterDialog.dragEnterEvent
+
+
+def test_local_converter_disables_only_incompatible_targets_with_reason(tmp_path, monkeypatch):
+    source = tmp_path / 'audio.bin'; source.write_bytes(b'audio')
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda *args, **kwargs: AUDIO_PROBE)
+    dialog = stratrum_download_studio.LocalConverterDialog(); dialog.add_files([source])
+    mkv_index = dialog.target_combo.findText('MKV'); mp4_index = dialog.target_combo.findText('MP4')
+    assert not dialog.target_combo.model().item(mkv_index).isEnabled()
+    assert 'video stream' in dialog.target_combo.model().item(mkv_index).toolTip()
+    assert dialog.target_combo.model().item(mp4_index).isEnabled()
+    dialog.close()
 
 
 def test_recent_folders_are_unique_mru_bounded_and_persisted(tmp_path):

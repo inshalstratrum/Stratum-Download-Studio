@@ -341,7 +341,7 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         allowed_origins=selected_origins,
         rate_limiter=rate_limiter or RateLimiter(5, 1.0),
         recent_folders=normalize_recent_folders(stored.get('recent_folders', [])),
-        preferred_format=stored.get('preferred_format', 'MP4') if stored.get('preferred_format', 'MP4') in {'MP4', 'MKV', 'WEBM', 'AVI', 'MOV', 'MP3', 'M4A', 'WAV', 'FLAC'} else 'MP4',
+        preferred_format=stored.get('preferred_format', 'MP4') if stored.get('preferred_format', 'MP4') in OUTPUT_PROFILES else 'MP4',
         preferred_resolution=stored.get('preferred_resolution') if stored.get('preferred_resolution') in {None, 240, 360, 480, 720, 1080, 1440, 2160, 4320} else None,
         max_simultaneous_downloads=bounded_int(stored.get('max_simultaneous_downloads'), DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS, 1, 8),
         speed_limit_bps=bounded_int(stored.get('speed_limit_bps'), 0, 0, 1024 * 1024 * 1024),
@@ -534,7 +534,7 @@ def store_conversion_output(download_record, output_path):
 
 
 VIDEO_EXTENSIONS = {'mp4', 'mkv', 'webm', 'avi', 'mov'}
-AUDIO_EXTENSIONS = {'mp3', 'm4a', 'wav', 'flac'}
+AUDIO_EXTENSIONS = {'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'}
 THUMBNAIL_EXTENSIONS = {'.webp', '.jpg', '.jpeg', '.png', '.gif'}
 RESOLUTION_LABELS = {
     4320: '4320p / 8K (7680x4320)',
@@ -555,18 +555,24 @@ class OutputProfile:
     container: str
     audio_codec: str | None = None
     explicit_conversion: bool = False
+    ffmpeg_video_args: tuple = ()
+    ffmpeg_audio_args: tuple = ()
+    expected_formats: tuple = ()
 
 
 OUTPUT_PROFILES = {
-    'MP4': OutputProfile('mp4', 'video', 'mp4'),
-    'MKV': OutputProfile('mkv', 'video', 'matroska'),
-    'WEBM': OutputProfile('webm', 'video', 'webm'),
-    'AVI': OutputProfile('avi', 'video', 'avi', explicit_conversion=True),
-    'MOV': OutputProfile('mov', 'video', 'mov', explicit_conversion=True),
-    'MP3': OutputProfile('mp3', 'audio', 'mp3', 'mp3'),
-    'M4A': OutputProfile('m4a', 'audio', 'm4a', 'm4a'),
-    'WAV': OutputProfile('wav', 'audio', 'wav', 'wav'),
-    'FLAC': OutputProfile('flac', 'audio', 'flac', 'flac'),
+    'MP4': OutputProfile('mp4', 'video', 'mp4', ffmpeg_video_args=('-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart'), ffmpeg_audio_args=('-vn', '-c:a', 'aac', '-movflags', '+faststart'), expected_formats=('mp4', 'mov')),
+    'MKV': OutputProfile('mkv', 'video', 'matroska', ffmpeg_video_args=('-c:v', 'libx264', '-c:a', 'aac'), expected_formats=('matroska',)),
+    'WEBM': OutputProfile('webm', 'video', 'webm', ffmpeg_video_args=('-c:v', 'libvpx-vp9', '-c:a', 'libopus'), expected_formats=('webm', 'matroska')),
+    'AVI': OutputProfile('avi', 'video', 'avi', explicit_conversion=True, ffmpeg_video_args=('-c:v', 'mpeg4', '-c:a', 'libmp3lame'), expected_formats=('avi',)),
+    'MOV': OutputProfile('mov', 'video', 'mov', explicit_conversion=True, ffmpeg_video_args=('-c:v', 'libx264', '-c:a', 'aac'), expected_formats=('mp4', 'mov')),
+    'MP3': OutputProfile('mp3', 'audio', 'mp3', 'mp3', ffmpeg_audio_args=('-vn', '-c:a', 'libmp3lame'), expected_formats=('mp3',)),
+    'M4A': OutputProfile('m4a', 'audio', 'm4a', 'm4a', ffmpeg_audio_args=('-vn', '-c:a', 'aac'), expected_formats=('mp4', 'mov', 'm4a')),
+    'AAC': OutputProfile('aac', 'audio', 'aac', 'aac', ffmpeg_audio_args=('-vn', '-c:a', 'aac', '-f', 'adts'), expected_formats=('aac',)),
+    'WAV': OutputProfile('wav', 'audio', 'wav', 'wav', ffmpeg_audio_args=('-vn', '-c:a', 'pcm_s16le'), expected_formats=('wav',)),
+    'FLAC': OutputProfile('flac', 'audio', 'flac', 'flac', ffmpeg_audio_args=('-vn', '-c:a', 'flac'), expected_formats=('flac',)),
+    'OGG': OutputProfile('ogg', 'audio', 'ogg', 'vorbis', ffmpeg_audio_args=('-vn', '-c:a', 'libvorbis'), expected_formats=('ogg',)),
+    'OPUS': OutputProfile('opus', 'audio', 'opus', 'opus', ffmpeg_audio_args=('-vn', '-c:a', 'libopus'), expected_formats=('opus', 'ogg')),
 }
 
 
@@ -727,7 +733,8 @@ def collect_output_candidates(info, postprocessed_paths, save_dir, extension, pr
 def probe_media_file(path, runner=None):
     runner = runner or subprocess.run
     command = [
-        get_ffprobe_path(), '-v', 'error', '-show_entries', 'format=format_name:stream=codec_type,codec_name,width,height',
+        get_ffprobe_path(), '-v', 'error', '-show_entries',
+        'format=format_name,duration:format_tags=major_brand:stream=codec_type,codec_name,width,height',
         '-of', 'json', str(path),
     ]
     kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'timeout': 30}
@@ -742,13 +749,20 @@ def probe_media_file(path, runner=None):
         payload = json.loads(result.stdout.decode('utf-8') if isinstance(result.stdout, bytes) else result.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("ffprobe returned malformed metadata") from exc
+    format_data = payload.get('format', {}) if isinstance(payload.get('format'), dict) else {}
+    try:
+        duration = float(format_data.get('duration') or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
     return {
-        'format_name': payload.get('format', {}).get('format_name', ''),
+        'format_name': format_data.get('format_name', ''),
+        'duration': max(0.0, duration),
+        'major_brand': (format_data.get('tags') or {}).get('major_brand', ''),
         'streams': payload.get('streams', []),
     }
 
 
-def validate_final_media(path, save_dir, profile_name, probe_runner=None):
+def validate_final_media(path, save_dir, profile_name, probe_runner=None, required_stream=None):
     profile = output_profile(profile_name)
     candidate = Path(path).resolve(strict=True)
     root = Path(save_dir).resolve(strict=True)
@@ -766,17 +780,19 @@ def validate_final_media(path, save_dir, profile_name, probe_runner=None):
         raise ValueError("Intermediate media stream cannot be reported as final output")
     probe = probe_media_file(candidate, runner=probe_runner)
     stream_types = {stream.get('codec_type') for stream in probe['streams'] if isinstance(stream, dict)}
-    required_stream = 'video' if profile.media_kind == 'video' else 'audio'
+    required_stream = required_stream or ('video' if profile.media_kind == 'video' else 'audio')
     if required_stream not in stream_types:
         raise ValueError(f"Final {profile.media_kind} output has no {required_stream} stream")
     format_name = probe.get('format_name', '').lower()
-    expected_formats = {
-        'mp4': {'mp4', 'mov'}, 'mov': {'mp4', 'mov'}, 'm4a': {'mp4', 'mov', 'm4a'},
-        'mkv': {'matroska'}, 'webm': {'webm', 'matroska'}, 'avi': {'avi'},
-        'mp3': {'mp3'}, 'wav': {'wav'}, 'flac': {'flac'},
-    }[profile.extension]
-    if not any(token in format_name.split(',') for token in expected_formats):
+    if not any(token in format_name.split(',') for token in profile.expected_formats):
         raise ValueError(f"ffprobe container does not match requested {profile.extension.upper()} profile")
+    major_brand = str(probe.get('major_brand', '')).strip().lower()
+    if profile.extension == 'mov' and major_brand != 'qt':
+        raise ValueError("ffprobe container brand does not match requested MOV profile")
+    if profile.extension == 'mp4' and (not major_brand or major_brand in {'qt', 'm4a'}):
+        raise ValueError("ffprobe container brand does not match requested MP4 profile")
+    if profile.extension == 'm4a' and major_brand == 'qt':
+        raise ValueError("ffprobe container brand does not match requested M4A profile")
     return candidate, probe
 
 
@@ -1009,16 +1025,151 @@ def sanitize_source_url(url):
         return '[invalid URL]'
 
 
-def conversion_supported(input_path, target_ext):
-    source_ext = Path(input_path).suffix.lower().lstrip('.')
-    target = str(target_ext).lower()
-    if target == 'mp4':
-        return source_ext in VIDEO_EXTENSIONS
-    if target in {'mp3', 'wav'}:
-        return source_ext in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
-    if target == 'm4a':
-        return source_ext in AUDIO_EXTENSIONS
-    return False
+def media_summary(probe):
+    streams = probe.get('streams', []) if isinstance(probe, dict) else []
+    codecs = [str(stream.get('codec_name') or 'unknown') for stream in streams if isinstance(stream, dict)]
+    video = next((stream for stream in streams if isinstance(stream, dict) and stream.get('codec_type') == 'video'), None)
+    resolution = f"{video.get('width')}x{video.get('height')}" if video and video.get('width') and video.get('height') else 'audio only'
+    return {
+        'container': str(probe.get('format_name') or 'unknown'),
+        'codecs': ', '.join(codecs) or 'unknown',
+        'resolution': resolution,
+        'duration': float(probe.get('duration') or 0),
+    }
+
+
+def conversion_target_capabilities(probe):
+    streams = probe.get('streams', []) if isinstance(probe, dict) else []
+    has_video = any(isinstance(stream, dict) and stream.get('codec_type') == 'video' for stream in streams)
+    has_audio = any(isinstance(stream, dict) and stream.get('codec_type') == 'audio' for stream in streams)
+    capabilities = {}
+    for name, profile in OUTPUT_PROFILES.items():
+        if not (has_video or has_audio):
+            enabled, reason = False, 'FFprobe found no audio or video streams.'
+        elif has_video:
+            enabled, reason = True, 'Available; conversion creates a new re-encoded file.'
+        elif profile.media_kind == 'audio' or name == 'MP4':
+            enabled, reason = True, 'Available for audio input; conversion creates a new file.'
+        else:
+            enabled, reason = False, f'{name} requires a video stream; this input is audio-only.'
+        if profile.media_kind == 'audio' and not has_audio:
+            enabled, reason = False, f'{name} requires an audio stream; none was detected.'
+        capabilities[name] = {'enabled': enabled, 'reason': reason}
+    return capabilities
+
+
+def conversion_supported(input_path, target_ext, probe=None):
+    try:
+        actual_probe = probe if probe is not None else probe_media_file(input_path)
+        return conversion_target_capabilities(actual_probe)[str(target_ext).upper()]['enabled']
+    except (KeyError, OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def unique_conversion_destination(input_path, target_ext, output_dir=None, exists=None):
+    source = Path(input_path).resolve(strict=True)
+    output_root = Path(output_dir or source.parent).resolve(strict=True)
+    if not output_root.is_dir():
+        raise ValueError('Output folder does not exist')
+    target = output_profile(target_ext).extension
+    exists = exists or (lambda path: path.exists())
+    stem = source.stem + '_converted'
+    counter = 0
+    while True:
+        suffix = '' if counter == 0 else f'_{counter}'
+        candidate = output_root / f'{stem}{suffix}.{target}'
+        if candidate != source and not exists(candidate) and not exists(candidate.with_name(candidate.name + '.claim')):
+            return candidate
+        counter += 1
+
+
+def conversion_destination_for_behavior(input_path, target_ext, output_dir=None, behavior='unique', confirm=None, reserved=None):
+    source = Path(input_path).resolve(strict=True)
+    root = Path(output_dir or source.parent).resolve(strict=True)
+    profile = output_profile(target_ext)
+    preferred = root / f'{source.stem}_converted.{profile.extension}'
+    normalized = str(behavior).lower()
+    if normalized == 'unique':
+        reserved_paths = {str(Path(path).resolve()) for path in (reserved or set())}
+        return unique_conversion_destination(source, target_ext, root, lambda path: path.exists() or str(path.resolve()) in reserved_paths)
+    if normalized not in {'ask', 'skip'}:
+        raise ValueError('Overwrite behavior must be unique, ask, or skip')
+    if preferred == source:
+        raise ValueError('Conversion cannot overwrite the source file')
+    if not preferred.exists():
+        return preferred
+    if normalized == 'skip':
+        raise FileExistsError(f'Skipped because destination exists: {preferred.name}')
+    if confirm is None:
+        raise PermissionError(f'Confirmation required to replace: {preferred.name}')
+    if not confirm(preferred):
+        raise FileExistsError(f'Skipped by user: {preferred.name}')
+    return preferred
+
+
+@dataclass(frozen=True)
+class ConversionPlan:
+    source: Path
+    destination: Path
+    temporary_output: Path
+    target_name: str
+    required_stream: str
+    duration: float
+    command: tuple
+
+
+def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, destination=None):
+    source = Path(input_path).resolve(strict=True)
+    actual_probe = probe if probe is not None else probe_media_file(source)
+    target_name = str(target_ext).upper()
+    profile = output_profile(target_name)
+    capability = conversion_target_capabilities(actual_probe)[target_name]
+    if not capability['enabled']:
+        raise ValueError(capability['reason'])
+    final_path = Path(destination).resolve() if destination else unique_conversion_destination(source, target_name, output_dir)
+    if final_path == source:
+        raise ValueError('Conversion cannot overwrite the source file')
+    has_video = any(stream.get('codec_type') == 'video' for stream in actual_probe.get('streams', []) if isinstance(stream, dict))
+    required_stream = 'video' if profile.media_kind == 'video' and has_video else 'audio'
+    codec_args = profile.ffmpeg_video_args if required_stream == 'video' else profile.ffmpeg_audio_args
+    if not codec_args:
+        raise ValueError(f'{target_name} is not compatible with this input')
+    temporary = final_path.with_name(f'{final_path.stem}.partial-{uuid.uuid4().hex[:8]}.{profile.extension}')
+    command = (
+        get_ffmpeg_path(), '-y', '-v', 'error', '-i', str(source), *codec_args,
+        '-progress', 'pipe:1', '-nostats', str(temporary),
+    )
+    return ConversionPlan(source, final_path, temporary, target_name, required_stream, float(actual_probe.get('duration') or 0), command)
+
+
+def parse_ffmpeg_progress(values, duration, started_at, now=None):
+    now = time.monotonic() if now is None else now
+    elapsed = max(0.0, now - started_at)
+    raw_time = values.get('out_time_us') or values.get('out_time_ms')
+    if raw_time is not None:
+        try: media_seconds = max(0.0, float(raw_time) / 1_000_000)
+        except (TypeError, ValueError): media_seconds = 0.0
+    else:
+        parts = str(values.get('out_time') or '0:0:0').split(':')
+        try: media_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        except (ValueError, IndexError): media_seconds = 0.0
+    percent = 100.0 if values.get('progress') == 'end' else (media_seconds / duration * 100 if duration > 0 else 0.0)
+    percent = max(0.0, min(100.0, percent))
+    eta = (elapsed * (100.0 - percent) / percent) if 0 < percent < 100 else (0.0 if percent >= 100 else None)
+    return {'state': 'converting', 'percent': percent, 'elapsed': elapsed, 'eta': eta, 'media_seconds': media_seconds}
+
+
+def create_converter_jobs(paths, target_ext, output_dir=None, overwrite_behavior='unique', confirm=None):
+    jobs = []
+    reserved = set()
+    for raw_path in paths:
+        source = Path(raw_path).resolve(strict=True)
+        probe = probe_media_file(source)
+        destination = conversion_destination_for_behavior(source, target_ext, output_dir, overwrite_behavior, confirm, reserved)
+        plan = build_conversion_plan(source, target_ext, output_dir, probe, destination)
+        jobs.append({'job_id': uuid.uuid4().hex, 'source': str(source), 'probe': probe, 'plan': plan})
+        reserved.add(str(plan.destination.resolve()))
+    return jobs
 
 # ==========================================
 # 1. LOCAL SERVER
@@ -1084,72 +1235,98 @@ class FormatFetcherThread(QThread):
 
 class ConvertThread(QThread):
     finished = pyqtSignal(str, bool, str, str)
-    def __init__(self, row_id, input_file, target_ext):
+    progress = pyqtSignal(str, dict)
+    def __init__(self, row_id, input_file, target_ext, output_dir=None, destination=None):
         super().__init__()
         self.row_id = row_id; self.input_file = input_file; self.target_ext = target_ext
+        self.output_dir = output_dir; self.destination = destination
         self.cancelled = False
+        self.process = None
+        self._process_lock = threading.Lock()
 
     def cancel(self):
         self.cancelled = True
         self.requestInterruption()
+        with self._process_lock:
+            process = self.process
+        if process is not None and process.poll() is None:
+            def stop_process():
+                try:
+                    process.terminate()
+                    process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    try: process.kill()
+                    except OSError: pass
+            threading.Thread(target=stop_process, name=f'StratrumFFmpegCancel-{self.row_id}', daemon=True).start()
 
     def run(self):
-        claim_path = None
+        claim_path = None; temporary_path = None; stderr_log = None
         try:
             input_path = Path(self.input_file)
             if not input_path.is_file():
                 self.finished.emit(self.row_id, False, "Input file does not exist", "")
                 return
 
-            target_ext = self.target_ext.lower()
-            if not conversion_supported(input_path, target_ext):
-                self.finished.emit(self.row_id, False, f"Unsupported conversion: {input_path.suffix} to {target_ext.upper()}", "")
-                return
             if self.cancelled or self.isInterruptionRequested():
                 self.finished.emit(self.row_id, False, "Conversion cancelled", "")
                 return
 
-            title = input_path.stem + "_converted"
+            source_probe = probe_media_file(input_path)
             with _conversion_name_lock:
-                counter = 0
-                while True:
-                    suffix = '' if counter == 0 else f'_{counter}'
-                    output_path = input_path.parent / f'{title}{suffix}.{target_ext}'
-                    claim_path = output_path.with_name(output_path.name + '.claim')
-                    if output_path.exists():
-                        counter += 1
-                        continue
-                    try:
-                        claim_fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    except FileExistsError:
-                        counter += 1
-                        continue
-                    os.close(claim_fd)
-                    break
-
-            command = [get_ffmpeg_path(), '-n', '-i', str(input_path), str(output_path)]
-            run_kwargs = {
-                'stdout': subprocess.PIPE,
-                'stderr': subprocess.PIPE,
-                'timeout': CONVERSION_TIMEOUT_SECONDS,
-            }
+                plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination)
+                output_path = plan.destination
+                claim_path = output_path.with_name(output_path.name + '.claim')
+                claim_fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(claim_fd)
+            temporary_path = plan.temporary_output
+            self.progress.emit(self.row_id, {'source': str(plan.source), 'destination': str(output_path), 'target': plan.target_name, 'state': 'starting', 'percent': 0.0, 'elapsed': 0.0, 'eta': None})
+            stderr_log = tempfile.TemporaryFile(mode='w+t', encoding='utf-8', errors='replace')
+            run_kwargs = {'stdout': subprocess.PIPE, 'stderr': stderr_log, 'text': True, 'encoding': 'utf-8', 'errors': 'replace', 'bufsize': 1}
             creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             if creation_flags:
                 run_kwargs['creationflags'] = creation_flags
-            process = subprocess.run(command, **run_kwargs)
-            if process.returncode != 0:
-                self.finished.emit(self.row_id, False, f"Conversion failed: {clean_error_summary(process.stderr)}", "")
-            elif not output_path.is_file():
-                self.finished.emit(self.row_id, False, "Conversion produced no output file", "")
-            elif self.cancelled or self.isInterruptionRequested():
+            with self._process_lock:
+                self.process = subprocess.Popen(list(plan.command), **run_kwargs)
+            values = {}; started_at = time.monotonic()
+            for raw_line in self.process.stdout:
+                if self.cancelled or self.isInterruptionRequested():
+                    self.cancel(); break
+                key, separator, value = raw_line.strip().partition('=')
+                if separator:
+                    values[key] = value
+                if key == 'progress':
+                    snapshot = parse_ffmpeg_progress(values, plan.duration, started_at)
+                    snapshot.update({'source': str(plan.source), 'destination': str(output_path), 'target': plan.target_name})
+                    self.progress.emit(self.row_id, snapshot); values = {}
+                if time.monotonic() - started_at > CONVERSION_TIMEOUT_SECONDS:
+                    self.cancel(); raise subprocess.TimeoutExpired(plan.command, CONVERSION_TIMEOUT_SECONDS)
+            return_code = self.process.wait()
+            stderr_log.seek(0); stderr = stderr_log.read()
+            if self.cancelled or self.isInterruptionRequested():
                 self.finished.emit(self.row_id, False, "Conversion cancelled", "")
+            elif return_code != 0:
+                self.finished.emit(self.row_id, False, f"Conversion failed: {clean_error_summary(stderr)}", "")
+            elif not temporary_path.is_file():
+                self.finished.emit(self.row_id, False, "Conversion produced no output file", "")
             else:
+                validate_final_media(temporary_path, output_path.parent, plan.target_name, required_stream=plan.required_stream)
+                os.replace(temporary_path, output_path)
+                validate_final_media(output_path, output_path.parent, plan.target_name, required_stream=plan.required_stream)
                 self.finished.emit(self.row_id, True, "Conversion complete", str(output_path))
         except subprocess.TimeoutExpired:
             self.finished.emit(self.row_id, False, "Conversion timed out and was cancelled", "")
+        except FileExistsError:
+            self.finished.emit(self.row_id, False, "Destination is already reserved by another conversion", "")
         except Exception as e:
-            self.finished.emit(self.row_id, False, str(e), "")
+            self.finished.emit(self.row_id, False, clean_error_summary(e), "")
         finally:
+            with self._process_lock:
+                self.process = None
+            if stderr_log is not None:
+                stderr_log.close()
+            if temporary_path is not None:
+                try: temporary_path.unlink()
+                except FileNotFoundError: pass
             if claim_path is not None:
                 try:
                     claim_path.unlink()
@@ -1795,6 +1972,171 @@ class DownloadProgressPopup(QDialog):
 # ==========================================
 # 5. MAIN APP: STRATRUM DOWNLOAD STUDIO
 # ==========================================
+class LocalConverterDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Local Media Converter')
+        self.resize(900, 560)
+        self.setAcceptDrops(True)
+        self.entries = []
+        self.pending_jobs = []
+        self.active_thread = None
+
+        layout = QVBoxLayout(self)
+        intro = QLabel('Drop local audio/video files here, or select one or more files. FFprobe determines real streams and container support.')
+        intro.setWordWrap(True); layout.addWidget(intro)
+        top = QHBoxLayout()
+        add_button = QPushButton('Add Files'); add_button.clicked.connect(self.select_files); top.addWidget(add_button)
+        self.target_combo = QComboBox(); self.target_combo.addItems(list(OUTPUT_PROFILES)); top.addWidget(QLabel('Target:')); top.addWidget(self.target_combo)
+        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to each source folder)'); top.addWidget(self.output_edit, 1)
+        browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); top.addWidget(browse_button)
+        self.overwrite_combo = QComboBox(); self.overwrite_combo.addItem('Unique name', 'unique'); self.overwrite_combo.addItem('Ask before replace', 'ask'); self.overwrite_combo.addItem('Skip existing', 'skip')
+        top.addWidget(self.overwrite_combo); layout.addLayout(top)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(['Source', 'Detected media', 'Target', 'Progress', 'State', 'Output'])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table)
+
+        buttons = QHBoxLayout()
+        self.start_button = QPushButton('Start'); self.start_button.clicked.connect(self.start_conversions); buttons.addWidget(self.start_button)
+        self.cancel_button = QPushButton('Cancel'); self.cancel_button.clicked.connect(self.cancel_active); self.cancel_button.setEnabled(False); buttons.addWidget(self.cancel_button)
+        self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); buttons.addWidget(self.open_output_button)
+        self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); buttons.addWidget(self.open_folder_button)
+        buttons.addStretch(1); close_button = QPushButton('Close'); close_button.clicked.connect(self.close); buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        self.target_combo.currentTextChanged.connect(self.refresh_target_availability)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.add_files([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()])
+        event.acceptProposedAction()
+
+    def select_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, 'Select local media files', '', 'Media files (*.*)')
+        self.add_files(paths)
+
+    def select_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Select output folder', self.output_edit.text())
+        if folder: self.output_edit.setText(folder)
+
+    def add_files(self, paths):
+        known = {entry['source'] for entry in self.entries}
+        for raw_path in paths:
+            try:
+                source = str(Path(raw_path).resolve(strict=True))
+                if source in known or not Path(source).is_file(): continue
+                probe = probe_media_file(source); summary = media_summary(probe)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                QMessageBox.warning(self, 'Unsupported Media', f'{Path(raw_path).name}: {clean_error_summary(exc)}')
+                continue
+            row = self.table.rowCount(); self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(source))
+            detected = f"{summary['container']} | {summary['codecs']} | {summary['resolution']} | {format_eta(summary['duration'])}"
+            self.table.setItem(row, 1, QTableWidgetItem(detected)); self.table.setItem(row, 2, QTableWidgetItem(self.target_combo.currentText()))
+            bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setFormat('Queued 0%'); self.table.setCellWidget(row, 3, bar)
+            self.table.setItem(row, 4, QTableWidgetItem('Ready')); self.table.setItem(row, 5, QTableWidgetItem(''))
+            self.entries.append({'job_id': uuid.uuid4().hex, 'source': source, 'probe': probe, 'row': row, 'output': ''}); known.add(source)
+        self.refresh_target_availability()
+
+    def refresh_target_availability(self):
+        model = self.target_combo.model()
+        for index, name in enumerate(OUTPUT_PROFILES):
+            reasons = []
+            enabled = True
+            for entry in self.entries:
+                capability = conversion_target_capabilities(entry['probe'])[name]
+                if not capability['enabled']:
+                    enabled = False; reasons.append(capability['reason'])
+            item = model.item(index)
+            if item:
+                item.setEnabled(enabled)
+                item.setToolTip(reasons[0] if reasons else 'Available; output is always a new re-encoded file.')
+        for entry in self.entries:
+            self.table.setItem(entry['row'], 2, QTableWidgetItem(self.target_combo.currentText()))
+
+    def _confirm_replace(self, path):
+        result = QMessageBox.question(self, 'Replace Existing Output', f'Replace existing output?\n\n{path}', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        return result == QMessageBox.StandardButton.Yes
+
+    def start_conversions(self):
+        if self.active_thread or not self.entries: return
+        target = self.target_combo.currentText(); output_dir = self.output_edit.text().strip() or None
+        behavior = self.overwrite_combo.currentData()
+        self.pending_jobs = []
+        reserved = set()
+        for entry in self.entries:
+            try:
+                destination = conversion_destination_for_behavior(entry['source'], target, output_dir, behavior, self._confirm_replace, reserved)
+                plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination)
+                self.pending_jobs.append((entry, plan))
+                reserved.add(str(plan.destination.resolve()))
+                self.table.item(entry['row'], 4).setText('Queued')
+            except (OSError, ValueError, PermissionError, FileExistsError) as exc:
+                self.table.item(entry['row'], 4).setText(clean_error_summary(exc))
+        self.start_button.setEnabled(False); self.cancel_button.setEnabled(bool(self.pending_jobs)); self._start_next()
+
+    def _start_next(self):
+        if not self.pending_jobs:
+            self.active_thread = None; self.cancel_button.setEnabled(False); self.start_button.setEnabled(True); return
+        entry, plan = self.pending_jobs.pop(0)
+        thread = ConvertThread(entry['job_id'], entry['source'], plan.target_name, plan.destination.parent, plan.destination)
+        thread.progress.connect(self.on_progress); thread.finished.connect(self.on_finished)
+        self.active_thread = thread; self.table.item(entry['row'], 4).setText('Starting'); thread.start()
+
+    def on_progress(self, job_id, snapshot):
+        entry = next((item for item in self.entries if item['job_id'] == job_id), None)
+        if not entry: return
+        bar = self.table.cellWidget(entry['row'], 3); percent = float(snapshot.get('percent') or 0)
+        bar.setValue(int(percent)); eta = format_eta(snapshot['eta']) if snapshot.get('eta') is not None else 'calculating'
+        bar.setFormat(f"{percent:.1f}% | ETA {eta}")
+        self.table.item(entry['row'], 4).setText(f"{snapshot.get('state', 'converting').capitalize()} | elapsed {format_eta(snapshot.get('elapsed') or 0)}")
+        self.table.item(entry['row'], 5).setText(snapshot.get('destination', ''))
+
+    def on_finished(self, job_id, success, message, output_path):
+        entry = next((item for item in self.entries if item['job_id'] == job_id), None)
+        if entry:
+            bar = self.table.cellWidget(entry['row'], 3)
+            if success:
+                entry['output'] = output_path; bar.setValue(100); bar.setFormat('Completed 100%')
+                self.table.item(entry['row'], 4).setText('Completed'); self.table.item(entry['row'], 5).setText(output_path)
+            else:
+                bar.setFormat('Cancelled' if 'cancelled' in message.lower() else 'Failed')
+                self.table.item(entry['row'], 4).setText(clean_error_summary(message))
+        self.active_thread = None; QTimer.singleShot(0, self._start_next)
+
+    def cancel_active(self):
+        self.pending_jobs.clear()
+        if self.active_thread: self.active_thread.cancel()
+        self.cancel_button.setEnabled(False)
+
+    def _selected_entry(self):
+        rows = self.table.selectionModel().selectedRows()
+        return next((entry for entry in self.entries if rows and entry['row'] == rows[0].row()), None)
+
+    def open_selected_output(self):
+        entry = self._selected_entry()
+        if entry and entry.get('output') and Path(entry['output']).is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(entry['output']))
+
+    def open_selected_folder(self):
+        entry = self._selected_entry()
+        if entry:
+            folder = Path(entry.get('output') or entry['source']).parent
+            if folder.is_dir(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def closeEvent(self, event):
+        if self.active_thread and self.active_thread.isRunning():
+            self.active_thread.cancel(); self.active_thread.wait(5000)
+        event.accept()
+
+
 class BrowserIntegrationDialog(QDialog):
     def __init__(self, app_config, parent=None):
         super().__init__(parent)
@@ -2067,6 +2409,7 @@ class StratrumDownloadStudio(QMainWindow):
         menubar = self.menuBar()
         tasks_menu = menubar.addMenu("Tasks")
         tasks_menu.addAction("Add new download").triggered.connect(lambda: self.open_add_dialog(""))
+        tasks_menu.addAction("Convert local media...").triggered.connect(self.open_local_converter)
         batch_action = tasks_menu.addAction("Batch Download (Phase 2B)"); batch_action.setEnabled(False)
         batch_action.setToolTip("Batch input is deferred to Phase 2B.")
         grabber_action = tasks_menu.addAction("Site Grabber (Phase 2C)"); grabber_action.setEnabled(False)
@@ -2110,6 +2453,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.addToolBar(self.toolbar)
 
         self.toolbar.addAction("➕\nAdd URL").triggered.connect(lambda: self.open_add_dialog(""))
+        self.toolbar.addAction("🎞\nConverter").triggered.connect(self.open_local_converter)
         self.toolbar_resume_action = self.toolbar.addAction("▶\nResume"); self.toolbar_resume_action.triggered.connect(self.resume_download)
         self.toolbar_pause_action = self.toolbar.addAction("⏸\nPause"); self.toolbar_pause_action.triggered.connect(self.pause_download)
         self.toolbar.addAction("🛑\nPause All").triggered.connect(self.pause_all_downloads)
@@ -2161,6 +2505,9 @@ class StratrumDownloadStudio(QMainWindow):
     def selected_record(self):
         rows = self.table.selectionModel().selectedRows() if hasattr(self, 'table') else []
         return next((item for item in self.downloads if rows and item['row'] == rows[0].row()), None)
+
+    def open_local_converter(self):
+        LocalConverterDialog(self).exec()
 
     def persist_ui_preferences(self):
         self.app_config.window_size = [self.width(), self.height()]
@@ -2372,9 +2719,16 @@ class StratrumDownloadStudio(QMainWindow):
         menu.addAction("Properties / Details").triggered.connect(self.show_properties)
         menu.addSeparator()
         cv_menu = menu.addMenu("Convert Format...")
-        for target in ('mp4', 'mp3', 'wav', 'm4a'):
+        for target in (profile.extension for profile in OUTPUT_PROFILES.values()):
             action = cv_menu.addAction(f"To {target.upper()}")
-            action.setEnabled(bool(record and capabilities['convert'] and conversion_supported(record.get('final_path', ''), target)))
+            supported = bool(record and capabilities['convert'] and conversion_supported(record.get('final_path', ''), target, record.get('probe')))
+            action.setEnabled(supported)
+            if record and not supported:
+                try:
+                    reason = conversion_target_capabilities(record.get('probe') or probe_media_file(record.get('final_path', '')))[target.upper()]['reason']
+                    action.setToolTip(reason)
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    action.setToolTip('FFprobe could not verify this conversion target.')
             action.triggered.connect(lambda checked=False, ext=target: self.trigger_conversion(ext))
         menu.addSeparator()
         resume_action = menu.addAction("Resume Download"); resume_action.setEnabled(capabilities['resume']); resume_action.triggered.connect(self.resume_download)
@@ -2608,6 +2962,7 @@ class StratrumDownloadStudio(QMainWindow):
                 d['job'].final_output_path = str(safe_path)
                 d['job'].actual_format = safe_path.suffix.lower().lstrip('.')
                 d['job'].actual_resolution = video_stream.get('height')
+                d['probe'] = probe
                 d['job'].temporary_paths = list(thread.temporary_paths) if thread else []
                 self.download_manager.set_state(id, JobState.COMPLETED)
                 completed_size = format_bytes(safe_path.stat().st_size)
@@ -2702,16 +3057,31 @@ class StratrumDownloadStudio(QMainWindow):
             self.start_conversion_for_record(record, target_ext)
 
     def start_conversion_for_record(self, record, target_ext):
-        if not job_capabilities(record['job'])['convert'] or not conversion_supported(record.get('final_path', ''), target_ext):
+        if not job_capabilities(record['job'])['convert'] or not conversion_supported(record.get('final_path', ''), target_ext, record.get('probe')):
             QMessageBox.information(self, "Convert", "This completed input cannot be converted to the selected output.")
             return False
         if bar := self.table.cellWidget(record['row'], 3): bar.setFormat(f"Converting to {target_ext.upper()}...")
         self.download_manager.set_state(record['id'], JobState.CONVERTING)
         converter = ConvertThread(record['id'], record['final_path'], target_ext)
+        converter.progress.connect(self.conversion_progress)
         converter.finished.connect(self.conversion_done)
         self.converters[record['id']] = converter
         converter.start()
         return True
+
+    def conversion_progress(self, row_id, snapshot):
+        if d := self.get_download_by_id(row_id):
+            percent = float(snapshot.get('percent') or 0)
+            if bar := self.table.cellWidget(d['row'], 3):
+                bar.setValue(int(percent)); bar.setFormat(f"Converting {percent:.1f}%")
+            if popup := self.popups.get(row_id):
+                eta = format_eta(snapshot['eta']) if snapshot.get('eta') is not None else 'calculating'
+                popup.set_job_state(JobState.CONVERTING.value)
+                popup.set_details(
+                    f"Source: {snapshot.get('source', '')}\nDestination: {snapshot.get('destination', '')}\n"
+                    f"Target: {snapshot.get('target', '')}\nState: {snapshot.get('state', 'converting')}\n"
+                    f"Progress: {percent:.1f}%\nElapsed: {format_eta(snapshot.get('elapsed') or 0)}\nETA: {eta}"
+                )
 
     def conversion_done(self, row_id, success, msg, output_path):
         if d := self.get_download_by_id(row_id):
