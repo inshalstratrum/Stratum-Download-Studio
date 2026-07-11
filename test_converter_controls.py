@@ -1,7 +1,14 @@
 from pathlib import Path
+import inspect
+import os
+import sys
 
 import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtWidgets import QApplication
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+app = QApplication.instance() or QApplication(sys.argv)
 
 import stratum_download_studio as studio
 
@@ -147,3 +154,70 @@ def test_main_window_conversion_uses_shared_controller_and_visible_controls():
     assert popup.pause_btn.text() == 'Pause' and popup.cancel_btn.text() == 'Cancel'
     popup.set_job_state('paused')
     assert popup.pause_btn.text() == 'Resume' and popup.pause_btn.isEnabled()
+
+
+def test_paused_progress_merges_and_retains_displayed_percentage(monkeypatch, tmp_path):
+    dialog, _, _ = _dialog_with_files(monkeypatch, tmp_path)
+    entry = dialog.entries[0]
+    controller = studio.ConversionJobController(thread_factory=FakeConversionThread)
+    controller.progress.connect(dialog.on_progress)
+    controller.start(entry['job_id'], entry['source'], 'MP3')
+    generation = controller.jobs[entry['job_id']]['generation']
+    controller._progress(entry['job_id'], {'state': 'converting', 'percent': 70, 'elapsed': 12, 'eta': 5, 'destination': str(tmp_path / 'out.mp3')}, generation)
+    controller._progress(entry['job_id'], {'state': 'paused'}, generation)
+    bar = dialog.table.cellWidget(0, 3)
+    assert bar.value() == 70 and bar.format() == 'Paused 70%'
+    snapshot = controller.jobs[entry['job_id']]['snapshot']
+    assert snapshot['elapsed'] == 12 and snapshot['destination'].endswith('out.mp3')
+
+
+def test_resume_state_event_continues_from_retained_progress(controller, tmp_path):
+    source = tmp_path / 'source.mp4'; source.write_bytes(b'source')
+    snapshots = []
+    controller.progress.connect(lambda _job_id, snapshot: snapshots.append(snapshot))
+    controller.start('job', source, 'MP3')
+    generation = controller.jobs['job']['generation']
+    controller._progress('job', {'state': 'converting', 'percent': 70, 'elapsed': 8, 'destination': 'out.mp3'}, generation)
+    controller._progress('job', {'state': 'paused'}, generation)
+    controller._progress('job', {'state': 'converting'}, generation)
+    assert snapshots[-1]['percent'] == 70 and snapshots[-1]['elapsed'] == 8 and snapshots[-1]['destination'] == 'out.mp3'
+    controller._progress('job', {'state': 'converting', 'percent': 71}, generation)
+    assert snapshots[-1]['percent'] == 71
+
+
+class FakeActionWindow:
+    def __init__(self, state):
+        self.record = {'id': 'job', 'job': studio.DownloadJob(job_id='job', source_url='https://example.test', save_dir='.', requested_format='MP4', state=studio.JobState.CONVERTING.value)}
+        self.conversion_controller = type('Controller', (), {'state': lambda _self, _job_id: state})()
+
+    def selected_record(self):
+        return self.record
+
+
+@pytest.mark.parametrize(('state', 'pause', 'resume', 'stop'), [
+    ('starting', True, False, True),
+    ('converting', True, False, True),
+    ('paused', False, True, True),
+    ('completed', False, False, False),
+    ('failed', False, False, False),
+    ('cancelled', False, False, False),
+])
+def test_conversion_aware_action_states(state, pause, resume, stop):
+    capabilities = studio.StratrumDownloadStudio.selected_action_capabilities(FakeActionWindow(state))
+    assert (capabilities['pause'], capabilities['resume'], capabilities['stop']) == (pause, resume, stop)
+
+
+def test_toolbar_and_context_expose_conversion_controls():
+    ui_source = inspect.getsource(studio.StratrumDownloadStudio.init_ui)
+    context_source = inspect.getsource(studio.StratrumDownloadStudio.show_context_menu)
+    assert 'toolbar_stop_action' in ui_source
+    for label in ('Pause Conversion', 'Resume Conversion', 'Cancel Conversion'):
+        assert label in context_source
+
+
+def test_cancel_selected_conversion_affects_only_selection():
+    calls = []
+    selected = {'id': 'selected'}
+    fake = type('Window', (), {'selected_record': lambda _self: selected, 'cancel_job': lambda _self, job_id, remove=False: calls.append((job_id, remove))})()
+    studio.StratrumDownloadStudio.cancel_selected_download(fake)
+    assert calls == [('selected', False)]

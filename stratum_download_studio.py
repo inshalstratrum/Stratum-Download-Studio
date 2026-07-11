@@ -1395,7 +1395,7 @@ class ConversionJobController(QObject):
             return False
         thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
         generation = uuid.uuid4().hex
-        self.jobs[job_id] = {'thread': thread, 'generation': generation, 'state': 'starting'}
+        self.jobs[job_id] = {'thread': thread, 'generation': generation, 'state': 'starting', 'snapshot': {'state': 'starting'}}
         thread.progress.connect(lambda emitted_id, snapshot, token=generation: self._progress(emitted_id, snapshot, token))
         thread.finished.connect(lambda emitted_id, success, message, output, token=generation: self._finished(emitted_id, success, message, output, token))
         self.state_changed.emit(job_id, 'starting')
@@ -1410,10 +1410,14 @@ class ConversionJobController(QObject):
         job = self._current(job_id, generation)
         if not job:
             return
-        state = str(snapshot.get('state') or 'converting')
+        merged = dict(job.get('snapshot') or {})
+        merged.update(snapshot)
+        state = str(merged.get('state') or 'converting')
+        merged['state'] = state
+        job['snapshot'] = merged
         job['state'] = state
         self.state_changed.emit(job_id, state)
-        self.progress.emit(job_id, snapshot)
+        self.progress.emit(job_id, merged)
 
     def _finished(self, job_id, success, message, output_path, generation):
         job = self._current(job_id, generation)
@@ -1431,13 +1435,15 @@ class ConversionJobController(QObject):
         job = self.jobs.get(job_id)
         if not job or job['state'] not in {'starting', 'converting'} or not job['thread'].pause():
             return False
-        job['state'] = 'paused'; self.state_changed.emit(job_id, 'paused'); return True
+        self._progress(job_id, {'state': 'paused'}, job['generation'])
+        return True
 
     def resume(self, job_id):
         job = self.jobs.get(job_id)
         if not job or job['state'] != 'paused' or not job['thread'].resume():
             return False
-        job['state'] = 'converting'; self.state_changed.emit(job_id, 'converting'); return True
+        self._progress(job_id, {'state': 'converting'}, job['generation'])
+        return True
 
     def cancel(self, job_id, wait_ms=5000, remove=False):
         job = self.jobs.get(job_id)
@@ -2265,7 +2271,10 @@ class LocalConverterDialog(QDialog):
         entry['state'] = snapshot.get('state', 'converting')
         bar = self.table.cellWidget(entry['row'], 3); percent = float(snapshot.get('percent') or 0)
         bar.setValue(int(percent)); eta = format_eta(snapshot['eta']) if snapshot.get('eta') is not None else 'calculating'
-        bar.setFormat(f"{percent:.1f}% | ETA {eta}")
+        if entry['state'] == 'paused':
+            bar.setFormat(f"Paused {percent:.0f}%")
+        else:
+            bar.setFormat(f"{percent:.1f}% | ETA {eta}")
         self.table.item(entry['row'], 4).setText(f"{snapshot.get('state', 'converting').capitalize()} | elapsed {format_eta(snapshot.get('elapsed') or 0)}")
         self.table.item(entry['row'], 5).setText(snapshot.get('destination', ''))
 
@@ -2466,6 +2475,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.conversion_controller = ConversionJobController(self)
         self.conversion_controller.progress.connect(self.conversion_progress)
         self.conversion_controller.finished.connect(self.conversion_done)
+        self.conversion_controller.state_changed.connect(lambda *_: self.update_action_capabilities())
         self.converters = self.conversion_controller.jobs
         self.progress_snapshots = {}
         self.last_progress_paint = {}
@@ -2684,6 +2694,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.toolbar.addAction("🎞\nConverter").triggered.connect(self.open_local_converter)
         self.toolbar_resume_action = self.toolbar.addAction("▶\nResume"); self.toolbar_resume_action.triggered.connect(self.resume_download)
         self.toolbar_pause_action = self.toolbar.addAction("⏸\nPause"); self.toolbar_pause_action.triggered.connect(self.pause_download)
+        self.toolbar_stop_action = self.toolbar.addAction("⏹\nCancel"); self.toolbar_stop_action.triggered.connect(self.cancel_selected_download)
         self.toolbar.addAction("🛑\nPause All").triggered.connect(self.pause_all_downloads)
         self.toolbar_delete_action = self.toolbar.addAction("❌\nDelete"); self.toolbar_delete_action.triggered.connect(self.delete_download)
         self.toolbar.addAction("🗑\nClear Done").triggered.connect(self.delete_completed)
@@ -2751,8 +2762,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
 
     def update_action_capabilities(self):
-        record = self.selected_record()
-        capabilities = job_capabilities(record['job']) if record and record.get('job') else {key: False for key in ('resume', 'pause', 'stop', 'delete')}
+        capabilities = self.selected_action_capabilities()
         for action, key in (
             (getattr(self, 'resume_action', None), 'resume'),
             (getattr(self, 'pause_action', None), 'pause'),
@@ -2760,10 +2770,22 @@ class StratrumDownloadStudio(QMainWindow):
             (getattr(self, 'delete_action', None), 'delete'),
             (getattr(self, 'toolbar_resume_action', None), 'resume'),
             (getattr(self, 'toolbar_pause_action', None), 'pause'),
+            (getattr(self, 'toolbar_stop_action', None), 'stop'),
             (getattr(self, 'toolbar_delete_action', None), 'delete'),
         ):
             if action:
                 action.setEnabled(capabilities.get(key, False))
+
+    def selected_action_capabilities(self):
+        record = self.selected_record()
+        capabilities = job_capabilities(record['job']) if record and record.get('job') else {key: False for key in ('resume', 'pause', 'stop', 'delete')}
+        conversion_state = self.conversion_controller.state(record['id']) if record else None
+        if conversion_state is not None:
+            capabilities = dict(capabilities)
+            capabilities['pause'] = conversion_state in {'starting', 'converting'}
+            capabilities['resume'] = conversion_state == 'paused'
+            capabilities['stop'] = conversion_state in {'starting', 'converting', 'paused'}
+        return capabilities
 
     def show_quick_start(self):
         QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
@@ -2948,6 +2970,7 @@ class StratrumDownloadStudio(QMainWindow):
     def show_context_menu(self, position):
         record = self.selected_record()
         capabilities = job_capabilities(record['job']) if record else {key: False for key in ('open', 'open_folder', 'convert', 'resume', 'pause', 'delete')}
+        conversion_state = self.conversion_controller.state(record['id']) if record else None
         menu = QMenu()
         open_action = menu.addAction("Open"); open_action.setEnabled(capabilities['open']); open_action.triggered.connect(self.open_selected_file)
         folder_action = menu.addAction("Open folder"); folder_action.setEnabled(capabilities['open_folder']); folder_action.triggered.connect(self.open_selected_folder)
@@ -2968,6 +2991,9 @@ class StratrumDownloadStudio(QMainWindow):
         menu.addSeparator()
         resume_action = menu.addAction("Resume Download"); resume_action.setEnabled(capabilities['resume']); resume_action.triggered.connect(self.resume_download)
         pause_action = menu.addAction("Pause Download"); pause_action.setEnabled(capabilities['pause']); pause_action.triggered.connect(self.pause_download)
+        pause_conversion = menu.addAction("Pause Conversion"); pause_conversion.setEnabled(conversion_state in {'starting', 'converting'}); pause_conversion.triggered.connect(self.pause_download)
+        resume_conversion = menu.addAction("Resume Conversion"); resume_conversion.setEnabled(conversion_state == 'paused'); resume_conversion.triggered.connect(self.resume_download)
+        cancel_conversion = menu.addAction("Cancel Conversion"); cancel_conversion.setEnabled(conversion_state in {'starting', 'converting', 'paused'}); cancel_conversion.triggered.connect(self.cancel_selected_download)
         menu.addSeparator()
         delete_action = menu.addAction("Remove"); delete_action.setEnabled(capabilities['delete']); delete_action.triggered.connect(self.delete_download)
         menu.exec(self.table.viewport().mapToGlobal(position))
@@ -3307,14 +3333,15 @@ class StratrumDownloadStudio(QMainWindow):
     def conversion_progress(self, row_id, snapshot):
         if d := self.get_download_by_id(row_id):
             percent = float(snapshot.get('percent') or 0)
+            state = str(snapshot.get('state') or 'converting')
             if bar := self.table.cellWidget(d['row'], 3):
-                bar.setValue(int(percent)); bar.setFormat(f"Converting {percent:.1f}%")
+                bar.setValue(int(percent)); bar.setFormat(f"Paused {percent:.0f}%" if state == 'paused' else f"Converting {percent:.1f}%")
             if popup := self.popups.get(row_id):
                 eta = format_eta(snapshot['eta']) if snapshot.get('eta') is not None else 'calculating'
-                popup.set_job_state(JobState.CONVERTING.value)
+                popup.set_job_state(state)
                 popup.set_details(
                     f"Source: {snapshot.get('source', '')}\nDestination: {snapshot.get('destination', '')}\n"
-                    f"Target: {snapshot.get('target', '')}\nState: {snapshot.get('state', 'converting')}\n"
+                    f"Target: {snapshot.get('target', '')}\nState: {state}\n"
                     f"Progress: {percent:.1f}%\nElapsed: {format_eta(snapshot.get('elapsed') or 0)}\nETA: {eta}"
                 )
 
