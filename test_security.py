@@ -1602,3 +1602,87 @@ def test_visible_active_branding_uses_stratum_and_legacy_security_names_remain()
         assert 'Stratum Download Studio' in text or 'Stratum' in text
         assert 'Stratrum Download Studio' not in text
     assert 'X-Stratrum-Auth' in Path('browser_extension/background.js').read_text(encoding='utf-8')
+
+
+# Phase 2A.6B.1 desktop-owned browser mode
+
+def test_one_shared_authentication_token_accepts_both_explicit_actions(runtime):
+    for action in ('quick_download', 'download_with_options'):
+        body = json.dumps({'url': 'https://example.com/video', 'action': action}).encode()
+        status, result = validate(runtime, body=body)
+        assert status == 200 and result['action'] == action
+    background = Path('browser_extension/background.js').read_text(encoding='utf-8')
+    assert background.count('"authToken"') == 1
+    assert 'X-Stratrum-Auth": token' in background
+
+
+def test_extension_normal_button_sends_neutral_default_action():
+    background = Path('browser_extension/background.js').read_text(encoding='utf-8')
+    normal_handler = background.split('runtime.onMessage.addListener', 1)[1]
+    assert 'sendToDesktopApp(message.url, "default")' in normal_handler
+    assert 'primaryAction' not in background
+
+
+@pytest.mark.parametrize('desktop_mode, expected', [
+    ('quick_download', ['show', 'start']),
+    ('download_with_options', ['options']),
+])
+def test_desktop_resolves_default_action_from_saved_preference(tmp_path, desktop_mode, expected):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.recent_folders = [str(tmp_path)]
+    config.primary_browser_action = desktop_mode
+    calls = []
+    fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
+        'start_new_download': lambda self, *args: calls.append(('start', args)),
+        'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
+        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+    stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/video', 'default')
+    assert [call[0] for call in calls] == expected
+
+
+@pytest.mark.parametrize('action, expected', [
+    ('quick', ['show', 'start']),
+    ('quick_download', ['show', 'start']),
+    ('options', ['options']),
+    ('download_with_options', ['options']),
+])
+def test_explicit_action_compatibility_does_not_change_desktop_default(tmp_path, action, expected):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.recent_folders = [str(tmp_path)]
+    config.primary_browser_action = 'download_with_options'
+    calls = []
+    fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
+        'start_new_download': lambda self, *args: calls.append(('start', args)),
+        'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
+        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+    stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/video', action)
+    assert [call[0] for call in calls] == expected
+    assert config.primary_browser_action == 'download_with_options'
+
+
+def test_browser_mode_change_persists_without_changing_token(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    dialog = stratrum_download_studio.BrowserIntegrationDialog(config)
+    dialog.default_action_combo.setCurrentIndex(dialog.default_action_combo.findData('download_with_options'))
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    assert restored.primary_browser_action == 'download_with_options'
+    assert restored.auth_token == TOKEN
+    dialog.close()
+
+
+def test_extension_action_dropdown_removed_and_reload_only_reads_saved_token():
+    html = Path('browser_extension/options.html').read_text(encoding='utf-8')
+    script = Path('browser_extension/options.js').read_text(encoding='utf-8')
+    load_handler = script.split('DOMContentLoaded', 1)[1].split('});', 1)[0]
+    assert 'primary-action' not in html and 'primaryAction' not in script
+    assert html.count('id="token"') == 1
+    assert 'storage.local.get(["authToken", "showMediaButtons"])' in load_handler
+    assert 'storage.local.set' not in load_handler and 'storage.local.remove' not in load_handler
+
+
+def test_quick_and_options_flow_remains_start_vs_confirmation_gated():
+    handler = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.handle_browser_request)
+    dialog = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.open_add_dialog)
+    assert 'self.start_new_download' in handler
+    assert 'dialog.exec() == QDialog.DialogCode.Accepted' in dialog
+    assert 'self.start_new_download' in dialog

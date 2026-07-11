@@ -1,12 +1,11 @@
 const extensionApi = globalThis.browser || globalThis.chrome;
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const result = await extensionApi.storage.local.get(["authToken", "showMediaButtons", "primaryAction"]);
+  const result = await extensionApi.storage.local.get(["authToken", "showMediaButtons"]);
   if (result.authToken) {
     document.getElementById("token").placeholder = "A token is currently saved";
   }
   document.getElementById("show-media-buttons").checked = result.showMediaButtons !== false;
-  document.getElementById("primary-action").value = result.primaryAction === "download_with_options" ? "download_with_options" : "quick_download";
 });
 
 document.getElementById("toggle-visibility").addEventListener("click", () => {
@@ -47,8 +46,4 @@ document.getElementById("clear").addEventListener("click", async () => {
 
 document.getElementById("show-media-buttons").addEventListener("change", async (event) => {
   await extensionApi.storage.local.set({ showMediaButtons: event.target.checked });
-});
-
-document.getElementById("primary-action").addEventListener("change", async (event) => {
-  await extensionApi.storage.local.set({ primaryAction: event.target.value });
 });

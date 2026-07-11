@@ -22,7 +22,8 @@ from pathlib import Path
 import yt_dlp
 
 APP_NAME = "Stratum Download Studio"
-EXTENSION_ACTIONS = {'quick_download', 'download_with_options'}
+EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
+DESKTOP_BROWSER_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
 CONVERSION_TIMEOUT_SECONDS = 30 * 60
 MAX_PAIRED_ORIGINS = 6
@@ -353,7 +354,7 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         speed_limit_bps=bounded_int(stored.get('speed_limit_bps'), 0, 0, 1024 * 1024 * 1024),
         completion_action=stored.get('completion_action', 'keep_open'),
         keep_completed_window_open=bool(stored.get('keep_completed_window_open', False)),
-        primary_browser_action=stored.get('primary_browser_action', 'quick_download') if stored.get('primary_browser_action', 'quick_download') in EXTENSION_ACTIONS else 'quick_download',
+        primary_browser_action=stored.get('primary_browser_action', 'quick_download') if stored.get('primary_browser_action', 'quick_download') in DESKTOP_BROWSER_ACTIONS else 'quick_download',
         stop_after_current=bool(stored.get('stop_after_current', False)),
         window_size=stored.get('window_size', [1150, 680]) if isinstance(stored.get('window_size', [1150, 680]), list) else [1150, 680],
         splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
@@ -2445,6 +2446,14 @@ class BrowserIntegrationDialog(QDialog):
         token_field.setReadOnly(True)
         token_field.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(token_field)
+        self.default_action_combo = QComboBox()
+        self.default_action_combo.addItem("Quick Download", "quick_download")
+        self.default_action_combo.addItem("Download with Options", "download_with_options")
+        self.default_action_combo.setCurrentIndex(max(0, self.default_action_combo.findData(app_config.primary_browser_action)))
+        self.default_action_combo.currentIndexChanged.connect(self.persist_default_action)
+        action_row = QFormLayout()
+        action_row.addRow("Default browser action", self.default_action_combo)
+        layout.addLayout(action_row)
 
         actions = QHBoxLayout()
         copy_button = QPushButton("Copy Token")
@@ -2475,6 +2484,12 @@ class BrowserIntegrationDialog(QDialog):
         self.pairing_label = QLabel()
         layout.addWidget(self.pairing_label)
         self.refresh_origins()
+
+    def persist_default_action(self):
+        selected = self.default_action_combo.currentData()
+        if selected in DESKTOP_BROWSER_ACTIONS and selected != self.app_config.primary_browser_action:
+            self.app_config.primary_browser_action = selected
+            self.app_config.persist()
 
     def refresh_origins(self):
         self.origin_combo.clear()
@@ -2727,15 +2742,12 @@ class StratrumDownloadStudio(QMainWindow):
     def show_preferences(self):
         dialog = QDialog(self); dialog.setWindowTitle(f"{APP_NAME} Options")
         layout = QFormLayout(dialog)
-        primary = QComboBox(); primary.addItem("Quick Download", "quick_download"); primary.addItem("Download with Options", "download_with_options")
-        primary.setCurrentIndex(max(0, primary.findData(self.app_config.primary_browser_action)))
         keep_open = QCheckBox("Keep completed download window open"); keep_open.setChecked(self.app_config.keep_completed_window_open)
         browser = QPushButton("Browser Integration..."); browser.clicked.connect(lambda: BrowserIntegrationDialog(self.app_config, dialog).exec())
         save = QPushButton("Save")
         save.clicked.connect(dialog.accept)
-        layout.addRow("Primary browser action", primary); layout.addRow(keep_open); layout.addRow(browser); layout.addRow(save)
+        layout.addRow(keep_open); layout.addRow(browser); layout.addRow(save)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.app_config.primary_browser_action = primary.currentData()
             self.app_config.keep_completed_window_open = keep_open.isChecked()
             self.app_config.persist()
 
@@ -3151,7 +3163,12 @@ class StratrumDownloadStudio(QMainWindow):
     def handle_browser_request(self, url, action):
         if action not in EXTENSION_ACTIONS:
             return False
-        if action == 'quick_download' and self.quick_download_defaults_valid():
+        resolved_action = {
+            'default': self.app_config.primary_browser_action,
+            'quick': 'quick_download',
+            'options': 'download_with_options',
+        }.get(action, action)
+        if resolved_action == 'quick_download' and self.quick_download_defaults_valid():
             self.show_normal(request_foreground=True)
             self.start_new_download(url, self.app_config.recent_folders[0], self.app_config.preferred_resolution,
                                     self.app_config.preferred_format)

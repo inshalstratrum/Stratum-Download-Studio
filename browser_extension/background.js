@@ -110,8 +110,6 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "stratrum-download-request") {
     return false;
   }
-  readLocalStorage(["primaryAction"]).then((stored) =>
-    sendToDesktopApp(message.url, stored.primaryAction === "download_with_options" ? "download_with_options" : "quick_download")
-  ).then(sendResponse);
+  sendToDesktopApp(message.url, "default").then(sendResponse);
   return true;
 });
