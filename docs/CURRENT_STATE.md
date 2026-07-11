@@ -1,13 +1,13 @@
 # Current State
 
-- Phase: 2A.6A.2 — paused conversion progress and main-window conversion actions corrected.
-- Branch: `phase-2a6a1-converter-controls`.
-- Commit: `Phase 2A.6A.2: Fix paused progress and conversion actions` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Phase: 2A.6B — download popup lifecycle, intentional foreground activation, safe source URLs, Quick Download, and visible Stratum branding implemented.
+- Branch: `phase-2a6b-quick-download`.
+- Commit: `Phase 2A.6B: Add quick download and correct popup integration` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
 - Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
-- Test command: `python -m pytest -q`; current expected count: 215 passed.
-- Working features: verified yt-dlp MP4/MKV/WebM/AVI/MOV and MP3/M4A/AAC/WAV/FLAC/OGG/Opus outputs; one guarded conversion lifecycle shared by downloaded-file and local-file conversion; retained paused progress; conversion-aware toolbar/context actions; per-file targets, apply-to-all, pause/resume/cancel, safe row removal/clear; existing secure browser integration, queue, history, and controls.
+- Test command: `python -m pytest -q`; current expected count: 228 passed.
+- Working features: verified yt-dlp output and conversion behavior from Phase 2A.6A; verified-success popup auto-close with keep-open preference and stale-timer protection; explicit Quick Download and Download with Options extension actions; Qt-thread browser-request routing and bounded foreground activation; separately retained original/internal resolved URLs with safe public URL display; visible Stratum Download Studio branding with legacy token, header, storage, and pairing compatibility preserved.
 - Unresolved blockers: no automated blockers. Manual Windows GUI, drag/drop, pause/resume/cancel, close-during-conversion, open-output, and authorized live-download checks remain required.
-- Next task: Phase 2A.6B only when explicitly authorized.
+- Next task: Phase 2A.6C only when explicitly authorized.
 
 ## Roadmap — record only
 

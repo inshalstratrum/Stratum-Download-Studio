@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -26,7 +27,14 @@ TOKEN = 'b' * 64
 ORIGIN = 'chrome-extension://' + ('a' * 32)
 OTHER_ORIGIN = 'chrome-extension://' + ('b' * 32)
 FIREFOX_ORIGIN = 'moz-extension://12345678-1234-1234-1234-123456789abc'
-VALID_BODY = json.dumps({'url': 'https://example.com/video.mp4'}).encode('utf-8')
+VALID_BODY = json.dumps({'url': 'https://example.com/video.mp4', 'action': 'quick_download'}).encode('utf-8')
+
+
+def wait_qt(milliseconds):
+    deadline = time.monotonic() + milliseconds / 1000
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.001)
 
 
 class CountingLimiter:
@@ -84,8 +92,8 @@ def server(runtime):
         def __init__(self):
             self.urls = []
 
-        def emit(self, url):
-            self.urls.append(url)
+        def emit(self, url, action):
+            self.urls.append((url, action))
 
     httpd.url_signal = SignalSpy()
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -122,7 +130,7 @@ def http_request(server, body=VALID_BODY, headers=None, path='/add_download'):
 def test_http_valid_request(server):
     status, _ = http_request(server)
     assert status == 200
-    assert server.url_signal.urls == ['https://example.com/video.mp4']
+    assert server.url_signal.urls == [('https://example.com/video.mp4', 'quick_download')]
 
 
 def test_http_missing_token(runtime):
@@ -160,7 +168,7 @@ def test_http_malformed_origin(runtime, origin):
 
 def test_http_first_valid_origin_pairing(unpaired_runtime):
     status, result = validate(unpaired_runtime)
-    assert (status, result) == (200, 'https://example.com/video.mp4')
+    assert (status, result) == (200, {'url': 'https://example.com/video.mp4', 'action': 'quick_download'})
     assert unpaired_runtime.allowed_origin == ORIGIN
     persisted = json.loads(unpaired_runtime.config_path.read_text(encoding='utf-8'))
     assert persisted['allowed_origins'] == [ORIGIN]
@@ -599,7 +607,7 @@ def test_normal_startup_has_no_automatic_extension_prompt():
 
 
 def test_browser_integration_remains_manual_in_options():
-    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.show_dummy_msg)
+    source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.show_preferences)
     assert 'BrowserIntegrationDialog' in source
 
 
@@ -1384,9 +1392,9 @@ def test_queue_concurrency_and_stop_after_current(tmp_path):
     assert not manager.can_start_more()
 
 
-def test_sanitized_source_url_removes_credentials_query_and_fragment():
+def test_sanitized_source_url_removes_credentials_and_fragment_but_keeps_public_id():
     sanitized = stratrum_download_studio.sanitize_source_url('https://user:pass@example.com/video?id=secret#part')
-    assert sanitized == 'https://example.com/video'
+    assert sanitized == 'https://example.com/video?id=secret'
 
 
 # Phase 2A.5 popup, menu, launcher, and responsive foundation
@@ -1434,7 +1442,7 @@ def test_popup_speed_limit_and_completion_actions():
 
 def test_visible_menu_actions_are_functional_or_disabled():
     source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_ui)
-    for functional in ('Quick Start', 'Supported Sites', 'Open Logs / Diagnostics', 'About Stratrum Download Studio', 'Reset Column Layout'):
+    for functional in ('Quick Start', 'Supported Sites', 'Open Logs / Diagnostics', 'About {APP_NAME}', 'Reset Column Layout'):
         assert functional in source
     assert 'setEnabled(False)' in source
     assert 'coming soon' not in source.lower()
@@ -1476,3 +1484,121 @@ def test_diagnostics_and_properties_sanitize_sensitive_urls():
     properties = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.show_properties)
     assert 'sanitize_source_url' in diagnostics and 'sanitize_source_url' in properties
     assert 'auth_token' not in diagnostics and 'cookies' not in diagnostics
+
+
+# Phase 2A.6B popup lifecycle, browser actions, foreground routing, URLs, and branding
+
+def test_http_rejects_missing_or_unknown_action(runtime):
+    missing = json.dumps({'url': 'https://example.com/video'}).encode()
+    unknown = json.dumps({'url': 'https://example.com/video', 'action': 'surprise'}).encode()
+    assert validate(runtime, body=missing)[0] == 400
+    assert validate(runtime, body=unknown)[0] == 400
+
+
+def test_popup_closes_only_after_verified_completion(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='verified', app_config=config)
+    closed = []
+    popup.set_job_state('verifying')
+    assert popup.schedule_verified_close(lambda: closed.append(True), 10)
+    wait_qt(20)
+    assert closed == []
+    popup.set_job_state('completed')
+    popup.schedule_verified_close(lambda: closed.append(True), 10)
+    wait_qt(20)
+    assert closed == [True]
+    popup.close()
+
+
+def test_keep_open_preference_prevents_auto_close(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.keep_completed_window_open = True
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='kept', app_config=config)
+    popup.set_job_state('completed')
+    assert popup.schedule_verified_close(lambda: None, 1) is False
+    popup.close()
+
+
+@pytest.mark.parametrize('state', ['failed', 'cancelled'])
+def test_failure_and_cancellation_invalidate_auto_close(state):
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id=state)
+    closed = []
+    popup.set_job_state('completed'); popup.schedule_verified_close(lambda: closed.append(True), 10)
+    popup.set_job_state(state); wait_qt(20)
+    assert closed == []
+    popup.close()
+
+
+def test_stale_popup_timer_cannot_close_restarted_job():
+    popup = stratrum_download_studio.DownloadProgressPopup('file.mp4', 'https://example.com', job_id='restart')
+    closed = []
+    popup.set_job_state('completed'); popup.schedule_verified_close(lambda: closed.append(True), 10)
+    popup.set_job_state('resolving'); popup.set_job_state('completed')
+    wait_qt(20)
+    assert closed == []
+    popup.close()
+
+
+def test_quick_download_starts_immediately_with_valid_desktop_defaults(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.recent_folders = [str(tmp_path)]
+    calls = []
+    fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
+        'start_new_download': lambda self, *args: calls.append(('start', args)),
+        'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
+        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+    assert stratrum_download_studio.StratrumDownloadStudio.handle_browser_request(fake, 'https://example.com/v', 'quick_download')
+    assert [item[0] for item in calls] == ['show', 'start']
+
+
+def test_download_with_options_waits_for_start_and_missing_defaults_fall_back(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.recent_folders = []
+    calls = []
+    fake = type('Window', (), {'app_config': config, 'show_normal': lambda self, **kw: calls.append(('show', kw)),
+        'start_new_download': lambda self, *args: calls.append(('start', args)),
+        'open_add_dialog': lambda self, *args, **kw: calls.append(('options', args, kw)),
+        'quick_download_defaults_valid': stratrum_download_studio.StratrumDownloadStudio.quick_download_defaults_valid})()
+    method = stratrum_download_studio.StratrumDownloadStudio.handle_browser_request
+    method(fake, 'https://example.com/a', 'download_with_options')
+    method(fake, 'https://example.com/b', 'quick_download')
+    assert [item[0] for item in calls] == ['options', 'options']
+
+
+def test_browser_requests_route_via_qt_signal_and_intentional_foreground_only():
+    server_source = inspect.getsource(stratrum_download_studio.ServerThread)
+    handler_source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.handle_browser_request)
+    assert 'pyqtSignal(str, str)' in server_source and '.connect(self.handle_browser_request)' in inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_server)
+    assert 'request_foreground=True' in handler_source
+    assert 'request_foreground=True' not in inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.start_queued_jobs)
+
+
+def test_source_url_preserves_youtube_id_and_redacts_sensitive_values():
+    url = 'https://www.youtube.com/watch?v=VIDEO_ID&token=secret&signature=signed&list=PUBLIC'
+    assert stratrum_download_studio.sanitize_source_url(url) == 'https://www.youtube.com/watch?v=VIDEO_ID&list=PUBLIC'
+    assert stratrum_download_studio.sanitize_source_url('https://youtu.be/VIDEO_ID?auth=x') == 'https://youtu.be/VIDEO_ID'
+
+
+def test_original_and_resolved_media_urls_are_separate():
+    job = stratrum_download_studio.DownloadJob('id', 'https://youtube.com/watch?v=abc', '.', 'MP4',
+                                               resolved_media_url='https://cdn.example/video?sig=secret')
+    assert job.source_url != job.resolved_media_url
+    assert 'cdn.example' not in stratrum_download_studio.sanitize_source_url(job.source_url)
+
+
+def test_phase_2a6b_preferences_persist_and_default_safely(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    assert config.primary_browser_action == 'quick_download' and config.keep_completed_window_open is False
+    config.primary_browser_action = 'download_with_options'; config.keep_completed_window_open = True; config.persist()
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    assert restored.primary_browser_action == 'download_with_options' and restored.keep_completed_window_open is True
+
+
+def test_visible_active_branding_uses_stratum_and_legacy_security_names_remain():
+    active = [Path('browser_extension/manifest.json'), Path('firefox_extension/manifest.json'),
+              Path('browser_extension/options.html'), Path('browser_extension/background.js'), Path('browser_extension/content.js')]
+    for path in active:
+        text = path.read_text(encoding='utf-8')
+        assert 'Stratum Download Studio' in text or 'Stratum' in text
+        assert 'Stratrum Download Studio' not in text
+    assert 'X-Stratrum-Auth' in Path('browser_extension/background.js').read_text(encoding='utf-8')

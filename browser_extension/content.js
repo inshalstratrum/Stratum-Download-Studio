@@ -55,7 +55,7 @@ function showStatus(message, success = false) {
 async function requestDownload(mediaElement, button) {
   const url = chooseDownloadUrl(mediaElement);
   if (!url) {
-    showStatus("This page type is not supported by Stratrum.");
+    showStatus("This page type is not supported by Stratum.");
     return;
   }
   const originalText = button.textContent;
@@ -69,7 +69,7 @@ async function requestDownload(mediaElement, button) {
     showStatus(result && result.message ? result.message : "The extension did not receive a response.", Boolean(result && result.success));
     button.textContent = result && result.success ? "Sent ✓" : originalText;
   } catch (error) {
-    showStatus("Stratrum extension communication failed. Open extension Options and try again.");
+    showStatus("Stratum extension communication failed. Open extension Options and try again.");
     button.textContent = originalText;
   } finally {
     button.disabled = false;
@@ -110,8 +110,8 @@ function attachButton(mediaElement) {
   }
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = "↓ Stratrum";
-  button.setAttribute("aria-label", "Send this media to Stratrum Download Studio");
+  button.textContent = "↓ Stratum";
+  button.setAttribute("aria-label", "Send this media to Stratum Download Studio");
   Object.assign(button.style, {
     position: "absolute",
     zIndex: "2147483646",

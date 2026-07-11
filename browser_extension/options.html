@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Stratrum Extension Options</title>
+    <title>Stratum Extension Options</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 20px; max-width: 450px; }
         .input-group { display: flex; margin: 10px 0; }
@@ -16,9 +16,9 @@
     </style>
 </head>
 <body>
-    <h2>Stratrum Download Studio</h2>
+    <h2>Stratum Download Studio</h2>
     <p>Enter the Auth Token from the desktop application (Options -> Browser Integration):</p>
-    <p class="note">This token is strictly local and validates requests between your browser and the Stratrum desktop app. <strong>Never share this token with anyone.</strong></p>
+    <p class="note">This token is strictly local and validates requests between your browser and the Stratum desktop app. <strong>Never share this token with anyone.</strong></p>
     <div class="input-group">
         <input type="password" id="token" placeholder="Paste 64-character hex token here">
         <button id="toggle-visibility" type="button">Show</button>
@@ -26,9 +26,12 @@
     <button id="save">Save Token</button>
     <button id="clear" class="danger">Clear Token</button>
     <div class="setting">
+        <label>Primary action: <select id="primary-action"><option value="quick_download">Quick Download</option><option value="download_with_options">Download with Options</option></select></label>
+    </div>
+    <div class="setting">
         <label><input type="checkbox" id="show-media-buttons" checked> Show download button on detected media</label>
     </div>
-    <p class="note">Automatic media detection requires access to HTTP and HTTPS pages, so the browser will display a broad site-access permission warning. Stratrum observes only added video/audio elements and sends a URL only after you click its button.</p>
+    <p class="note">Automatic media detection requires access to HTTP and HTTPS pages, so the browser will display a broad site-access permission warning. Stratum observes only added video/audio elements and sends a URL only after you click its button.</p>
     <div id="status"></div>
     <script src="options.js"></script>
 </body>

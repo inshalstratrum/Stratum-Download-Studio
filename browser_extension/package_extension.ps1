@@ -17,9 +17,9 @@ $chromiumFiles = @((Join-Path $extensionRoot 'manifest.json')) +
     $sharedFiles +
     @((Join-Path $extensionRoot 'README.md'))
 
-$chromePackage = Join-Path $packageRoot 'stratrum-download-studio-chrome.zip'
-$edgePackage = Join-Path $packageRoot 'stratrum-download-studio-edge.zip'
-$firefoxPackage = Join-Path $packageRoot 'stratrum-download-studio-firefox.zip'
+$chromePackage = Join-Path $packageRoot 'stratum-download-studio-chrome.zip'
+$edgePackage = Join-Path $packageRoot 'stratum-download-studio-edge.zip'
+$firefoxPackage = Join-Path $packageRoot 'stratum-download-studio-firefox.zip'
 
 Compress-Archive -LiteralPath $chromiumFiles -DestinationPath $chromePackage -CompressionLevel Optimal -Force
 Compress-Archive -LiteralPath $chromiumFiles -DestinationPath $edgePackage -CompressionLevel Optimal -Force

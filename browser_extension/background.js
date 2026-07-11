@@ -4,8 +4,13 @@ const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
 extensionApi.runtime.onInstalled.addListener(async () => {
   await extensionApi.contextMenus.removeAll();
   extensionApi.contextMenus.create({
-    id: "download-stratrum",
-    title: "Download with Stratrum Download Studio",
+    id: "quick-download-stratum",
+    title: "Quick Download with Stratum Download Studio",
+    contexts: ["link", "video", "audio"]
+  });
+  extensionApi.contextMenus.create({
+    id: "download-options-stratum",
+    title: "Download with Options in Stratum Download Studio",
     contexts: ["link", "video", "audio"]
   });
 });
@@ -14,14 +19,14 @@ async function readLocalStorage(keys) {
   return await extensionApi.storage.local.get(keys);
 }
 
-async function sendToDesktopApp(url) {
+async function sendToDesktopApp(url, action) {
   const stored = await readLocalStorage(["authToken"]);
   const token = stored.authToken || "";
   if (!token) {
     return {
       success: false,
       code: "missing_token",
-      message: "Open Stratrum extension Options and save the desktop authentication token."
+      message: "Open Stratum extension Options and save the desktop authentication token."
     };
   }
 
@@ -34,12 +39,12 @@ async function sendToDesktopApp(url) {
         "Content-Type": "application/json",
         "X-Stratrum-Auth": token
       },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, action }),
       signal: controller.signal
     });
 
     if (response.ok) {
-      return { success: true, message: "Sent to Stratrum Download Studio." };
+      return { success: true, message: "Sent to Stratum Download Studio." };
     }
     if (response.status === 403) {
       return {
@@ -64,7 +69,7 @@ async function sendToDesktopApp(url) {
     return {
       success: false,
       code: "desktop_unavailable",
-      message: "Stratrum Download Studio is unavailable. Start the desktop app and try again."
+      message: "Stratum Download Studio is unavailable. Start the desktop app and try again."
     };
   } finally {
     clearTimeout(timeoutId);
@@ -89,11 +94,15 @@ async function showResultInTab(tabId, result) {
 }
 
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== "download-stratrum") {
+  const actions = {
+    "quick-download-stratum": "quick_download",
+    "download-options-stratum": "download_with_options"
+  };
+  if (!actions[info.menuItemId]) {
     return;
   }
   const targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
-  const result = await sendToDesktopApp(targetUrl);
+  const result = await sendToDesktopApp(targetUrl, actions[info.menuItemId]);
   await showResultInTab(tab && tab.id, result);
 });
 
@@ -101,6 +110,8 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "stratrum-download-request") {
     return false;
   }
-  sendToDesktopApp(message.url).then(sendResponse);
+  readLocalStorage(["primaryAction"]).then((stored) =>
+    sendToDesktopApp(message.url, stored.primaryAction === "download_with_options" ? "download_with_options" : "quick_download")
+  ).then(sendResponse);
   return true;
 });

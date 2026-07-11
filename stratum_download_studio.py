@@ -21,7 +21,8 @@ from enum import Enum
 from pathlib import Path
 import yt_dlp
 
-APP_NAME = "Stratrum Download Studio"
+APP_NAME = "Stratum Download Studio"
+EXTENSION_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
 CONVERSION_TIMEOUT_SECONDS = 30 * 60
 MAX_PAIRED_ORIGINS = 6
@@ -166,6 +167,8 @@ class AppConfig:
     max_simultaneous_downloads: int = DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS
     speed_limit_bps: int = 0
     completion_action: str = 'keep_open'
+    keep_completed_window_open: bool = False
+    primary_browser_action: str = 'quick_download'
     stop_after_current: bool = False
     window_size: list[int] = field(default_factory=lambda: [1150, 680])
     splitter_sizes: list[int] = field(default_factory=lambda: [200, 950])
@@ -191,6 +194,8 @@ class AppConfig:
             'max_simultaneous_downloads': self.max_simultaneous_downloads,
             'speed_limit_bps': self.speed_limit_bps,
             'completion_action': self.completion_action,
+            'keep_completed_window_open': self.keep_completed_window_open,
+            'primary_browser_action': self.primary_browser_action,
             'stop_after_current': self.stop_after_current,
             'window_size': list(self.window_size),
             'splitter_sizes': list(self.splitter_sizes),
@@ -347,6 +352,8 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         max_simultaneous_downloads=bounded_int(stored.get('max_simultaneous_downloads'), DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS, 1, 8),
         speed_limit_bps=bounded_int(stored.get('speed_limit_bps'), 0, 0, 1024 * 1024 * 1024),
         completion_action=stored.get('completion_action', 'keep_open'),
+        keep_completed_window_open=bool(stored.get('keep_completed_window_open', False)),
+        primary_browser_action=stored.get('primary_browser_action', 'quick_download') if stored.get('primary_browser_action', 'quick_download') in EXTENSION_ACTIONS else 'quick_download',
         stop_after_current=bool(stored.get('stop_after_current', False)),
         window_size=stored.get('window_size', [1150, 680]) if isinstance(stored.get('window_size', [1150, 680]), list) else [1150, 680],
         splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
@@ -456,6 +463,9 @@ def validate_request(headers, rfile, runtime):
         return 400, b'{"error": "JSON object required"}'
 
     url = data.get('url', '')
+    action = data.get('action')
+    if action not in EXTENSION_ACTIONS:
+        return 400, b'{"error": "Invalid action"}'
     is_valid, err_msg = validate_url(url)
     if not is_valid:
         return 400, json.dumps({"error": err_msg}).encode('utf-8')
@@ -472,7 +482,7 @@ def validate_request(headers, rfile, runtime):
     except OSError:
         return 500, b'{"error": "Unable to persist browser pairing"}'
 
-    return 200, url
+    return 200, {'url': url, 'action': action}
 
 
 def recorded_save_directory(download_record):
@@ -861,6 +871,7 @@ class DownloadJob:
     source_url: str
     save_dir: str
     requested_format: str
+    resolved_media_url: str = ''
     requested_resolution: int | None = None
     package_id: str | None = None
     final_output_path: str = ''
@@ -882,10 +893,20 @@ class DownloadJob:
     completed_at: str = ''
 
     def to_dict(self):
-        return asdict(self)
+        payload = asdict(self)
+        payload['original_source_url'] = self.source_url
+        payload.pop('resolved_media_url', None)
+        return payload
+
+    @property
+    def original_source_url(self):
+        return self.source_url
 
     @classmethod
     def from_dict(cls, payload):
+        payload = dict(payload)
+        if 'source_url' not in payload and isinstance(payload.get('original_source_url'), str):
+            payload['source_url'] = payload['original_source_url']
         allowed = cls.__dataclass_fields__.keys()
         values = {key: payload[key] for key in allowed if key in payload}
         job = cls(**values)
@@ -1021,7 +1042,15 @@ def sanitize_source_url(url):
         host = parsed.hostname or ''
         if parsed.port:
             host = f'{host}:{parsed.port}'
-        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, '', ''))
+        sensitive = {'token', 'auth', 'authorization', 'password', 'credential', 'signature', 'sig', 'key',
+                     'expires', 'expiry', 'exp', 'x-amz-signature', 'x-amz-credential', 'x-amz-expires'}
+        query = []
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            lowered = key.lower()
+            if lowered in sensitive or any(marker in lowered for marker in ('token', 'signature', 'credential')):
+                continue
+            query.append((key, value))
+        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, urllib.parse.urlencode(query), ''))
     except (TypeError, ValueError):
         return '[invalid URL]'
 
@@ -1197,7 +1226,7 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
-            self.server.url_signal.emit(result)
+            self.server.url_signal.emit(result['url'], result['action'])
         else:
             self.wfile.write(result)
 
@@ -1205,14 +1234,14 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 class ServerThread(QThread):
-    url_received = pyqtSignal(str)
+    download_requested = pyqtSignal(str, str)
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
     def run(self):
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), DownloadServerHandler)
         self.httpd.app_config = self.app_config
-        self.httpd.url_signal = self.url_received
+        self.httpd.url_signal = self.download_requested
         self.httpd.serve_forever()
     def stop(self):
         if hasattr(self, 'httpd'):
@@ -1592,6 +1621,7 @@ class DownloadThread(QThread):
         self.temporary_paths = set()
         self.ydl = None
         self.final_probe = {}
+        self.resolved_media_url = ''
         self.current_stage = 'download'
 
     def set_speed_limit(self, bytes_per_second):
@@ -1675,6 +1705,8 @@ class DownloadThread(QThread):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 self.ydl = ydl
                 info = ydl.extract_info(self.url, download=True)
+            if isinstance(info, dict) and isinstance(info.get('url'), str):
+                self.resolved_media_url = info['url']
             if self.cancelled or self.isInterruptionRequested():
                 raise CancelException("Cancelled")
             self.current_stage = 'verification'
@@ -1902,6 +1934,9 @@ class DownloadProgressPopup(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         self.details_open = False
         self.filename = filename
+        self.lifecycle_generation = 0
+        self.auto_close_timer = QTimer(self)
+        self.auto_close_timer.setSingleShot(True)
 
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -1982,7 +2017,11 @@ class DownloadProgressPopup(QDialog):
             if index >= 0:
                 self.completion_combo.setCurrentIndex(index)
         self.exit_when_idle_cb = QCheckBox("Exit application after all jobs finish")
+        self.keep_completed_open_cb = QCheckBox("Keep completed download window open")
+        self.keep_completed_open_cb.setChecked(bool(app_config and app_config.keep_completed_window_open))
+        self.keep_completed_open_cb.toggled.connect(self.persist_keep_open_preference)
         completion_layout.addRow("On completion", self.completion_combo)
+        completion_layout.addRow(self.keep_completed_open_cb)
         completion_layout.addRow(self.exit_when_idle_cb)
         options_tab.setLayout(completion_layout)
 
@@ -2052,6 +2091,8 @@ class DownloadProgressPopup(QDialog):
 
     def set_job_state(self, state):
         normalized = str(state).lower().replace(' ', '')
+        if normalized != JobState.COMPLETED.value:
+            self.cancel_auto_close()
         self.job_state = normalized
         if normalized == JobState.PAUSED.value:
             self.pause_btn.setText("Resume")
@@ -2061,6 +2102,26 @@ class DownloadProgressPopup(QDialog):
             self.pause_btn.setEnabled(True)
         else:
             self.pause_btn.setEnabled(False)
+
+    def persist_keep_open_preference(self, checked):
+        if self.app_config:
+            self.app_config.keep_completed_window_open = bool(checked)
+            self.app_config.persist()
+
+    def cancel_auto_close(self):
+        self.lifecycle_generation += 1
+        self.auto_close_timer.stop()
+
+    def schedule_verified_close(self, callback, delay_ms=1500):
+        self.cancel_auto_close()
+        if self.keep_completed_open_cb.isChecked():
+            return False
+        generation = self.lifecycle_generation
+        self.auto_close_timer.timeout.connect(
+            lambda: callback() if self.lifecycle_generation == generation and self.job_state == JobState.COMPLETED.value else None
+        )
+        self.auto_close_timer.start(delay_ms)
+        return True
 
     def request_pause_resume(self):
         if self.job_state == JobState.PAUSED.value:
@@ -2467,7 +2528,7 @@ class StratrumDownloadStudio(QMainWindow):
         super().__init__()
         self.app_config = app_config
         self.download_manager = DownloadManager(app_config)
-        self.setWindowTitle("Stratrum Download Studio")
+        self.setWindowTitle(APP_NAME)
         self.setMinimumSize(760, 480)
         width, height = (app_config.window_size + [1150, 680])[:2]
         self.setGeometry(100, 100, max(800, int(width)), max(520, int(height)))
@@ -2493,7 +2554,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.setWindowIcon(icon)
 
         tray_menu = QMenu()
-        tray_menu.addAction("Show Stratrum Download Studio", self.show_normal)
+        tray_menu.addAction(f"Show {APP_NAME}", self.show_normal)
         tray_menu.addSeparator()
         tray_menu.addAction("Exit", self.force_quit)
         self.tray_icon.setContextMenu(tray_menu)
@@ -2503,15 +2564,35 @@ class StratrumDownloadStudio(QMainWindow):
     def tray_icon_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick: self.show_normal()
 
-    def show_normal(self):
+    def show_normal(self, request_foreground=False):
         self.show()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
-        self.activateWindow()
+        self.raise_()
+        if request_foreground:
+            self.request_foreground(self)
+
+    def request_foreground(self, widget):
+        widget.show(); widget.raise_(); widget.activateWindow(); widget.setFocus()
+        if sys.platform != 'win32':
+            return True
+        try:
+            import ctypes
+            hwnd = int(widget.winId())
+            if ctypes.windll.user32.SetForegroundWindow(hwnd):
+                return True
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [('cbSize', ctypes.c_uint), ('hwnd', ctypes.c_void_p), ('dwFlags', ctypes.c_uint),
+                            ('uCount', ctypes.c_uint), ('dwTimeout', ctypes.c_uint)]
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x00000003, 2, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+        return False
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange and self.windowState() & Qt.WindowState.WindowMinimized:
             event.accept(); self.hide()
-            self.tray_icon.showMessage("Stratrum Download Studio", "Running in background.", QSystemTrayIcon.MessageIcon.Information, 1500)
+            self.tray_icon.showMessage(APP_NAME, "Running in background.", QSystemTrayIcon.MessageIcon.Information, 1500)
             return
         super().changeEvent(event)
 
@@ -2641,7 +2722,22 @@ class StratrumDownloadStudio(QMainWindow):
 
     def show_dummy_msg(self, title):
         if title == "Options":
-            BrowserIntegrationDialog(self.app_config, self).exec()
+            self.show_preferences()
+
+    def show_preferences(self):
+        dialog = QDialog(self); dialog.setWindowTitle(f"{APP_NAME} Options")
+        layout = QFormLayout(dialog)
+        primary = QComboBox(); primary.addItem("Quick Download", "quick_download"); primary.addItem("Download with Options", "download_with_options")
+        primary.setCurrentIndex(max(0, primary.findData(self.app_config.primary_browser_action)))
+        keep_open = QCheckBox("Keep completed download window open"); keep_open.setChecked(self.app_config.keep_completed_window_open)
+        browser = QPushButton("Browser Integration..."); browser.clicked.connect(lambda: BrowserIntegrationDialog(self.app_config, dialog).exec())
+        save = QPushButton("Save")
+        save.clicked.connect(dialog.accept)
+        layout.addRow("Primary browser action", primary); layout.addRow(keep_open); layout.addRow(browser); layout.addRow(save)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.app_config.primary_browser_action = primary.currentData()
+            self.app_config.keep_completed_window_open = keep_open.isChecked()
+            self.app_config.persist()
 
     def init_ui(self):
         menubar = self.menuBar()
@@ -2679,7 +2775,7 @@ class StratrumDownloadStudio(QMainWindow):
         help_menu.addAction("Quick Start").triggered.connect(self.show_quick_start)
         help_menu.addAction("Supported Sites").triggered.connect(self.show_supported_sites)
         help_menu.addAction("Open Logs / Diagnostics").triggered.connect(self.export_diagnostics)
-        help_menu.addAction("About Stratrum Download Studio").triggered.connect(self.show_about)
+        help_menu.addAction(f"About {APP_NAME}").triggered.connect(self.show_about)
 
         registration_menu = menubar.addMenu("Registration")
         registration_action = registration_menu.addAction("Registration unavailable pending licensing review")
@@ -2791,10 +2887,10 @@ class StratrumDownloadStudio(QMainWindow):
         QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
 
     def show_supported_sites(self):
-        QMessageBox.information(self, "Supported Sites", "Stratrum uses yt-dlp extractors for authorized HTTP/HTTPS media. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
+        QMessageBox.information(self, "Supported Sites", "Stratum uses yt-dlp extractors for authorized HTTP/HTTPS media. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
 
     def show_about(self):
-        QMessageBox.information(self, "About Stratrum Download Studio", "Stratrum Download Studio — Phase 2A.5 media download foundation. Download only content you own or are authorized to save.")
+        QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME} — Phase 2A.6B media download foundation. Download only content you own or are authorized to save.")
 
     def export_diagnostics(self):
         logs_dir = self.app_config.app_data_root / 'logs'
@@ -2822,7 +2918,7 @@ class StratrumDownloadStudio(QMainWindow):
         editable = job_capabilities(job)['edit']
         dialog = QDialog(self); dialog.setWindowTitle("Download Properties"); dialog.setMinimumWidth(620)
         layout = QVBoxLayout(dialog); form = QFormLayout()
-        source_field = QLineEdit(sanitize_source_url(job.source_url)); source_field.setReadOnly(True)
+        source_field = QLineEdit(sanitize_source_url(job.original_source_url)); source_field.setReadOnly(True)
         folder_field = QLineEdit(job.save_dir); folder_field.setEnabled(editable)
         format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES)); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
         resolution_combo = QComboBox(); resolution_combo.addItem("Best available", None)
@@ -3049,13 +3145,30 @@ class StratrumDownloadStudio(QMainWindow):
 
     def init_server(self):
         self.server_thread = ServerThread(self.app_config)
-        self.server_thread.url_received.connect(self.open_add_dialog)
+        self.server_thread.download_requested.connect(self.handle_browser_request)
         self.server_thread.start()
 
-    def open_add_dialog(self, url=""):
+    def handle_browser_request(self, url, action):
+        if action not in EXTENSION_ACTIONS:
+            return False
+        if action == 'quick_download' and self.quick_download_defaults_valid():
+            self.show_normal(request_foreground=True)
+            self.start_new_download(url, self.app_config.recent_folders[0], self.app_config.preferred_resolution,
+                                    self.app_config.preferred_format)
+            return True
+        self.open_add_dialog(url, request_foreground=True)
+        return True
+
+    def quick_download_defaults_valid(self):
+        return bool(self.app_config.preferred_format in OUTPUT_PROFILES and self.app_config.recent_folders and
+                    Path(self.app_config.recent_folders[0]).is_dir())
+
+    def open_add_dialog(self, url="", request_foreground=False):
         if isinstance(url, bool): url = ""
-        self.show_normal()
+        self.show_normal(request_foreground=request_foreground)
         dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config)
+        if request_foreground:
+            QTimer.singleShot(0, lambda: self.request_foreground(dialog))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
             if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata)
@@ -3214,6 +3327,9 @@ class StratrumDownloadStudio(QMainWindow):
                     d['final_path'] = ''
                     d['thread'] = None
                     self.download_manager.set_state(id, JobState.FAILED, 'Unsafe completed output path')
+                    if popup := self.popups.get(id):
+                        popup.set_job_state(JobState.FAILED.value)
+                        popup.set_details("State: failed\nUnsafe completed output path; the window remains open.")
                     self.start_queued_jobs()
                     return
                 if bar: bar.setValue(100); bar.setFormat("Complete 100%")
@@ -3225,6 +3341,7 @@ class StratrumDownloadStudio(QMainWindow):
                 d['job'].actual_resolution = video_stream.get('height')
                 d['probe'] = probe
                 d['job'].temporary_paths = list(thread.temporary_paths) if thread else []
+                d['job'].resolved_media_url = thread.resolved_media_url if thread else ''
                 self.download_manager.set_state(id, JobState.COMPLETED)
                 completed_size = format_bytes(safe_path.stat().st_size)
                 self.table.setItem(d['row'], 2, QTableWidgetItem(format_transfer_size(completed_size, completed_size)))
@@ -3241,7 +3358,6 @@ class StratrumDownloadStudio(QMainWindow):
                     open_btn = dlg.addButton("Open", QMessageBox.ButtonRole.ActionRole)
                 folder_btn = dlg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
                 dlg.addButton("Close", QMessageBox.ButtonRole.RejectRole)
-                dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
                 dlg.exec()
 
                 if open_btn and dlg.clickedButton() == open_btn:
@@ -3281,12 +3397,20 @@ class StratrumDownloadStudio(QMainWindow):
             except (OSError, ValueError, PermissionError): pass
         elif action.startswith('convert_'):
             self.start_conversion_for_record(record, action.split('_', 1)[1])
-        if action == 'close':
-            popup.close(); self.popups.pop(record['id'], None)
-        elif action != 'keep_open' and not action.startswith('convert_'):
-            popup.close(); self.popups.pop(record['id'], None)
+        if not action.startswith('convert_'):
+            popup.schedule_verified_close(
+                lambda job_id=record['id'], expected=popup: self.close_completed_popup(job_id, expected)
+            )
         if popup.exit_when_idle_cb.isChecked() and self.download_manager.active_count() == 0 and not self.download_manager.pending_jobs():
             QTimer.singleShot(0, self.force_quit)
+
+    def close_completed_popup(self, job_id, expected_popup):
+        record = self.get_download_by_id(job_id)
+        if self.popups.get(job_id) is not expected_popup or not record or record['job'].state != JobState.COMPLETED.value:
+            return False
+        expected_popup.close()
+        self.popups.pop(job_id, None)
+        return True
 
     def pause_download(self):
         record = self.selected_record()
@@ -3377,6 +3501,7 @@ class StratrumDownloadStudio(QMainWindow):
                 popup.progress_bar.setValue(100)
                 popup.set_job_state(JobState.COMPLETED.value)
                 popup.set_details(f"State: completed\nConverted output: {converted_path}")
+                popup.schedule_verified_close(lambda job_id=row_id, expected=popup: self.close_completed_popup(job_id, expected))
             self.save_downloads_to_file()
             self.start_queued_jobs()
 

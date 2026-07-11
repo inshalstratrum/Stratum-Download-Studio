@@ -1,10 +1,10 @@
-# Stratrum Download Studio Browser Extensions
+# Stratum Download Studio Browser Extensions
 
 The Chromium Manifest V3 source in this directory supports Google Chrome and Microsoft Edge. It preserves right-click link/video/audio downloads and adds a user-controlled button beside detected HTML5 video and audio elements.
 
 ## Why broad site access is requested
 
-Automatic media detection requires a content script on `http://*/*` and `https://*/*`. Chrome and Edge therefore show a broad permission warning. The content script observes only added `VIDEO` and `AUDIO` elements. It does not read forms, cookies, browser history, or unrelated page text, and it sends no URL or telemetry until the user clicks a Stratrum button.
+Automatic media detection requires a content script on `http://*/*` and `https://*/*`. Chrome and Edge therefore show a broad permission warning. The content script observes only added `VIDEO` and `AUDIO` elements. It does not read forms, cookies, browser history, or unrelated page text, and it sends no URL or telemetry until the user clicks a Stratum button.
 
 Direct HTTP/HTTPS media sources are sent directly. Blob, MediaSource, segmented, unavailable, and unsupported sources fall back to the current HTTP/HTTPS page URL so the desktop downloader can resolve them.
 
