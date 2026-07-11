@@ -1,96 +1,57 @@
-# IDM Extension Debug & Testing Guide
+# Stratrum Download Studio Browser Extension
 
-## File Structure
-```
-IDM_Extension/
-├── manifest.json   # Extension configuration
-├── background.js   # Background script (handles communication)
-├── content.js      # Content script (runs on web pages)
-└── README.md       # This file
-```
+This Manifest V3 extension adds **Download with Stratrum Download Studio** to the link, video, and audio context menus. The same source package is compatible with Google Chrome and Microsoft Edge.
 
-## Debug Steps
+## Security model
 
-### 1. Enable Debug Logging
-Open browser console (F12) and run:
-```javascript
-localStorage.setItem('idm_debug', 'true');
-```
-Refresh the page to see debug messages.
+- The extension talks only to `http://127.0.0.1:8000/add_download`.
+- Requests require the 64-character local token copied from desktop **Options > Browser Integration**.
+- The token is stored in browser-local extension storage and is not written to logs.
+- The desktop app pairs the first strictly valid extension origin only after the entire authenticated request passes validation.
+- Use **Reset Browser Pairing** in desktop Options before reinstalling the extension under a different origin.
 
-### 2. Test Content Script Loading
-1. Open Chrome Extensions (`chrome://extensions/`)
-2. Enable "Developer mode"
-3. Load unpacked extension from `IDM_Extension` folder
-4. Visit a page with a video (e.g., YouTube)
-5. Open DevTools Console - you should see: `[IDM Clone] Content script initialized`
+## Load unpacked for development
 
-### 3. Test Button Appearance
-- Hover over any `<video>` element
-- Button should appear above the video with "⬇ Download Video" text
-- Button should have blue background (#0078D7)
+Official Chrome Web Store and Edge Add-ons listings do not exist yet. Do not claim that store installation is available until those listings are published.
 
-### 4. Test Communication Flow
-1. Start `idm_clone.py` (the Python server)
-2. Hover over video and click the download button
-3. Check DevTools console for messages:
-   - "⏳ Sending..." → button state
-   - "✅ Sent!" → success
-   - "❌ Try Again" → connection failed
+### Chrome
 
-## Common Issues & Solutions
+1. Open `chrome://extensions/`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose this `IDM_Extension` directory.
+5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
 
-### Issue: Button Not Appearing
-**Causes:**
-- Video element has no `src` attribute
-- Video is in a shadow DOM (YouTube uses this)
-- Parent container has `overflow: hidden`
+### Microsoft Edge
 
-**Solution:** The enhanced script appends to `document.body` and uses `position: fixed` to avoid clipping.
+1. Open `edge://extensions/`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose this `IDM_Extension` directory.
+5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
 
-### Issue: Click Not Working
-**Causes:**
-- Event consumed by YouTube's player
-- Event bubbling issues
+## Packaged review builds
 
-**Solution:** Use `event.stopPropagation()` and attach to `document.body` instead of video container.
+Run `powershell -ExecutionPolicy Bypass -File IDM_Extension/package_extension.ps1` from the repository root. It produces:
 
-### Issue: "Connection Failed"
-**Causes:**
-- Python server not running
-- Port 8000 blocked by Windows Firewall
-- CORS headers missing
+- `extension_packages/stratrum-download-studio-chrome.zip`
+- `extension_packages/stratrum-download-studio-edge.zip`
 
-**Solution:**
-1. Run `python idm_clone.py` first
-2. Check Windows Firewall allows connections on port 8000
-3. Verify server responds: `curl http://127.0.0.1:8000/`
+These ZIP files are review/submission artifacts. Browser security policies still require normal store review or explicit developer-mode loading; the desktop app never attempts silent installation.
 
-### Issue: Blob URLs (blob:null/...)
-**Cause:** YouTube and some sites use blob URLs for video streams
-**Solution:** Script filters blob URLs and falls back to page URL
+## Store publication gate
 
-## Testing Checklist
+Before changing the first-launch prompt from the manual workflow to direct installation:
 
-- [ ] Extension loads without errors in `chrome://extensions/`
-- [ ] Content script logs in console on video pages
-- [ ] Button appears on hover over `<video>` elements
-- [ ] Button position is correct and visible
-- [ ] Button click triggers message to background script
-- [ ] Background script sends request to Python server
-- [ ] Python server receives and processes URL
+1. Submit the Chrome ZIP to the Chrome Web Store.
+2. Submit the Edge ZIP to Microsoft Edge Add-ons.
+3. Complete each store's review process.
+4. Replace the official-store landing-page constants in `inshal_dm.py` with the two approved listing URLs.
+5. Re-run the manual checklist in `docs/09_PHASE_2A3_MANUAL_TEST.md`.
 
-## Manifest Permissions Explained
+## Local connection checks
 
-```json
-{
-  "permissions": [
-    "contextMenus",  // Right-click menu
-    "activeTab"      // Current tab access
-  ],
-  "host_permissions": [
-    "<all_urls>",              // Run content script everywhere
-    "http://127.0.0.1:8000/*"  // Connect to Python server
-  ]
-}
-```
+- Start the desktop app before using the context menu.
+- Confirm the token was saved in extension Options.
+- If a reinstall changes the extension origin, reset browser pairing in the desktop app and send one fully valid link again.
+- If port 8000 is unavailable, exit the desktop app fully and confirm no stale process is listening before restarting.

@@ -1,212 +1,532 @@
-import pytest
-import os
+import io
+import inspect
 import json
-import tempfile
-import threading
-import urllib.request
-import urllib.error
-import urllib.parse
-from http.server import ThreadingHTTPServer
-import sys
-import time
+import os
+from pathlib import Path
+import socket
 import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.request
 
-# Mock PyQt6 to avoid headless errors
+import pytest
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
 from PyQt6.QtWidgets import QApplication
+
 app = QApplication.instance() or QApplication(sys.argv)
 
 import inshal_dm
-from inshal_dm import IDMServerHandler
-
-@pytest.fixture(autouse=True)
-def isolated_env(tmp_path, monkeypatch):
-    old_auth = getattr(inshal_dm, 'AUTH_TOKEN', '')
-    old_origin = getattr(inshal_dm, 'ALLOWED_ORIGIN', '')
-    old_history = getattr(inshal_dm, 'HISTORY_FILE', '')
-
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
-
-    inshal_dm.rate_limiter.allowance = inshal_dm.rate_limiter.rate
-    inshal_dm.rate_limiter.last_check = time.monotonic()
-
-    inshal_dm.AUTH_TOKEN = 'b' * 64
-    inshal_dm.ALLOWED_ORIGIN = 'chrome-extension://valid'
-    inshal_dm.HISTORY_FILE = str(tmp_path / 'history.json')
-
-    yield
-
-    inshal_dm.AUTH_TOKEN = old_auth
-    inshal_dm.ALLOWED_ORIGIN = old_origin
-    inshal_dm.HISTORY_FILE = old_history
 
 
-@pytest.fixture(scope="module")
-def server():
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), IDMServerHandler)
-    port = httpd.server_port
+TOKEN = 'b' * 64
+ORIGIN = 'chrome-extension://' + ('a' * 32)
+OTHER_ORIGIN = 'chrome-extension://' + ('b' * 32)
+VALID_BODY = json.dumps({'url': 'https://example.com/video.mp4'}).encode('utf-8')
 
-    class MockServer:
-        def emit(self, url): pass
-    httpd.url_signal = MockServer()
 
-    thread = threading.Thread(target=httpd.serve_forever)
-    thread.daemon = True
+class CountingLimiter:
+    def __init__(self, allowed=True):
+        self.calls = 0
+        self.allowed = allowed
+
+    def allow(self):
+        self.calls += 1
+        return self.allowed
+
+
+@pytest.fixture
+def runtime(tmp_path):
+    return inshal_dm.initialize_runtime(
+        app_data_root=tmp_path / 'appdata',
+        auth_token=TOKEN,
+        allowed_origin=ORIGIN,
+        rate_limiter=CountingLimiter(),
+    )
+
+
+@pytest.fixture
+def unpaired_runtime(tmp_path):
+    return inshal_dm.initialize_runtime(
+        app_data_root=tmp_path / 'appdata',
+        auth_token=TOKEN,
+        allowed_origin='',
+        rate_limiter=CountingLimiter(),
+    )
+
+
+def validate(runtime, body=VALID_BODY, **header_overrides):
+    headers = {
+        'X-Stratrum-Auth': TOKEN,
+        'Origin': ORIGIN,
+        'Content-Type': 'application/json',
+        'Content-Length': str(len(body)),
+    }
+    for name, value in header_overrides.items():
+        header_name = name.replace('_', '-')
+        if value is None:
+            headers.pop(header_name, None)
+        else:
+            headers[header_name] = value
+    return inshal_dm.validate_request(headers, io.BytesIO(body), runtime)
+
+
+@pytest.fixture
+def server(runtime):
+    httpd = inshal_dm.http.server.ThreadingHTTPServer(('127.0.0.1', 0), inshal_dm.IDMServerHandler)
+    httpd.app_config = runtime
+
+    class SignalSpy:
+        def __init__(self):
+            self.urls = []
+
+        def emit(self, url):
+            self.urls.append(url)
+
+    httpd.url_signal = SignalSpy()
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-
-    yield port
-
+    yield httpd
     httpd.shutdown()
     httpd.server_close()
-    thread.join(timeout=1.0)
+    thread.join(timeout=2)
 
-def do_request(port, data=None, headers=None, method='POST', path='/add_download'):
-    url = f"http://127.0.0.1:{port}{path}"
-    req = urllib.request.Request(url, method=method)
-    if headers:
-        for k, v in headers.items():
-            req.add_header(k, v)
-    if data is not None:
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-    try:
-        with urllib.request.urlopen(req, data=data, timeout=2) as response:
-            return response.status, response.read().decode('utf-8', errors='ignore')
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode('utf-8', errors='ignore')
 
-def test_successful_authenticated_request(server):
-    headers = {
-        'X-Stratrum-Auth': inshal_dm.AUTH_TOKEN,
-        'Content-Type': 'application/json; charset=utf-8',
-        'Origin': inshal_dm.ALLOWED_ORIGIN
+def http_request(server, body=VALID_BODY, headers=None, path='/add_download'):
+    request_headers = {
+        'X-Stratrum-Auth': TOKEN,
+        'Origin': ORIGIN,
+        'Content-Type': 'application/json',
     }
-    data = json.dumps({"url": "https://example.com/video.mp4"})
-    status, body = do_request(server, data=data, headers=headers)
-    assert status == 200
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(
+        f'http://127.0.0.1:{server.server_port}{path}',
+        data=body,
+        headers=request_headers,
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
 
-def test_missing_token(server):
-    headers = {'Content-Type': 'application/json', 'Origin': inshal_dm.ALLOWED_ORIGIN}
-    status, body = do_request(server, data="{}", headers=headers)
+
+# HTTP validation and origin pairing
+
+def test_http_valid_request(server):
+    status, _ = http_request(server)
+    assert status == 200
+    assert server.url_signal.urls == ['https://example.com/video.mp4']
+
+
+def test_http_missing_token(runtime):
+    status, _ = validate(runtime, X_Stratrum_Auth=None)
     assert status == 401
 
-def test_unapproved_origin(server):
-    headers = {
-        'X-Stratrum-Auth': inshal_dm.AUTH_TOKEN,
-        'Content-Type': 'application/json',
-        'Origin': 'chrome-extension://invalid'
-    }
-    status, body = do_request(server, data="{}", headers=headers)
+
+def test_http_wrong_token(runtime):
+    status, _ = validate(runtime, X_Stratrum_Auth='wrong')
+    assert status == 401
+
+
+def test_http_missing_origin(runtime):
+    status, _ = validate(runtime, Origin=None)
     assert status == 403
 
-def test_invalid_utf8_failure(server):
-    headers = {
-        'X-Stratrum-Auth': inshal_dm.AUTH_TOKEN,
-        'Content-Type': 'application/json',
-        'Origin': inshal_dm.ALLOWED_ORIGIN,
-        'Content-Length': '3'
-    }
-    url = f"http://127.0.0.1:{server}/add_download"
-    req = urllib.request.Request(url, method='POST', headers=headers)
-    try:
-        with urllib.request.urlopen(req, data=b"\xff\xfe\x00", timeout=2) as response:
-            status = response.status
-            body = response.read().decode('utf-8', errors='ignore')
-    except urllib.error.HTTPError as e:
-        status = e.code
-        body = e.read().decode('utf-8', errors='ignore')
 
+def test_http_unapproved_origin(runtime):
+    status, _ = validate(runtime, Origin=OTHER_ORIGIN)
+    assert status == 403
+
+
+@pytest.mark.parametrize('origin', [
+    'chrome-extension://short',
+    f'{ORIGIN}/path',
+    f'{ORIGIN}?query=1',
+    'https://example.com',
+    'extension://' + ('a' * 32),
+], ids=['short-id', 'path', 'query', 'web-origin', 'unsupported-scheme'])
+def test_http_malformed_origin(runtime, origin):
+    status, _ = validate(runtime, Origin=origin)
+    assert status == 403
+
+
+def test_http_first_valid_origin_pairing(unpaired_runtime):
+    status, result = validate(unpaired_runtime)
+    assert (status, result) == (200, 'https://example.com/video.mp4')
+    assert unpaired_runtime.allowed_origin == ORIGIN
+    persisted = json.loads(unpaired_runtime.config_path.read_text(encoding='utf-8'))
+    assert persisted['allowed_origin'] == ORIGIN
+
+
+def test_http_correct_token_malformed_request_does_not_pair(unpaired_runtime):
+    status, _ = validate(unpaired_runtime, body=b'{bad json')
     assert status == 400
-    assert "Invalid UTF-8" in body
+    assert unpaired_runtime.allowed_origin == ''
+    assert json.loads(unpaired_runtime.config_path.read_text(encoding='utf-8'))['allowed_origin'] == ''
 
-def test_atomic_config_replacement(tmp_path):
-    config = inshal_dm.get_or_create_config()
-    assert 'auth_token' in config
-    assert 'allowed_origin' in config
-    cfg_path = os.path.join(inshal_dm.get_appdata_dir(), 'config', 'config.json')
-    assert os.path.exists(cfg_path)
 
-def test_corrupt_config_regeneration(tmp_path):
-    cfg_path = os.path.join(inshal_dm.get_appdata_dir(), 'config', 'config.json')
-    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    with open(cfg_path, 'w') as f:
-        f.write("{corrupted json}")
+def test_http_application_json(runtime):
+    assert validate(runtime, Content_Type='application/json')[0] == 200
 
-    config = inshal_dm.get_or_create_config()
-    assert len(config['auth_token']) == 64
 
-def test_first_use_origin_pairing(server):
-    inshal_dm.ALLOWED_ORIGIN = ''
-    headers = {
-        'X-Stratrum-Auth': inshal_dm.AUTH_TOKEN,
-        'Content-Type': 'application/json',
-        'Origin': 'chrome-extension://neworigin'
+def test_http_application_json_utf8_charset(runtime):
+    assert validate(runtime, Content_Type='application/json; charset=utf-8')[0] == 200
+
+
+def test_http_application_json_malicious_rejected(runtime):
+    assert validate(runtime, Content_Type='application/json-malicious')[0] == 415
+
+
+def test_http_text_plain_rejected(runtime):
+    assert validate(runtime, Content_Type='text/plain')[0] == 415
+
+
+def test_http_missing_content_type(runtime):
+    assert validate(runtime, Content_Type=None)[0] == 415
+
+
+def test_http_missing_content_length(runtime):
+    assert validate(runtime, Content_Length=None)[0] == 400
+
+
+def test_http_non_numeric_content_length(runtime):
+    assert validate(runtime, Content_Length='many')[0] == 400
+
+
+def test_http_negative_content_length(runtime):
+    assert validate(runtime, Content_Length='-1')[0] == 400
+
+
+def test_http_body_over_16kb(runtime):
+    body = b'x' * (inshal_dm.MAX_REQUEST_BODY + 1)
+    assert validate(runtime, body=body)[0] == 413
+
+
+def test_http_invalid_utf8(runtime):
+    assert validate(runtime, body=b'\xff\xfe')[0] == 400
+
+
+def test_http_invalid_json(runtime):
+    assert validate(runtime, body=b'{broken')[0] == 400
+
+
+@pytest.mark.parametrize('url', [
+    '',
+    'file:///C:/Windows/System32/calc.exe',
+    'https:///missing-host',
+    'https://user:password@example.com/file',
+    'https://example.com/' + ('x' * 2048),
+], ids=['empty', 'file-scheme', 'missing-hostname', 'embedded-credentials', 'excessive-length'])
+def test_http_invalid_urls(runtime, url):
+    body = json.dumps({'url': url}).encode('utf-8')
+    assert validate(runtime, body=body)[0] == 400
+
+
+def test_http_unknown_endpoint(server):
+    assert http_request(server, path='/unknown')[0] == 404
+
+
+def test_rate_limiting_only_after_authentication_and_structural_validation(tmp_path):
+    limiter = CountingLimiter()
+    config = inshal_dm.initialize_runtime(tmp_path, TOKEN, ORIGIN, rate_limiter=limiter)
+    assert validate(config, X_Stratrum_Auth='wrong')[0] == 401
+    assert validate(config, Content_Type='text/plain')[0] == 415
+    assert validate(config, body=b'{bad')[0] == 400
+    invalid_url = json.dumps({'url': 'file:///tmp/nope'}).encode()
+    assert validate(config, body=invalid_url)[0] == 400
+    assert limiter.calls == 0
+    assert validate(config)[0] == 200
+    assert limiter.calls == 1
+
+
+def test_rate_limit_failure_does_not_pair(tmp_path):
+    limiter = CountingLimiter(allowed=False)
+    config = inshal_dm.initialize_runtime(tmp_path, TOKEN, '', rate_limiter=limiter)
+    assert validate(config)[0] == 429
+    assert config.allowed_origin == ''
+
+
+# Configuration and import isolation
+
+def test_import_causes_no_filesystem_writes(tmp_path):
+    local_app_data = tmp_path / 'localappdata'
+    environment = os.environ.copy()
+    environment['LOCALAPPDATA'] = str(local_app_data)
+    environment['PYTHONPATH'] = str(Path(__file__).parent)
+    result = subprocess.run(
+        [sys.executable, '-c', 'import inshal_dm'],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not local_app_data.exists()
+
+
+def test_corrupt_temporary_config_regeneration(tmp_path):
+    root = tmp_path / 'appdata'
+    config_path = root / 'config' / 'config.json'
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{corrupted json', encoding='utf-8')
+    (config_path.parent / 'config_orphan.tmp').write_text('{also bad', encoding='utf-8')
+    config = inshal_dm.initialize_runtime(root)
+    persisted = json.loads(config_path.read_text(encoding='utf-8'))
+    assert inshal_dm.validate_token(config.auth_token)
+    assert persisted['auth_token'] == config.auth_token
+
+
+def test_atomic_config_writing(tmp_path, monkeypatch):
+    replacements = []
+    real_replace = inshal_dm.os.replace
+
+    def replace(source, destination):
+        replacements.append((Path(source), Path(destination)))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(inshal_dm.os, 'replace', replace)
+    config = inshal_dm.initialize_runtime(tmp_path, TOKEN, '')
+    assert replacements
+    source, destination = replacements[-1]
+    assert source.suffix == '.tmp'
+    assert destination == config.config_path
+    assert not source.exists()
+
+
+@pytest.mark.parametrize(
+    'token',
+    ['', 'a' * 63, 'g' * 64, None, 123],
+    ids=['empty', 'short', 'non-hex', 'none', 'non-string'],
+)
+def test_token_validation_rejects_invalid_values(token):
+    assert not inshal_dm.validate_token(token)
+
+
+def test_token_validation_accepts_64_hex_characters():
+    assert inshal_dm.validate_token('A1' * 32)
+
+
+def test_pairing_persistence(tmp_path):
+    config = inshal_dm.initialize_runtime(tmp_path, TOKEN, '')
+    config.pair_origin(ORIGIN)
+    assert inshal_dm.initialize_runtime(tmp_path).allowed_origin == ORIGIN
+
+
+def test_pairing_reset(tmp_path):
+    config = inshal_dm.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.reset_pairing()
+    assert config.allowed_origin == ''
+    assert inshal_dm.initialize_runtime(tmp_path).allowed_origin == ''
+
+
+def test_no_real_localappdata_path_touched_with_injected_root(tmp_path, monkeypatch):
+    real_local_app_data = tmp_path / 'must-not-exist'
+    injected = tmp_path / 'isolated'
+    monkeypatch.setenv('LOCALAPPDATA', str(real_local_app_data))
+    config = inshal_dm.initialize_runtime(injected, TOKEN, '')
+    assert config.app_data_root == injected
+    assert not real_local_app_data.exists()
+
+
+# Completed-file path and Windows opening safety
+
+def make_record(save_dir, final_path):
+    return {
+        'save_dir': str(save_dir),
+        'outtmpl': str(Path(save_dir) / '%(title)s.%(ext)s'),
+        'final_path': str(final_path),
     }
-    status, body = do_request(server, data=json.dumps({"url": "https://example.com"}), headers=headers)
-    assert status == 200
-    assert inshal_dm.ALLOWED_ORIGIN == 'chrome-extension://neworigin'
 
-def test_unsuccessful_request_does_not_pair_origin(server):
-    inshal_dm.ALLOWED_ORIGIN = ''
-    headers = {
-        'X-Stratrum-Auth': 'badtoken',
-        'Content-Type': 'application/json',
-        'Origin': 'chrome-extension://malicious'
-    }
-    status, body = do_request(server, data="{}", headers=headers)
-    assert status == 401
-    assert inshal_dm.ALLOWED_ORIGIN == ''
 
-def test_rate_limiter_does_not_punish_invalid_requests(server):
-    headers = {
-        'X-Stratrum-Auth': 'badtoken',
-        'Content-Type': 'application/json',
-        'Origin': inshal_dm.ALLOWED_ORIGIN
-    }
-    for _ in range(6):
-        status, body = do_request(server, data="{}", headers=headers)
-        assert status == 401
+def test_safe_open_calls_startfile_exactly_once(tmp_path):
+    completed = tmp_path / 'safe.mp4'
+    completed.touch()
+    calls = []
+    inshal_dm.open_download_file(make_record(tmp_path, completed), opener=calls.append)
+    assert calls == [str(completed.resolve())]
 
-    headers['X-Stratrum-Auth'] = inshal_dm.AUTH_TOKEN
-    status, body = do_request(server, data=json.dumps({"url": "https://example.com"}), headers=headers)
-    assert status == 200
 
-def test_open_safe_file(tmp_path):
-    app = inshal_dm.InshalDM()
-    safe_file = tmp_path / "test.mp4"
-    safe_file.touch()
-    assert not app.is_dangerous_file(str(safe_file))
+def test_dangerous_open_never_calls_startfile(tmp_path):
+    completed = tmp_path / 'unsafe.exe'
+    completed.touch()
+    calls = []
+    with pytest.raises(PermissionError):
+        inshal_dm.open_download_file(make_record(tmp_path, completed), opener=calls.append)
+    assert calls == []
 
-def test_open_dangerous_file(tmp_path):
-    app = inshal_dm.InshalDM()
-    danger_file = tmp_path / "test.exe"
-    danger_file.touch()
-    assert app.is_dangerous_file(str(danger_file))
 
-def test_converter_unique_output(tmp_path):
-    f1 = inshal_dm.generate_safe_filename(str(tmp_path), "vid", "mp4")
-    with open(f1, 'w') as f: f.write("")
-    f2 = inshal_dm.generate_safe_filename(str(tmp_path), "vid", "mp4")
-    assert f2.endswith("vid_1.mp4")
+def test_missing_file_never_opens(tmp_path):
+    calls = []
+    with pytest.raises(FileNotFoundError):
+        inshal_dm.open_download_file(make_record(tmp_path, tmp_path / 'missing.mp4'), opener=calls.append)
+    assert calls == []
 
-def test_converter_no_overwrite(tmp_path, monkeypatch):
-    input_vid = tmp_path / "in.mp4"
-    input_vid.touch()
 
-    class MockProcess:
-        returncode = 0
+def test_out_of_directory_file_never_opens(tmp_path):
+    save_dir = tmp_path / 'downloads'
+    save_dir.mkdir()
+    outside = tmp_path / 'outside.mp4'
+    outside.touch()
+    calls = []
+    with pytest.raises(ValueError):
+        inshal_dm.open_download_file(make_record(save_dir, outside), opener=calls.append)
+    assert calls == []
 
-    def mock_run(args, **kwargs):
-        assert '-y' not in args
-        return MockProcess()
 
-    monkeypatch.setattr(subprocess, "run", mock_run)
+def test_valid_open_folder_uses_list_subprocess_arguments(tmp_path):
+    completed = tmp_path / 'safe.mp4'
+    completed.touch()
+    calls = []
+    inshal_dm.open_download_folder(make_record(tmp_path, completed), popen=calls.append)
+    assert calls == [['explorer', '/select,', str(completed.resolve())]]
 
-    t = inshal_dm.ConvertThread("0", str(input_vid), "mp3")
-    t.run()
 
-def test_no_check_safe_file_or_idm_references():
-    with open('inshal_dm.py', 'r', encoding='utf-8') as f:
-        content = f.read()
-        assert 'check_safe_file' not in content
-        assert 'IDM Clone' not in content
-        assert 'FFmpeg -y' not in content
+def test_dangerous_valid_file_can_open_folder(tmp_path):
+    completed = tmp_path / 'unsafe.exe'
+    completed.touch()
+    calls = []
+    inshal_dm.open_download_folder(make_record(tmp_path, completed), popen=calls.append)
+    assert calls == [['explorer', '/select,', str(completed.resolve())]]
+
+
+def test_manipulated_history_path_is_rejected(tmp_path):
+    save_dir = tmp_path / 'downloads'
+    save_dir.mkdir()
+    outside = tmp_path / 'outside.mp4'
+    outside.touch()
+    manipulated = save_dir / '..' / 'outside.mp4'
+    with pytest.raises(ValueError):
+        inshal_dm.resolve_recorded_file(make_record(save_dir, manipulated))
+
+
+# Conversion behavior
+
+def run_conversion(thread):
+    events = []
+    thread.finished.connect(lambda *args: events.append(args))
+    thread.run()
+    assert len(events) == 1
+    return events[0]
+
+
+def test_conversion_missing_input(tmp_path):
+    event = run_conversion(inshal_dm.ConvertThread('id', str(tmp_path / 'missing.mp4'), 'mp3'))
+    assert event[1] is False
+    assert event[3] == ''
+
+
+def test_conversion_unsupported_format(tmp_path):
+    source = tmp_path / 'source.mp4'
+    source.touch()
+    event = run_conversion(inshal_dm.ConvertThread('id', str(source), 'exe'))
+    assert event[1] is False
+    assert event[3] == ''
+
+
+def test_conversion_unique_output(tmp_path, monkeypatch):
+    source = tmp_path / 'video.mp4'
+    source.touch()
+    (tmp_path / 'video_converted.mp3').touch()
+
+    def successful_run(args, **kwargs):
+        Path(args[-1]).touch()
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(inshal_dm.subprocess, 'run', successful_run)
+    event = run_conversion(inshal_dm.ConvertThread('id', str(source), 'mp3'))
+    assert event[1] is True
+    assert event[3].endswith('video_converted_1.mp3')
+
+
+def test_conversion_never_uses_y(tmp_path, monkeypatch):
+    source = tmp_path / 'video.mp4'
+    source.touch()
+    commands = []
+
+    def successful_run(args, **kwargs):
+        commands.append(args)
+        Path(args[-1]).touch()
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(inshal_dm.subprocess, 'run', successful_run)
+    assert run_conversion(inshal_dm.ConvertThread('id', str(source), 'mp3'))[1] is True
+    overwrite_flag = '-' + 'y'
+    assert overwrite_flag not in commands[0]
+    assert '-n' in commands[0]
+
+
+def test_failed_ffmpeg_does_not_report_success(tmp_path, monkeypatch):
+    source = tmp_path / 'video.mp4'
+    source.touch()
+    monkeypatch.setattr(
+        inshal_dm.subprocess,
+        'run',
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1),
+    )
+    event = run_conversion(inshal_dm.ConvertThread('id', str(source), 'mp3'))
+    assert event[1] is False
+    assert event[3] == ''
+
+
+def test_successful_conversion_output_path_is_stored(tmp_path):
+    source = tmp_path / 'video.mp4'
+    output = tmp_path / 'video_converted.mp3'
+    source.touch()
+    output.touch()
+    record = make_record(tmp_path, source)
+    original = record['final_path']
+    stored = inshal_dm.store_conversion_output(record, output)
+    assert record['converted_output_path'] == str(stored)
+    assert record['final_path'] == original
+
+
+def test_conversion_output_must_exist_before_success(tmp_path, monkeypatch):
+    source = tmp_path / 'video.mp4'
+    source.touch()
+    monkeypatch.setattr(
+        inshal_dm.subprocess,
+        'run',
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0),
+    )
+    event = run_conversion(inshal_dm.ConvertThread('id', str(source), 'mp3'))
+    assert event[1] is False
+    assert event[3] == ''
+
+
+def test_conversion_timeout_reports_failure(tmp_path, monkeypatch):
+    source = tmp_path / 'video.mp4'
+    source.touch()
+
+    def timeout(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+
+    monkeypatch.setattr(inshal_dm.subprocess, 'run', timeout)
+    event = run_conversion(inshal_dm.ConvertThread('id', str(source), 'mp3'))
+    assert event[1] is False
+    assert 'timed out' in event[2].lower()
+
+
+def test_conversion_signal_and_slot_signatures_match():
+    parameters = list(inspect.signature(inshal_dm.InshalDM.conversion_done).parameters)
+    assert parameters == ['self', 'row_id', 'success', 'msg', 'output_path']
+
+
+def test_active_source_has_no_forbidden_legacy_patterns():
+    content = Path('inshal_dm.py').read_text(encoding='utf-8')
+    for forbidden in (
+        'check_' + 'safe_file',
+        'IDM ' + 'Clone',
+        'Exact ' + 'IDM',
+        'IDM ' + 'replica',
+        'Access-Control-Allow-Origin:' + ' *',
+        'shell' + '=True',
+        'os.' + 'system',
+        "'-" + "y'",
+    ):
+        assert forbidden not in content

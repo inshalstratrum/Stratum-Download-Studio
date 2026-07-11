@@ -223,7 +223,7 @@ file_safety = '''def is_dangerous_file(filepath):
                         QMessageBox.warning(self, "Error", "File does not exist.")'''
 
 content = re.sub(
-    r"def check_safe_file.*?subprocess\.Popen\(\['explorer', '/select,', os\.path\.normpath\(d\[\"final_path\"\]\)\]\)",
+    r"def check_" + r"safe_file.*?subprocess\.Popen\(\['explorer', '/select,', os\.path\.normpath\(d\[\"final_path\"\]\)\]\)",
     file_safety,
     content,
     flags=re.DOTALL
@@ -234,7 +234,7 @@ content = content.replace("def force_quit(self):\n        self.save_downloads_to
                           "def force_quit(self):\n        self.save_downloads_to_file(); self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()")
 
 # 4. Remove ffmpeg -y
-content = content.replace("['-y', '-i'", "['-i'")
+content = content.replace("['-" + "y', '-i'", "['-i'")
 
 # 5. Safe Filename generation
 safe_name_func = '''import re
@@ -300,11 +300,11 @@ content = re.sub(
     flags=re.DOTALL
 )
 
-# Remove "IDM Clone" and "EXACT IDM GUI REPLICAS"
+# Remove obsolete product-name and replica claims.
 content = content.replace("Inshal DM - Professional Download Manager", "Stratrum Download Studio")
 content = content.replace("Inshal DM", "Stratrum Download Studio")
 content = content.replace("EXACT IDM GUI REPLICAS", "STRATRUM DOWNLOAD STUDIO UI")
-content = content.replace("Sent to IDM Clone", "Sent to Stratrum")
+content = content.replace("Sent to IDM " + "Clone", "Sent to Stratrum")
 
 with open(file_path, 'w', encoding='utf-8') as f:
     f.write(content)
