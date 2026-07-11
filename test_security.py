@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import QApplication
 
 app = QApplication.instance() or QApplication(sys.argv)
 
-import stratrum_download_studio
+import stratum_download_studio as stratrum_download_studio
 
 
 TOKEN = 'b' * 64
@@ -262,7 +262,7 @@ def test_import_causes_no_filesystem_writes(tmp_path):
     environment['LOCALAPPDATA'] = str(local_app_data)
     environment['PYTHONPATH'] = str(Path(__file__).parent)
     result = subprocess.run(
-        [sys.executable, '-c', 'import stratrum_download_studio'],
+        [sys.executable, '-c', 'import stratum_download_studio'],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -581,7 +581,7 @@ def test_final_module_import_without_filesystem_writes(tmp_path):
     environment['LOCALAPPDATA'] = str(local_app_data)
     environment['PYTHONPATH'] = str(Path(__file__).parent)
     result = subprocess.run(
-        [sys.executable, '-c', 'from stratrum_download_studio import StratrumDownloadStudio, DownloadServerHandler'],
+        [sys.executable, '-c', 'from stratum_download_studio import StratrumDownloadStudio, DownloadServerHandler'],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -593,7 +593,7 @@ def test_final_module_import_without_filesystem_writes(tmp_path):
 
 
 def test_normal_startup_has_no_automatic_extension_prompt():
-    source = Path('stratrum_download_studio.py').read_text(encoding='utf-8')
+    source = Path('stratum_download_studio.py').read_text(encoding='utf-8')
     assert 'show_extension_install_prompt' not in source
     assert 'Install Extension' not in source
 
@@ -625,8 +625,8 @@ def test_load_unpacked_guide_opens_real_readme():
 def test_final_module_class_handler_and_spec_names():
     assert stratrum_download_studio.StratrumDownloadStudio.__name__ == 'StratrumDownloadStudio'
     assert stratrum_download_studio.DownloadServerHandler.__name__ == 'DownloadServerHandler'
-    assert Path('stratrum_download_studio.py').is_file()
-    assert Path('StratrumDownloadStudio.spec').is_file()
+    assert Path('stratum_download_studio.py').is_file()
+    assert Path('StratumDownloadStudio.spec').is_file()
 
 
 def test_cleanup_paths_do_not_exist():
@@ -635,9 +635,9 @@ def test_cleanup_paths_do_not_exist():
 
 
 def test_final_spec_uses_final_entrypoint_and_executable_name():
-    spec = Path('StratrumDownloadStudio.spec').read_text(encoding='utf-8')
-    assert "['stratrum_download_studio.py']" in spec
-    assert "name='StratrumDownloadStudio'" in spec
+    spec = Path('StratumDownloadStudio.spec').read_text(encoding='utf-8')
+    assert "['stratum_download_studio.py']" in spec
+    assert "name='StratumDownloadStudio'" in spec
 
 
 def test_generated_directories_are_ignored():
@@ -1464,9 +1464,9 @@ def test_ui_preferences_are_atomic_config_fields(tmp_path):
 
 
 def test_no_console_launcher_calls_testable_main_and_spec_stays_windowed():
-    launcher = Path('StratrumDownloadStudio.pyw').read_text(encoding='utf-8')
-    spec = Path('StratrumDownloadStudio.spec').read_text(encoding='utf-8')
-    assert 'from stratrum_download_studio import main' in launcher
+    launcher = Path('StratumDownloadStudio.pyw').read_text(encoding='utf-8')
+    spec = Path('StratumDownloadStudio.spec').read_text(encoding='utf-8')
+    assert 'from stratum_download_studio import main' in launcher
     assert 'SystemExit(main())' in launcher
     assert 'console=False' in spec
 

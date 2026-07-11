@@ -1,4 +1,4 @@
-from stratrum_download_studio import main
+from stratum_download_studio import main
 
 
 if __name__ == "__main__":

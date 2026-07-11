@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['stratrum_download_studio.py'],
+    ['stratum_download_studio.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='StratrumDownloadStudio',
+    name='StratumDownloadStudio',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

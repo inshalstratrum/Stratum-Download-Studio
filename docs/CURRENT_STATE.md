@@ -3,7 +3,7 @@
 - Phase: 2A.6A — media-output correctness and converter workflow complete.
 - Branch: `phase-2a6a-converter-fixes`.
 - Commit: `Phase 2A.6A: Fix media outputs and converter workflow` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
-- Entry points: `StratrumDownloadStudio.pyw` (Windows development launcher) and `stratrum_download_studio.py` (`main()`).
+- Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
 - Test command: `python -m pytest -q`; current expected count: 196 passed.
 - Working features: verified yt-dlp MP4/MKV/WebM/AVI/MOV and MP3/M4A/AAC/WAV/FLAC/OGG/Opus outputs; FFprobe-based capability decisions; verified, unique, cancellable FFmpeg conversion with progress; dedicated multi-file local converter; existing secure browser integration, queue, history, and controls.
 - Unresolved blockers: no automated blockers. Manual Windows GUI, drag/drop, cancel, open-output, and authorized live-download checks remain required.
