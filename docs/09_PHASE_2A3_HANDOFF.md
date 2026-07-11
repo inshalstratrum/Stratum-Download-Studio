@@ -6,11 +6,11 @@ The Phase 2A.3 code and automated regression gate are complete on branch `phase-
 
 ## Exact files changed
 
-- `inshal_dm.py`
+- `stratrum_download_studio.py`
 - `test_security.py`
 - `rewrite_inshal.py` — behavior-preserving legacy-literal splitting so the required active-source search has no false positive
-- `IDM_Extension/README.md`
-- `IDM_Extension/package_extension.ps1`
+- `browser_extension/README.md`
+- `browser_extension/package_extension.ps1`
 - `extension_packages/stratrum-download-studio-chrome.zip`
 - `extension_packages/stratrum-download-studio-edge.zip`
 - `docs/09_PHASE_2A3_MANUAL_TEST.md`
@@ -20,7 +20,7 @@ The two extension ZIPs contain `manifest.json`, `background.js`, `options.html`,
 
 ## Implemented corrections
 
-- Importing `inshal_dm` no longer initializes configuration or creates application-data directories. Production explicitly calls `initialize_runtime()` and defaults to `%LOCALAPPDATA%\Stratrum\DownloadStudio`.
+- Importing `stratrum_download_studio` no longer initializes configuration or creates application-data directories. Production explicitly calls `initialize_runtime()` and defaults to `%LOCALAPPDATA%\Stratrum\DownloadStudio`.
 - Tests can inject application-data root, token, paired origin, history path, and rate limiter before any production configuration is initialized.
 - Request validation authenticates first, strictly validates the extension origin, media type, length, body, UTF-8, JSON object, and URL, then applies rate limiting. Pairing is persisted atomically only after the complete request is valid and not rate-limited.
 - Desktop Browser Integration keeps the token masked, provides deliberate copy and pairing-reset actions, and does not print the token.
@@ -99,7 +99,7 @@ test_security.py::test_active_source_has_no_forbidden_legacy_patterns
 
 ## Verification results
 
-- `python -m py_compile inshal_dm.py` — exit `0`
+- `python -m py_compile stratrum_download_studio.py` — exit `0`
 - `python -m pytest -q` — exit `0`; `60 passed`
 - `git diff --check` — exit `0`
 - Active, non-archive source scan wrapper — exit `0`

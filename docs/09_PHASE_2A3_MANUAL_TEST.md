@@ -6,11 +6,11 @@ Status: not yet performed. Run these steps on Windows from the repository root a
 
 Official Chrome Web Store and Microsoft Edge Add-ons listings are pending. Use the documented **Load unpacked** development workflow; do not attempt silent installation or bypass browser security controls.
 
-1. Start the application with `python inshal_dm.py`.
+1. Start the application with `python stratrum_download_studio.py`.
 2. On the optional first-launch prompt, confirm these choices are present: **Install Extension**, **Remind Me Later**, and **Do Not Ask Again**. For this test, choose **Remind Me Later**.
 3. Open desktop **Options > Browser Integration** and select **Copy Token**. Confirm the token remains masked in the app and is not printed in the terminal or logs.
 4. In Chrome, open `chrome://extensions/`; in Edge, open `edge://extensions/`.
-5. Enable Developer mode, choose **Load unpacked**, and select the repository's `IDM_Extension` directory. Repeat in both browsers when both are available.
+5. Enable Developer mode, choose **Load unpacked**, and select the repository's `browser_extension` directory. Repeat in both browsers when both are available.
 6. Open the extension Options page, paste the copied token, select **Save Token**, and clear the clipboard afterward.
 
 ## Pairing and request validation

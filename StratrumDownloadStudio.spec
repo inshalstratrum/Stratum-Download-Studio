@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['idm_clone.py'],
+    ['stratrum_download_studio.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='IDM_Clone',
+    name='StratrumDownloadStudio',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

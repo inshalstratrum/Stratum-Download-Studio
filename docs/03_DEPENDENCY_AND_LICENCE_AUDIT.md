@@ -31,3 +31,6 @@ Transforming this project into a commercial closed-source product (Stratrum Down
 - Switch to PySide6 to avoid PyQt6 GPL violations (or buy a commercial license).
 - Verify FFmpeg build flags and include appropriate notices.
 - Remove IDM clone assets entirely.
+# Phase 2A FFmpeg Distribution Blocker
+
+The repository-retained `ffmpeg.exe` and `ffprobe.exe` are GPL development binaries. They are kept temporarily for local development testing only. Before any commercial distribution, both files must be replaced with provenance-verified LGPL-compatible builds and the corresponding license/source-offer obligations must be reviewed and documented. This replacement is a release blocker, not a completed licensing decision.

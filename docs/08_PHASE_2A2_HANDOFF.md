@@ -33,7 +33,7 @@
    - Removed all remaining instances of "IDM Clone", "Exact IDM", "IDM replica", and "Internet Download Manager".
 7. **Code Quality & Tests**
    - Stripped all trailing whitespaces across `.py`, `.js`, `.json`, `.html`, and `.md` files.
-   - Verified flawless compilation with `python -m py_compile inshal_dm.py`.
+   - Verified flawless compilation with `python -m py_compile stratrum_download_studio.py`.
    - Passed `git diff --check`.
 
 ## Tests Run

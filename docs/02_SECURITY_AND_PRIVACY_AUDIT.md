@@ -1,7 +1,7 @@
 # 02 SECURITY AND PRIVACY AUDIT
 
 ## Network Security Risks
-- **CORS Vulnerability (Critical):** The local server (`http.server.BaseHTTPRequestHandler` in `inshal_dm.py`) sets `Access-Control-Allow-Origin: *`. Any malicious website the user visits can send POST requests to `127.0.0.1:8000` and arbitrarily start downloads or exhaust system resources.
+- **CORS Vulnerability (Critical):** The local server (`http.server.BaseHTTPRequestHandler` in `stratrum_download_studio.py`) sets `Access-Control-Allow-Origin: *`. Any malicious website the user visits can send POST requests to `127.0.0.1:8000` and arbitrarily start downloads or exhaust system resources.
 - **Browser Extension Permissions (High):** The extension requests `<all_urls>` host permissions, which triggers strict reviews on Chrome Web Store and is a privacy concern.
 
 ## Local Execution Risks

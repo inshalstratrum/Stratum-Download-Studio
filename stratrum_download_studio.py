@@ -60,8 +60,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
     QWidget, QGridLayout, QCheckBox
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QTimer
-from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QTimer, QUrl
+from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices
 
 # ==========================================
 # MODERN UI STYLESHEET
@@ -243,6 +243,38 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
     return runtime
 
 
+def should_show_extension_prompt(app_config):
+    return not app_config.allowed_origin and app_config.extension_prompt_preference != 'never'
+
+
+def apply_extension_prompt_choice(app_config, choice):
+    if choice == 'later':
+        app_config.set_extension_prompt_preference('later')
+    elif choice == 'never':
+        app_config.set_extension_prompt_preference('never')
+    elif choice != 'install':
+        raise ValueError("Invalid extension prompt choice")
+
+
+def browser_extension_guide_path(base_directory=None):
+    base = Path(base_directory) if base_directory is not None else Path(__file__).resolve().parent
+    extension_directory = base / 'browser_extension'
+    readme_path = extension_directory / 'README.md'
+    if readme_path.is_file():
+        return readme_path.resolve()
+    if extension_directory.is_dir():
+        return extension_directory.resolve()
+    raise FileNotFoundError("Browser extension guide is unavailable")
+
+
+def open_browser_extension_guide(opener=None, base_directory=None):
+    guide_path = browser_extension_guide_path(base_directory)
+    if opener is not None:
+        opener(guide_path)
+        return True
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path)))
+
+
 def validate_extension_origin(origin):
     if not isinstance(origin, str) or not origin or len(origin) > 200:
         return False
@@ -403,7 +435,7 @@ def store_conversion_output(download_record, output_path):
 # ==========================================
 # 1. LOCAL SERVER
 # ==========================================
-class IDMServerHandler(http.server.BaseHTTPRequestHandler):
+class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
     def send_cors_headers(self):
         origin = self.headers.get('Origin', '')
         runtime = self.server.app_config
@@ -438,7 +470,7 @@ class ServerThread(QThread):
         super().__init__()
         self.app_config = app_config
     def run(self):
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), IDMServerHandler)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), DownloadServerHandler)
         self.httpd.app_config = self.app_config
         self.httpd.url_signal = self.url_received
         self.httpd.serve_forever()
@@ -834,7 +866,7 @@ class DownloadProgressPopup(QDialog):
         if total_size: self.size_lbl.setText(total_size)
 
 # ==========================================
-# 5. MAIN APP: INSHAL_DM
+# 5. MAIN APP: STRATRUM DOWNLOAD STUDIO
 # ==========================================
 class BrowserIntegrationDialog(QDialog):
     def __init__(self, app_config, parent=None):
@@ -883,7 +915,7 @@ class BrowserIntegrationDialog(QDialog):
         self.pairing_label.setText("Paired origin: No browser extension is currently paired.")
 
 
-class InshalDM(QMainWindow):
+class StratrumDownloadStudio(QMainWindow):
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
@@ -894,7 +926,7 @@ class InshalDM(QMainWindow):
         self.init_tray_icon()
         self.load_downloads_from_file()
         self.init_server()
-        if self.app_config.extension_prompt_preference != 'never':
+        if should_show_extension_prompt(self.app_config):
             QTimer.singleShot(0, self.show_extension_install_prompt)
 
     def init_tray_icon(self):
@@ -957,18 +989,6 @@ class InshalDM(QMainWindow):
 
     def load_downloads_from_file(self):
         history_file = self.app_config.history_path
-        old_history = 'inshaldm_history.json'
-        if os.path.exists(old_history) and not history_file.exists():
-            try:
-                with open(old_history, 'r') as f:
-                    data = f.read()
-                fd, tmp_path = tempfile.mkstemp(dir=str(history_file.parent))
-                with os.fdopen(fd, 'w') as f:
-                    f.write(data)
-                os.replace(tmp_path, history_file)
-            except Exception as e:
-                print(f"Migration error: {e}")
-
         if not history_file.exists(): return
         try:
             with history_file.open('r', encoding='utf-8') as f: save_data = json.load(f)
@@ -1021,11 +1041,11 @@ class InshalDM(QMainWindow):
         prompt.exec()
         clicked = prompt.clickedButton()
         if clicked == never_button:
-            self.app_config.set_extension_prompt_preference('never')
+            apply_extension_prompt_choice(self.app_config, 'never')
         elif clicked == later_button:
-            self.app_config.set_extension_prompt_preference('later')
+            apply_extension_prompt_choice(self.app_config, 'later')
         elif clicked == install_button:
-            self.app_config.set_extension_prompt_preference('never')
+            apply_extension_prompt_choice(self.app_config, 'install')
             chooser = QMessageBox(self)
             chooser.setWindowTitle("Install Browser Extension")
             chooser.setText(
@@ -1034,12 +1054,18 @@ class InshalDM(QMainWindow):
             )
             chrome_button = chooser.addButton("Chrome Web Store", QMessageBox.ButtonRole.ActionRole)
             edge_button = chooser.addButton("Edge Add-ons", QMessageBox.ButtonRole.ActionRole)
-            chooser.addButton("Load Unpacked Guide", QMessageBox.ButtonRole.AcceptRole)
+            guide_button = chooser.addButton("Load Unpacked Guide", QMessageBox.ButtonRole.AcceptRole)
             chooser.exec()
             if chooser.clickedButton() == chrome_button:
                 webbrowser.open(CHROME_STORE_URL)
             elif chooser.clickedButton() == edge_button:
                 webbrowser.open(EDGE_STORE_URL)
+            elif chooser.clickedButton() == guide_button:
+                try:
+                    if not open_browser_extension_guide():
+                        raise OSError("The operating system did not open the guide")
+                except (OSError, ValueError):
+                    QMessageBox.warning(self, "Guide Unavailable", "The browser extension README could not be opened.")
 
     def init_ui(self):
         menubar = self.menuBar()
@@ -1347,6 +1373,6 @@ if __name__ == "__main__":
     app.setStyleSheet(MODERN_STYLE)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 9))
-    window = InshalDM(runtime_config)
+    window = StratrumDownloadStudio(runtime_config)
     window.show()
     sys.exit(app.exec())

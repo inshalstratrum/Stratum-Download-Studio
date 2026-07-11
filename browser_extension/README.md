@@ -19,7 +19,7 @@ Official Chrome Web Store and Edge Add-ons listings do not exist yet. Do not cla
 1. Open `chrome://extensions/`.
 2. Enable **Developer mode**.
 3. Select **Load unpacked**.
-4. Choose this `IDM_Extension` directory.
+4. Choose this `browser_extension` directory.
 5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
 
 ### Microsoft Edge
@@ -27,12 +27,12 @@ Official Chrome Web Store and Edge Add-ons listings do not exist yet. Do not cla
 1. Open `edge://extensions/`.
 2. Enable **Developer mode**.
 3. Select **Load unpacked**.
-4. Choose this `IDM_Extension` directory.
+4. Choose this `browser_extension` directory.
 5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
 
 ## Packaged review builds
 
-Run `powershell -ExecutionPolicy Bypass -File IDM_Extension/package_extension.ps1` from the repository root. It produces:
+Run `powershell -ExecutionPolicy Bypass -File browser_extension/package_extension.ps1` from the repository root. It produces:
 
 - `extension_packages/stratrum-download-studio-chrome.zip`
 - `extension_packages/stratrum-download-studio-edge.zip`
@@ -46,7 +46,7 @@ Before changing the first-launch prompt from the manual workflow to direct insta
 1. Submit the Chrome ZIP to the Chrome Web Store.
 2. Submit the Edge ZIP to Microsoft Edge Add-ons.
 3. Complete each store's review process.
-4. Replace the official-store landing-page constants in `inshal_dm.py` with the two approved listing URLs.
+4. Replace the official-store landing-page constants in `stratrum_download_studio.py` with the two approved listing URLs.
 5. Re-run the manual checklist in `docs/09_PHASE_2A3_MANUAL_TEST.md`.
 
 ## Local connection checks

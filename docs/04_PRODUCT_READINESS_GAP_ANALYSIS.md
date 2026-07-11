@@ -4,7 +4,7 @@
 
 ### Architecture & Stability
 - **Gap:** The app stores state locally in the installation directory, breaking when installed in `C:\Program Files`.
-- **Gap:** Duplicate backends (`main.py` vs `inshal_dm.py`) create confusion.
+- **Gap:** Duplicate backends (`main.py` vs `stratrum_download_studio.py`) create confusion.
 - **Gap:** Multi-threading lacks robust cancellation; paused downloads might leave zombie threads.
 
 ### Security

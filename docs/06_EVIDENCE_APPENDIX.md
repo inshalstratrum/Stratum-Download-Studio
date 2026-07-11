@@ -1,9 +1,9 @@
 # 06 EVIDENCE APPENDIX (Phase 2A Checkpoint)
 
 ## 1. Exact Vulnerable File and Line References
-- **`inshal_dm.py` line 606 & 711:** `os.startfile(d['final_path'])` (Allows executing downloaded arbitrary `.exe`/`.bat` files).
-- **`inshal_dm.py` line 611 & 712:** `subprocess.Popen(f'explorer /select,"{os.path.normpath(d["final_path"])}"')` (Command injection via unescaped string formatting).
-- **`inshal_dm.py` line 52-54:** `Access-Control-Allow-Origin: *` in `IDMServerHandler` (Cross-Origin resource sharing vulnerability).
+- **`stratrum_download_studio.py` line 606 & 711:** `os.startfile(d['final_path'])` (Allows executing downloaded arbitrary `.exe`/`.bat` files).
+- **`stratrum_download_studio.py` line 611 & 712:** `subprocess.Popen(f'explorer /select,"{os.path.normpath(d["final_path"])}"')` (Command injection via unescaped string formatting).
+- **`stratrum_download_studio.py` line 52-54:** `Access-Control-Allow-Origin: *` in `DownloadServerHandler` (Cross-Origin resource sharing vulnerability).
 
 ## 2. Dependency Names and Detected Versions
 - **Python Runtime**
@@ -12,21 +12,21 @@
 *(Note: No `requirements.txt` was found, relying on system environment imports).*
 
 ## 3. All subprocess and os.startfile Usages
-- `inshal_dm.py:106`: `subprocess.run([get_ffmpeg_path(), '-y', '-i', ...])` (Safe argument list usage).
-- `inshal_dm.py:606`: `os.startfile(d['final_path'])`
-- `inshal_dm.py:611`: `subprocess.Popen(f'explorer /select,"{os.path.normpath(d["final_path"])}"')`
-- `inshal_dm.py:711`: `os.startfile(filepath)`
-- `inshal_dm.py:712`: `subprocess.Popen(f'explorer /select,"{os.path.normpath(filepath)}"')`
+- `stratrum_download_studio.py:106`: `subprocess.run([get_ffmpeg_path(), '-y', '-i', ...])` (Safe argument list usage).
+- `stratrum_download_studio.py:606`: `os.startfile(d['final_path'])`
+- `stratrum_download_studio.py:611`: `subprocess.Popen(f'explorer /select,"{os.path.normpath(d["final_path"])}"')`
+- `stratrum_download_studio.py:711`: `os.startfile(filepath)`
+- `stratrum_download_studio.py:712`: `subprocess.Popen(f'explorer /select,"{os.path.normpath(filepath)}"')`
 
 ## 4. All Network Listeners and External Requests
-- **Listener:** `socketserver.TCPServer(("127.0.0.1", 8000), IDMServerHandler)` in `inshal_dm.py`.
+- **Listener:** `socketserver.TCPServer(("127.0.0.1", 8000), DownloadServerHandler)` in `stratrum_download_studio.py`.
 - **Extension Request:** `fetch("http://127.0.0.1:8000/add_download")` in `background.js`.
 - **External Requests:** Internal `yt-dlp` requests to various video host endpoints.
 
 ## 5. All File-Write Locations
-- **History File:** `inshaldm_history.json` written to Current Working Directory (`inshal_dm.py:482`).
+- **History File:** `inshaldm_history.json` written to Current Working Directory (`stratrum_download_studio.py:482`).
 - **Download Files:** Resolved dynamic paths using `os.path.join(save_dir, '%(title)s.%(ext)s')`. Fallback save directory is `~\Downloads`.
-- **Converted Files:** `{base}_converted.{ext}` in the same directory as the input file (`inshal_dm.py:105`).
+- **Converted Files:** `{base}_converted.{ext}` in the same directory as the input file (`stratrum_download_studio.py:105`).
 
 ## 6. SHA-256 Hashes of Bundled FFmpeg
 - `ffmpeg.exe`: `228D7A8556258DE907FDB55F36850078EBC7680B84EC30D84EA02E99BEC1D1EB`
@@ -49,4 +49,4 @@
 A repository-wide search confirms `main.py` is entirely unreferenced. It is an abandoned FastAPI test file.
 
 ## 10. Usage of History JSON Files
-A repository-wide search confirms `idm_history.json` is not referenced by any running code. `inshaldm_history.json` is actively used by `inshal_dm.py` for state management.
+A repository-wide search confirms `idm_history.json` is not referenced by any running code. `inshaldm_history.json` is actively used by `stratrum_download_studio.py` for state management.

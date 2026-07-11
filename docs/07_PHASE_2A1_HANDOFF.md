@@ -1,14 +1,14 @@
 # Phase 2A.1 Handoff: Corrective Security and Test Validation
 
 ## Exact Files Changed
-- `inshal_dm.py`: Major refactoring of local server, token pairing, and file execution logic.
-- `IDM_Extension/manifest.json`: Renamed to "Stratrum Download Studio", removed `<all_urls>` permission, dropped content scripts.
-- `IDM_Extension/background.js`: Renamed logs, added 5-second `fetch` timeout, removed whisper listener.
-- `IDM_Extension/options.html`: Added password field masking, show/hide toggle, clear button, and security warnings.
-- `IDM_Extension/options.js`: Implemented show/hide and clear button logic.
+- `stratrum_download_studio.py`: Major refactoring of local server, token pairing, and file execution logic.
+- `browser_extension/manifest.json`: Renamed to "Stratrum Download Studio", removed `<all_urls>` permission, dropped content scripts.
+- `browser_extension/background.js`: Renamed logs, added 5-second `fetch` timeout, removed whisper listener.
+- `browser_extension/options.html`: Added password field masking, show/hide toggle, clear button, and security warnings.
+- `browser_extension/options.js`: Implemented show/hide and clear button logic.
 - `test_security.py`: Fully rewritten using `pytest` to start a true ephemeral server and assert HTTP responses and local logic.
 - `docs/06_EVIDENCE_APPENDIX.md`: Updated FFmpeg licensing language.
-- `IDM_Extension/content.js`: **Deleted** (Functionality dropped to minimize permissions).
+- `browser_extension/content.js`: **Deleted** (Functionality dropped to minimize permissions).
 
 ## Security Behavior Before and After
 
