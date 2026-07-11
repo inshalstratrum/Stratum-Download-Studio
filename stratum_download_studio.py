@@ -14,6 +14,7 @@ import string
 import threading
 import time
 import math
+import signal
 import webbrowser
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -1243,21 +1244,66 @@ class ConvertThread(QThread):
         self.cancelled = False
         self.process = None
         self._process_lock = threading.Lock()
+        self.paused = False
+
+    def _change_process_suspension(self, pause):
+        with self._process_lock:
+            process = self.process
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            if os.name == 'nt':
+                import ctypes
+                access = 0x0800
+                kernel32 = ctypes.windll.kernel32
+                kernel32.OpenProcess.restype = ctypes.c_void_p
+                kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+                handle = kernel32.OpenProcess(access, False, process.pid)
+                if not handle:
+                    return False
+                try:
+                    operation = ctypes.windll.ntdll.NtSuspendProcess if pause else ctypes.windll.ntdll.NtResumeProcess
+                    operation.argtypes = (ctypes.c_void_p,)
+                    if operation(handle) != 0:
+                        return False
+                finally:
+                    kernel32.CloseHandle(handle)
+            else:
+                os.kill(process.pid, signal.SIGSTOP if pause else signal.SIGCONT)
+            self.paused = pause
+            self.progress.emit(self.row_id, {'state': 'paused' if pause else 'converting'})
+            return True
+        except (OSError, AttributeError, TypeError):
+            return False
+
+    def pause(self):
+        if self.cancelled or self.paused:
+            return False
+        return self._change_process_suspension(True)
+
+    def resume(self):
+        if self.cancelled or not self.paused:
+            return False
+        return self._change_process_suspension(False)
 
     def cancel(self):
         self.cancelled = True
         self.requestInterruption()
+        if self.paused:
+            self._change_process_suspension(False)
         with self._process_lock:
             process = self.process
         if process is not None and process.poll() is None:
-            def stop_process():
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
                 try:
-                    process.terminate()
-                    process.wait(timeout=3)
+                    process.kill()
+                    process.wait(timeout=2)
                 except (OSError, subprocess.TimeoutExpired):
-                    try: process.kill()
-                    except OSError: pass
-            threading.Thread(target=stop_process, name=f'StratrumFFmpegCancel-{self.row_id}', daemon=True).start()
+                    return False
+        return process is None or process.poll() is not None
 
     def run(self):
         claim_path = None; temporary_path = None; stderr_log = None
@@ -1332,6 +1378,84 @@ class ConvertThread(QThread):
                     claim_path.unlink()
                 except FileNotFoundError:
                     pass
+
+
+class ConversionJobController(QObject):
+    progress = pyqtSignal(str, dict)
+    finished = pyqtSignal(str, bool, str, str)
+    state_changed = pyqtSignal(str, str)
+
+    def __init__(self, parent=None, thread_factory=ConvertThread):
+        super().__init__(parent)
+        self.thread_factory = thread_factory
+        self.jobs = {}
+
+    def start(self, job_id, input_file, target_ext, output_dir=None, destination=None):
+        if job_id in self.jobs:
+            return False
+        thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
+        generation = uuid.uuid4().hex
+        self.jobs[job_id] = {'thread': thread, 'generation': generation, 'state': 'starting'}
+        thread.progress.connect(lambda emitted_id, snapshot, token=generation: self._progress(emitted_id, snapshot, token))
+        thread.finished.connect(lambda emitted_id, success, message, output, token=generation: self._finished(emitted_id, success, message, output, token))
+        self.state_changed.emit(job_id, 'starting')
+        thread.start()
+        return True
+
+    def _current(self, job_id, generation):
+        job = self.jobs.get(job_id)
+        return job if job and job['generation'] == generation else None
+
+    def _progress(self, job_id, snapshot, generation):
+        job = self._current(job_id, generation)
+        if not job:
+            return
+        state = str(snapshot.get('state') or 'converting')
+        job['state'] = state
+        self.state_changed.emit(job_id, state)
+        self.progress.emit(job_id, snapshot)
+
+    def _finished(self, job_id, success, message, output_path, generation):
+        job = self._current(job_id, generation)
+        if not job:
+            return
+        cancelled = job['state'] in {'cancelling', 'stop_failed'} or 'cancelled' in str(message).lower()
+        if cancelled:
+            success, message, output_path = False, 'Conversion cancelled', ''
+        job['state'] = 'completed' if success else ('cancelled' if cancelled else 'failed')
+        self.state_changed.emit(job_id, job['state'])
+        self.finished.emit(job_id, success, message, output_path)
+        self.jobs.pop(job_id, None)
+
+    def pause(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job or job['state'] not in {'starting', 'converting'} or not job['thread'].pause():
+            return False
+        job['state'] = 'paused'; self.state_changed.emit(job_id, 'paused'); return True
+
+    def resume(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job or job['state'] != 'paused' or not job['thread'].resume():
+            return False
+        job['state'] = 'converting'; self.state_changed.emit(job_id, 'converting'); return True
+
+    def cancel(self, job_id, wait_ms=5000, remove=False):
+        job = self.jobs.get(job_id)
+        if not job or job['state'] in {'completed', 'failed', 'cancelled'}:
+            return False
+        job['state'] = 'cancelling'; self.state_changed.emit(job_id, 'cancelling')
+        stopped = job['thread'].cancel()
+        if job['thread'].isRunning():
+            stopped = job['thread'].wait(wait_ms) and stopped
+        if not stopped or job['thread'].isRunning():
+            job['state'] = 'stop_failed'; self.state_changed.emit(job_id, 'stop_failed'); return False
+        if remove:
+            self.jobs.pop(job_id, None)
+        return True
+
+    def state(self, job_id):
+        job = self.jobs.get(job_id)
+        return job['state'] if job else None
 
 # ==========================================
 # 3. DOWNLOAD ENGINE ("THE SPEED GRABBER")
@@ -1926,7 +2050,7 @@ class DownloadProgressPopup(QDialog):
         if normalized == JobState.PAUSED.value:
             self.pause_btn.setText("Resume")
             self.pause_btn.setEnabled(True)
-        elif normalized in {JobState.DOWNLOADING.value, JobState.CONNECTING.value, JobState.RESOLVING.value}:
+        elif normalized in {JobState.DOWNLOADING.value, JobState.CONNECTING.value, JobState.RESOLVING.value, JobState.CONVERTING.value, 'starting'}:
             self.pause_btn.setText("Pause")
             self.pause_btn.setEnabled(True)
         else:
@@ -1939,6 +2063,10 @@ class DownloadProgressPopup(QDialog):
             self.pause_requested.emit(self.job_id)
 
     def request_cancel(self):
+        if self.job_state in {JobState.CONVERTING.value, JobState.PAUSED.value, 'starting'}:
+            if QMessageBox.question(self, "Cancel Conversion", "Cancel only this conversion? The source and previous valid outputs will be preserved.") == QMessageBox.StandardButton.Yes:
+                self.cancel_requested.emit(self.job_id, False)
+            return
         question = QMessageBox(self)
         question.setWindowTitle("Cancel Download")
         question.setText("Cancel this download and choose what happens to partial data.")
@@ -1980,7 +2108,10 @@ class LocalConverterDialog(QDialog):
         self.setAcceptDrops(True)
         self.entries = []
         self.pending_jobs = []
-        self.active_thread = None
+        self.active_job_id = None
+        self.conversion_controller = ConversionJobController(self)
+        self.conversion_controller.progress.connect(self.on_progress)
+        self.conversion_controller.finished.connect(self.on_finished)
 
         layout = QVBoxLayout(self)
         intro = QLabel('Drop local audio/video files here, or select one or more files. FFprobe determines real streams and container support.')
@@ -1988,6 +2119,7 @@ class LocalConverterDialog(QDialog):
         top = QHBoxLayout()
         add_button = QPushButton('Add Files'); add_button.clicked.connect(self.select_files); top.addWidget(add_button)
         self.target_combo = QComboBox(); self.target_combo.addItems(list(OUTPUT_PROFILES)); top.addWidget(QLabel('Target:')); top.addWidget(self.target_combo)
+        self.apply_all_button = QPushButton('Apply format to all'); self.apply_all_button.clicked.connect(self.apply_format_to_all); top.addWidget(self.apply_all_button)
         self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to each source folder)'); top.addWidget(self.output_edit, 1)
         browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); top.addWidget(browse_button)
         self.overwrite_combo = QComboBox(); self.overwrite_combo.addItem('Unique name', 'unique'); self.overwrite_combo.addItem('Ask before replace', 'ask'); self.overwrite_combo.addItem('Skip existing', 'skip')
@@ -2004,11 +2136,17 @@ class LocalConverterDialog(QDialog):
         buttons = QHBoxLayout()
         self.start_button = QPushButton('Start'); self.start_button.clicked.connect(self.start_conversions); buttons.addWidget(self.start_button)
         self.cancel_button = QPushButton('Cancel'); self.cancel_button.clicked.connect(self.cancel_active); self.cancel_button.setEnabled(False); buttons.addWidget(self.cancel_button)
+        self.pause_button = QPushButton('Pause'); self.pause_button.clicked.connect(self.pause_active); buttons.addWidget(self.pause_button)
+        self.resume_button = QPushButton('Resume'); self.resume_button.clicked.connect(self.resume_active); buttons.addWidget(self.resume_button)
+        self.remove_button = QPushButton('Remove Selected'); self.remove_button.clicked.connect(self.remove_selected); buttons.addWidget(self.remove_button)
+        self.clear_button = QPushButton('Clear List'); self.clear_button.clicked.connect(self.clear_list); buttons.addWidget(self.clear_button)
         self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); buttons.addWidget(self.open_output_button)
         self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); buttons.addWidget(self.open_folder_button)
         buttons.addStretch(1); close_button = QPushButton('Close'); close_button.clicked.connect(self.close); buttons.addWidget(close_button)
         layout.addLayout(buttons)
         self.target_combo.currentTextChanged.connect(self.refresh_target_availability)
+        self.table.itemSelectionChanged.connect(self.update_button_states)
+        self.update_button_states()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
@@ -2039,11 +2177,37 @@ class LocalConverterDialog(QDialog):
             row = self.table.rowCount(); self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(source))
             detected = f"{summary['container']} | {summary['codecs']} | {summary['resolution']} | {format_eta(summary['duration'])}"
-            self.table.setItem(row, 1, QTableWidgetItem(detected)); self.table.setItem(row, 2, QTableWidgetItem(self.target_combo.currentText()))
+            self.table.setItem(row, 1, QTableWidgetItem(detected))
+            target_selector = QComboBox(); target_selector.addItems(list(OUTPUT_PROFILES)); target_selector.setCurrentText(self.target_combo.currentText())
+            for target_index, target_name in enumerate(OUTPUT_PROFILES):
+                capability = conversion_target_capabilities(probe)[target_name]
+                target_item = target_selector.model().item(target_index)
+                if target_item:
+                    target_item.setEnabled(capability['enabled']); target_item.setToolTip(capability['reason'])
+            self.table.setCellWidget(row, 2, target_selector)
             bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setFormat('Queued 0%'); self.table.setCellWidget(row, 3, bar)
             self.table.setItem(row, 4, QTableWidgetItem('Ready')); self.table.setItem(row, 5, QTableWidgetItem(''))
-            self.entries.append({'job_id': uuid.uuid4().hex, 'source': source, 'probe': probe, 'row': row, 'output': ''}); known.add(source)
+            entry = {'job_id': uuid.uuid4().hex, 'source': source, 'probe': probe, 'row': row, 'output': '', 'target': target_selector.currentText(), 'state': 'ready'}
+            target_selector.currentTextChanged.connect(lambda value, item=entry: self.set_entry_target(item, value))
+            self.entries.append(entry); known.add(source)
         self.refresh_target_availability()
+        self.update_button_states()
+
+    def set_entry_target(self, entry, target):
+        if entry not in self.entries or entry.get('state') not in {'ready', 'queued', 'failed', 'cancelled'}:
+            return False
+        capability = conversion_target_capabilities(entry['probe']).get(target, {})
+        if not capability.get('enabled'):
+            return False
+        entry['target'] = target
+        return True
+
+    def apply_format_to_all(self):
+        target = self.target_combo.currentText()
+        for entry in self.entries:
+            if self.set_entry_target(entry, target):
+                selector = self.table.cellWidget(entry['row'], 2)
+                if selector: selector.setCurrentText(target)
 
     def refresh_target_availability(self):
         model = self.target_combo.model()
@@ -2058,41 +2222,47 @@ class LocalConverterDialog(QDialog):
             if item:
                 item.setEnabled(enabled)
                 item.setToolTip(reasons[0] if reasons else 'Available; output is always a new re-encoded file.')
-        for entry in self.entries:
-            self.table.setItem(entry['row'], 2, QTableWidgetItem(self.target_combo.currentText()))
+        self.apply_all_button.setEnabled(bool(self.entries))
 
     def _confirm_replace(self, path):
         result = QMessageBox.question(self, 'Replace Existing Output', f'Replace existing output?\n\n{path}', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         return result == QMessageBox.StandardButton.Yes
 
     def start_conversions(self):
-        if self.active_thread or not self.entries: return
-        target = self.target_combo.currentText(); output_dir = self.output_edit.text().strip() or None
+        if self.active_job_id or not self.entries: return
+        output_dir = self.output_edit.text().strip() or None
         behavior = self.overwrite_combo.currentData()
         self.pending_jobs = []
         reserved = set()
         for entry in self.entries:
+            if entry.get('state') not in {'ready', 'failed', 'cancelled'}:
+                continue
             try:
+                target = entry['target']
                 destination = conversion_destination_for_behavior(entry['source'], target, output_dir, behavior, self._confirm_replace, reserved)
                 plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination)
                 self.pending_jobs.append((entry, plan))
                 reserved.add(str(plan.destination.resolve()))
+                entry['state'] = 'queued'
                 self.table.item(entry['row'], 4).setText('Queued')
             except (OSError, ValueError, PermissionError, FileExistsError) as exc:
+                entry['state'] = 'failed'
                 self.table.item(entry['row'], 4).setText(clean_error_summary(exc))
-        self.start_button.setEnabled(False); self.cancel_button.setEnabled(bool(self.pending_jobs)); self._start_next()
+        self._start_next(); self.update_button_states()
 
     def _start_next(self):
         if not self.pending_jobs:
-            self.active_thread = None; self.cancel_button.setEnabled(False); self.start_button.setEnabled(True); return
+            self.active_job_id = None; self.update_button_states(); return
         entry, plan = self.pending_jobs.pop(0)
-        thread = ConvertThread(entry['job_id'], entry['source'], plan.target_name, plan.destination.parent, plan.destination)
-        thread.progress.connect(self.on_progress); thread.finished.connect(self.on_finished)
-        self.active_thread = thread; self.table.item(entry['row'], 4).setText('Starting'); thread.start()
+        self.active_job_id = entry['job_id']; entry['state'] = 'starting'
+        self.table.item(entry['row'], 4).setText('Starting')
+        self.conversion_controller.start(entry['job_id'], entry['source'], plan.target_name, plan.destination.parent, plan.destination)
+        self.update_button_states()
 
     def on_progress(self, job_id, snapshot):
         entry = next((item for item in self.entries if item['job_id'] == job_id), None)
         if not entry: return
+        entry['state'] = snapshot.get('state', 'converting')
         bar = self.table.cellWidget(entry['row'], 3); percent = float(snapshot.get('percent') or 0)
         bar.setValue(int(percent)); eta = format_eta(snapshot['eta']) if snapshot.get('eta') is not None else 'calculating'
         bar.setFormat(f"{percent:.1f}% | ETA {eta}")
@@ -2104,17 +2274,70 @@ class LocalConverterDialog(QDialog):
         if entry:
             bar = self.table.cellWidget(entry['row'], 3)
             if success:
+                entry['state'] = 'completed'
                 entry['output'] = output_path; bar.setValue(100); bar.setFormat('Completed 100%')
                 self.table.item(entry['row'], 4).setText('Completed'); self.table.item(entry['row'], 5).setText(output_path)
             else:
+                entry['state'] = 'cancelled' if 'cancelled' in message.lower() else 'failed'
                 bar.setFormat('Cancelled' if 'cancelled' in message.lower() else 'Failed')
                 self.table.item(entry['row'], 4).setText(clean_error_summary(message))
-        self.active_thread = None; QTimer.singleShot(0, self._start_next)
+        if self.active_job_id == job_id: self.active_job_id = None
+        self.update_button_states(); QTimer.singleShot(0, self._start_next)
 
     def cancel_active(self):
         self.pending_jobs.clear()
-        if self.active_thread: self.active_thread.cancel()
-        self.cancel_button.setEnabled(False)
+        if self.active_job_id: self.conversion_controller.cancel(self.active_job_id)
+        self.update_button_states()
+
+    def pause_active(self):
+        if self.active_job_id and not self.conversion_controller.pause(self.active_job_id):
+            QMessageBox.warning(self, 'Pause Failed', 'The active conversion could not be paused.')
+        self.update_button_states()
+
+    def resume_active(self):
+        if self.active_job_id and not self.conversion_controller.resume(self.active_job_id):
+            QMessageBox.warning(self, 'Resume Failed', 'The active conversion could not be resumed.')
+        self.update_button_states()
+
+    def _remove_entry(self, entry):
+        row = entry['row']; self.table.removeRow(row); self.entries.remove(entry)
+        for other in self.entries:
+            if other['row'] > row: other['row'] -= 1
+
+    def remove_selected(self):
+        entry = self._selected_entry()
+        if not entry: return False
+        self.pending_jobs = [(item, plan) for item, plan in self.pending_jobs if item is not entry]
+        if entry['job_id'] == self.active_job_id:
+            if not self.conversion_controller.cancel(entry['job_id'], remove=True):
+                self.table.item(entry['row'], 4).setText('Unable to confirm conversion stopped')
+                self.update_button_states(); return False
+            self.active_job_id = None
+        self._remove_entry(entry); self.update_button_states(); QTimer.singleShot(0, self._start_next); return True
+
+    def clear_list(self):
+        if self.active_job_id:
+            active = next((entry for entry in self.entries if entry['job_id'] == self.active_job_id), None)
+            if active and not self.conversion_controller.cancel(active['job_id'], remove=True):
+                self.table.item(active['row'], 4).setText('Unable to confirm conversion stopped')
+                self.update_button_states(); return False
+            self.active_job_id = None
+        self.pending_jobs.clear()
+        self.table.setRowCount(0); self.entries.clear(); self.update_button_states(); return True
+
+    def update_button_states(self):
+        selected = self._selected_entry()
+        state = self.conversion_controller.state(self.active_job_id) if self.active_job_id else None
+        can_start = any(entry.get('state') in {'ready', 'failed', 'cancelled'} for entry in self.entries)
+        self.start_button.setEnabled(can_start and not self.active_job_id)
+        self.cancel_button.setEnabled(state in {'starting', 'converting', 'paused'})
+        self.pause_button.setEnabled(state in {'starting', 'converting'})
+        self.resume_button.setEnabled(state == 'paused')
+        self.remove_button.setEnabled(selected is not None)
+        self.clear_button.setEnabled(bool(self.entries))
+        has_output = bool(selected and selected.get('output') and Path(selected['output']).is_file())
+        self.open_output_button.setEnabled(has_output)
+        self.open_folder_button.setEnabled(selected is not None)
 
     def _selected_entry(self):
         rows = self.table.selectionModel().selectedRows()
@@ -2132,8 +2355,9 @@ class LocalConverterDialog(QDialog):
             if folder.is_dir(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def closeEvent(self, event):
-        if self.active_thread and self.active_thread.isRunning():
-            self.active_thread.cancel(); self.active_thread.wait(5000)
+        if self.active_job_id and not self.conversion_controller.cancel(self.active_job_id, remove=True):
+            QMessageBox.warning(self, 'Close Failed', 'The converter remains open because the active process could not be confirmed stopped.')
+            event.ignore(); return
         event.accept()
 
 
@@ -2238,7 +2462,11 @@ class StratrumDownloadStudio(QMainWindow):
         self.setMinimumSize(760, 480)
         width, height = (app_config.window_size + [1150, 680])[:2]
         self.setGeometry(100, 100, max(800, int(width)), max(520, int(height)))
-        self.downloads = []; self.popups = {}; self.converters = {}
+        self.downloads = []; self.popups = {}
+        self.conversion_controller = ConversionJobController(self)
+        self.conversion_controller.progress.connect(self.conversion_progress)
+        self.conversion_controller.finished.connect(self.conversion_done)
+        self.converters = self.conversion_controller.jobs
         self.progress_snapshots = {}
         self.last_progress_paint = {}
         self.history_writer = None
@@ -2638,6 +2866,10 @@ class StratrumDownloadStudio(QMainWindow):
 
     def pause_job(self, job_id):
         record = self.get_download_by_id(job_id)
+        if self.conversion_controller.state(job_id) in {'starting', 'converting'}:
+            if self.conversion_controller.pause(job_id) and job_id in self.popups:
+                self.popups[job_id].set_job_state('paused')
+            return
         if not record or not job_capabilities(record['job'])['pause']:
             return
         if record.get('thread') and record['thread'].isRunning():
@@ -2650,6 +2882,10 @@ class StratrumDownloadStudio(QMainWindow):
 
     def resume_job(self, job_id):
         record = self.get_download_by_id(job_id)
+        if self.conversion_controller.state(job_id) == 'paused':
+            if self.conversion_controller.resume(job_id) and job_id in self.popups:
+                self.popups[job_id].set_job_state('converting')
+            return
         if record and job_capabilities(record['job'])['resume']:
             record['job'].state = JobState.QUEUED.value
             self.download_manager.persist()
@@ -2661,9 +2897,8 @@ class StratrumDownloadStudio(QMainWindow):
         if not record:
             return
         thread = record.get('thread')
-        converter = self.converters.get(job_id)
-        if converter and converter.isRunning():
-            converter.cancel()
+        if self.conversion_controller.state(job_id) in {'starting', 'converting', 'paused'}:
+            self.conversion_controller.cancel(job_id)
             if bar := self.table.cellWidget(record['row'], 3): bar.setFormat("Cancelling conversion...")
             return
         if thread and thread.isRunning():
@@ -3062,12 +3297,12 @@ class StratrumDownloadStudio(QMainWindow):
             return False
         if bar := self.table.cellWidget(record['row'], 3): bar.setFormat(f"Converting to {target_ext.upper()}...")
         self.download_manager.set_state(record['id'], JobState.CONVERTING)
-        converter = ConvertThread(record['id'], record['final_path'], target_ext)
-        converter.progress.connect(self.conversion_progress)
-        converter.finished.connect(self.conversion_done)
-        self.converters[record['id']] = converter
-        converter.start()
-        return True
+        popup = self.popups.get(record['id'])
+        if popup:
+            popup.set_job_state(JobState.CONVERTING.value)
+            popup.set_details(f"State: starting\nTarget: {target_ext.upper()}\nSource is preserved.")
+            popup.show()
+        return self.conversion_controller.start(record['id'], record['final_path'], target_ext)
 
     def conversion_progress(self, row_id, snapshot):
         if d := self.get_download_by_id(row_id):
@@ -3091,10 +3326,14 @@ class StratrumDownloadStudio(QMainWindow):
                 cancelled = 'cancelled' in str(msg).lower()
                 if bar: bar.setFormat("Conversion cancelled" if cancelled else f"Conversion failed: {clean_error_summary(msg)}")
                 if cancelled:
+                    if popup := self.popups.get(row_id):
+                        popup.set_job_state(JobState.CANCELLED.value)
+                        popup.set_details('State: cancelled\nThe source and previous valid outputs were preserved. Incomplete temporary output was removed.')
                     QMessageBox.information(self, "Conversion Cancelled", "The original downloaded file remains available.")
                 else:
+                    if popup := self.popups.get(row_id):
+                        popup.set_job_state('failed'); popup.set_details(f"State: failed\nResult: {clean_error_summary(msg)}")
                     QMessageBox.warning(self, "Conversion Failed", clean_error_summary(msg))
-                self.converters.pop(row_id, None)
                 self.start_queued_jobs()
                 return
             try:
@@ -3103,13 +3342,15 @@ class StratrumDownloadStudio(QMainWindow):
                 self.download_manager.set_state(row_id, JobState.COMPLETED, 'Conversion failure: output missing or unsafe')
                 if bar: bar.setFormat("Conversion output missing or unsafe")
                 QMessageBox.warning(self, "Conversion Failed", "The conversion output is missing or outside the download folder.")
-                self.converters.pop(row_id, None)
                 self.start_queued_jobs()
                 return
             self.download_manager.set_state(row_id, JobState.COMPLETED)
             if bar: bar.setFormat("Completed 100%")
+            if popup := self.popups.get(row_id):
+                popup.progress_bar.setValue(100)
+                popup.set_job_state(JobState.COMPLETED.value)
+                popup.set_details(f"State: completed\nConverted output: {converted_path}")
             self.save_downloads_to_file()
-            self.converters.pop(row_id, None)
             self.start_queued_jobs()
 
             dialog = QMessageBox(self)

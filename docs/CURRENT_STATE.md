@@ -1,12 +1,12 @@
 # Current State
 
-- Phase: 2A.6A — media-output correctness and converter workflow complete.
-- Branch: `phase-2a6a-converter-fixes`.
-- Commit: `Phase 2A.6A: Fix media outputs and converter workflow` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Phase: 2A.6A.1 — converter controls and shared lifecycle complete.
+- Branch: `phase-2a6a1-converter-controls`.
+- Commit: `Phase 2A.6A.1: Complete converter controls and shared lifecycle` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
 - Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
-- Test command: `python -m pytest -q`; current expected count: 196 passed.
-- Working features: verified yt-dlp MP4/MKV/WebM/AVI/MOV and MP3/M4A/AAC/WAV/FLAC/OGG/Opus outputs; FFprobe-based capability decisions; verified, unique, cancellable FFmpeg conversion with progress; dedicated multi-file local converter; existing secure browser integration, queue, history, and controls.
-- Unresolved blockers: no automated blockers. Manual Windows GUI, drag/drop, cancel, open-output, and authorized live-download checks remain required.
+- Test command: `python -m pytest -q`; current expected count: 205 passed.
+- Working features: verified yt-dlp MP4/MKV/WebM/AVI/MOV and MP3/M4A/AAC/WAV/FLAC/OGG/Opus outputs; one guarded conversion lifecycle shared by downloaded-file and local-file conversion; per-file targets, apply-to-all, pause/resume/cancel, safe row removal/clear, progress and terminal results; existing secure browser integration, queue, history, and controls.
+- Unresolved blockers: no automated blockers. Manual Windows GUI, drag/drop, pause/resume/cancel, close-during-conversion, open-output, and authorized live-download checks remain required.
 - Next task: Phase 2A.6B only when explicitly authorized.
 
 ## Roadmap — record only
