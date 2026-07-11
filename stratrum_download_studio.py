@@ -13,7 +13,7 @@ import urllib.parse
 import string
 import threading
 import time
-import webbrowser
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 import yt_dlp
@@ -21,8 +21,7 @@ import yt_dlp
 APP_NAME = "Stratrum Download Studio"
 MAX_REQUEST_BODY = 16 * 1024
 CONVERSION_TIMEOUT_SECONDS = 30 * 60
-CHROME_STORE_URL = "https://chromewebstore.google.com/"
-EDGE_STORE_URL = "https://microsoftedge.microsoft.com/addons/"
+MAX_PAIRED_ORIGINS = 6
 _conversion_name_lock = threading.Lock()
 
 
@@ -60,7 +59,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
     QWidget, QGridLayout, QCheckBox
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QTimer, QUrl
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices
 
 # ==========================================
@@ -146,16 +145,22 @@ class AppConfig:
     config_path: Path
     history_path: Path
     auth_token: str
-    allowed_origin: str
+    allowed_origins: list[str]
     rate_limiter: RateLimiter
-    extension_prompt_preference: str = 'ask'
     state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    @property
+    def allowed_origin(self):
+        return self.allowed_origins[0] if self.allowed_origins else ''
+
+    @allowed_origin.setter
+    def allowed_origin(self, origin):
+        self.allowed_origins = [origin] if origin else []
 
     def persisted_values(self):
         return {
             'auth_token': self.auth_token,
-            'allowed_origin': self.allowed_origin,
-            'extension_prompt_preference': self.extension_prompt_preference,
+            'allowed_origins': list(self.allowed_origins),
         }
 
     def persist(self):
@@ -166,42 +171,64 @@ class AppConfig:
         if not validate_extension_origin(origin):
             raise ValueError("Malformed extension origin")
         with self.state_lock:
-            if self.allowed_origin and self.allowed_origin != origin:
-                raise ValueError("A different browser origin is already paired")
-            if self.allowed_origin == origin:
-                return
-            previous = self.allowed_origin
-            self.allowed_origin = origin
+            if origin in self.allowed_origins:
+                return False
+            if len(self.allowed_origins) >= MAX_PAIRED_ORIGINS:
+                raise PairingLimitError("Maximum paired browser origins reached")
+            previous = list(self.allowed_origins)
+            self.allowed_origins.append(origin)
             try:
                 self.persist()
             except Exception:
-                self.allowed_origin = previous
+                self.allowed_origins = previous
                 raise
+            return True
 
     def reset_pairing(self):
+        self.reset_all_origins()
+
+    def reset_all_origins(self):
         with self.state_lock:
-            previous = self.allowed_origin
-            self.allowed_origin = ''
+            previous = list(self.allowed_origins)
+            self.allowed_origins.clear()
             try:
                 self.persist()
             except Exception:
-                self.allowed_origin = previous
+                self.allowed_origins = previous
                 raise
 
-    def set_extension_prompt_preference(self, preference):
-        if preference not in {'ask', 'later', 'never'}:
-            raise ValueError("Invalid extension prompt preference")
-        previous = self.extension_prompt_preference
-        self.extension_prompt_preference = preference
-        try:
-            self.persist()
-        except Exception:
-            self.extension_prompt_preference = previous
-            raise
+    def remove_origin(self, origin):
+        with self.state_lock:
+            if origin not in self.allowed_origins:
+                return False
+            previous = list(self.allowed_origins)
+            self.allowed_origins.remove(origin)
+            try:
+                self.persist()
+            except Exception:
+                self.allowed_origins = previous
+                raise
+            return True
+
+
+class PairingLimitError(ValueError):
+    pass
+
+
+def normalize_allowed_origins(origins):
+    normalized = []
+    if not isinstance(origins, (list, tuple)):
+        return normalized
+    for origin in origins:
+        if validate_extension_origin(origin) and origin not in normalized:
+            normalized.append(origin)
+        if len(normalized) == MAX_PAIRED_ORIGINS:
+            break
+    return normalized
 
 
 def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
-                       history_path=None, rate_limiter=None):
+                       history_path=None, rate_limiter=None, allowed_origins=None):
     root = Path(app_data_root) if app_data_root is not None else default_app_data_root()
     config_path = root / 'config' / 'config.json'
     for directory in ('config', 'history', 'logs', 'temp'):
@@ -221,39 +248,26 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
     if not validate_token(selected_token):
         selected_token = secrets.token_hex(32)
 
-    selected_origin = allowed_origin if allowed_origin is not None else stored.get('allowed_origin', '')
-    if selected_origin and not validate_extension_origin(selected_origin):
-        selected_origin = ''
-
-    prompt_preference = stored.get('extension_prompt_preference', 'ask')
-    if prompt_preference not in {'ask', 'later', 'never'}:
-        prompt_preference = 'ask'
+    if allowed_origins is not None:
+        selected_origins = normalize_allowed_origins(allowed_origins)
+    elif allowed_origin is not None:
+        selected_origins = normalize_allowed_origins([allowed_origin])
+    elif isinstance(stored.get('allowed_origins'), list):
+        selected_origins = normalize_allowed_origins(stored['allowed_origins'])
+    else:
+        selected_origins = normalize_allowed_origins([stored.get('allowed_origin', '')])
 
     runtime = AppConfig(
         app_data_root=root,
         config_path=config_path,
         history_path=Path(history_path) if history_path is not None else root / 'history' / 'history.json',
         auth_token=selected_token,
-        allowed_origin=selected_origin,
+        allowed_origins=selected_origins,
         rate_limiter=rate_limiter or RateLimiter(5, 1.0),
-        extension_prompt_preference=prompt_preference,
     )
     runtime.history_path.parent.mkdir(parents=True, exist_ok=True)
     runtime.persist()
     return runtime
-
-
-def should_show_extension_prompt(app_config):
-    return not app_config.allowed_origin and app_config.extension_prompt_preference != 'never'
-
-
-def apply_extension_prompt_choice(app_config, choice):
-    if choice == 'later':
-        app_config.set_extension_prompt_preference('later')
-    elif choice == 'never':
-        app_config.set_extension_prompt_preference('never')
-    elif choice != 'install':
-        raise ValueError("Invalid extension prompt choice")
 
 
 def browser_extension_guide_path(base_directory=None):
@@ -318,9 +332,6 @@ def validate_request(headers, rfile, runtime):
     origin = headers.get('Origin', '')
     if not validate_extension_origin(origin):
         return 403, b'{"error": "Origin not allowed"}'
-    with runtime.state_lock:
-        if runtime.allowed_origin and origin != runtime.allowed_origin:
-            return 403, b'{"error": "Origin not allowed"}'
 
     content_type = headers.get('Content-Type', '')
     media_type = content_type.split(';', 1)[0].strip().lower()
@@ -366,6 +377,8 @@ def validate_request(headers, rfile, runtime):
 
     try:
         runtime.pair_origin(origin)
+    except PairingLimitError:
+        return 403, b'{"error": "Pairing limit reached; reset browser pairing"}'
     except ValueError:
         return 403, b'{"error": "Origin not allowed"}'
     except OSError:
@@ -439,7 +452,7 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
     def send_cors_headers(self):
         origin = self.headers.get('Origin', '')
         runtime = self.server.app_config
-        if origin == runtime.allowed_origin or (not runtime.allowed_origin and validate_extension_origin(origin)):
+        if origin in runtime.allowed_origins or validate_extension_origin(origin):
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Stratrum-Auth')
@@ -563,8 +576,104 @@ class ConvertThread(QThread):
 # ==========================================
 class PauseException(Exception): pass
 
+
+ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def finite_number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def format_bytes(byte_count):
+    value = finite_number(byte_count)
+    if value is None:
+        return "N/A"
+    value = max(0.0, value)
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if value < 1024.0 or unit == 'TB':
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+
+
+def format_eta(seconds):
+    value = finite_number(seconds)
+    if value is None or value < 0:
+        return "N/A"
+    total_seconds = int(value)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def clean_progress_text(value, default="N/A"):
+    if not isinstance(value, str):
+        return default
+    cleaned = ANSI_ESCAPE_RE.sub('', value).strip()
+    return cleaned or default
+
+
+def fallback_percent(value):
+    cleaned = clean_progress_text(value, '')
+    match = re.search(r'-?\d+(?:\.\d+)?', cleaned)
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return 0.0
+
+
+def build_progress_snapshot(progress_data):
+    data = progress_data if isinstance(progress_data, dict) else {}
+    info_dict = data.get('info_dict') if isinstance(data.get('info_dict'), dict) else {}
+    raw_filename = data.get('filename') or info_dict.get('_filename') or ''
+    filename = os.path.basename(str(raw_filename)) if raw_filename else "Connecting..."
+
+    downloaded = finite_number(data.get('downloaded_bytes'))
+    downloaded = max(0.0, downloaded) if downloaded is not None else 0.0
+    total = finite_number(data.get('total_bytes'))
+    if total is None or total <= 0:
+        total = finite_number(data.get('total_bytes_estimate'))
+    total = total if total is not None and total > 0 else None
+
+    if total is not None:
+        percent = downloaded / total * 100.0
+    else:
+        percent = fallback_percent(data.get('_percent_str'))
+    percent = min(100.0, max(0.0, percent))
+
+    numeric_speed = finite_number(data.get('speed'))
+    if numeric_speed is not None and numeric_speed >= 0:
+        speed = f"{format_bytes(numeric_speed)}/s"
+    else:
+        speed = clean_progress_text(data.get('_speed_str'))
+
+    numeric_eta = finite_number(data.get('eta'))
+    eta = format_eta(numeric_eta) if numeric_eta is not None else clean_progress_text(data.get('_eta_str'))
+    status = str(data.get('status') or 'downloading').capitalize()
+    return {
+        'filename': filename,
+        'percent': percent,
+        'downloaded': format_bytes(downloaded),
+        'total': format_bytes(total) if total is not None else "N/A",
+        'speed': speed,
+        'eta': eta,
+        'status': status,
+    }
+
+
+def format_transfer_size(downloaded, total):
+    return f"{downloaded} / {total if total != 'N/A' else 'unknown total'}"
+
+
 class DownloadThread(QThread):
-    progress = pyqtSignal(str, str, float, str, str)
+    progress = pyqtSignal(str, str, float, str, str, str, str, str)
     status = pyqtSignal(str, str)
     finished = pyqtSignal(str, bool, str, str)
     size_updated = pyqtSignal(str, str, str)
@@ -576,28 +685,29 @@ class DownloadThread(QThread):
         self.paused = False; self.final_filename = ""
 
     def format_size(self, bytes):
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if bytes < 1024.0: return f"{bytes:.2f} {unit}"
-            bytes /= 1024.0
-        return f"{bytes:.2f} TB"
+        return format_bytes(bytes)
 
     def progress_hook(self, d):
         if self.paused: raise PauseException("Paused")
-        if d['status'] == 'downloading':
-            filename = os.path.basename(d['filename'])
-            percent_clean = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_percent_str', '0%').strip('%'))
-            try: percent = float(percent_clean)
-            except ValueError: percent = 0.0
-
-            speed = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_speed_str', 'N/A'))
-            eta = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_eta_str', 'N/A'))
-
-            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            if total_bytes: self.size_updated.emit(self.id, filename, self.format_size(total_bytes))
-            self.progress.emit(self.id, filename, percent, speed, eta)
+        status = d.get('status') if isinstance(d, dict) else None
+        if status == 'downloading':
+            snapshot = build_progress_snapshot(d)
+            if snapshot['total'] != "N/A":
+                self.size_updated.emit(self.id, snapshot['filename'], snapshot['total'])
             self.status.emit(self.id, 'Downloading')
-        elif d['status'] == 'finished':
-            self.final_filename = d.get('info_dict', {}).get('_filename', d['filename'])
+            self.progress.emit(
+                self.id, snapshot['filename'], snapshot['percent'], snapshot['downloaded'],
+                snapshot['total'], snapshot['speed'], snapshot['eta'], snapshot['status']
+            )
+        elif status == 'finished':
+            info_dict = d.get('info_dict') if isinstance(d.get('info_dict'), dict) else {}
+            self.final_filename = info_dict.get('_filename') or d.get('filename', '')
+            snapshot = build_progress_snapshot(d)
+            self.status.emit(self.id, 'Completed')
+            self.progress.emit(
+                self.id, snapshot['filename'], 100.0, snapshot['downloaded'],
+                snapshot['total'], snapshot['speed'], snapshot['eta'], 'Completed'
+            )
 
     def run(self):
         try:
@@ -857,13 +967,17 @@ class DownloadProgressPopup(QDialog):
             self.setFixedSize(500, 450)
             self.details_open = True
 
-    def update_stats(self, percent, speed, eta, total_size=""):
+    def update_stats(self, filename, percent, downloaded, total, speed, eta, status):
+        if filename and filename != "Connecting...":
+            self.filename = filename
         self.setWindowTitle(f"{int(percent)}% {self.filename}")
         self.progress_bar.setValue(int(percent))
         self.speed_lbl.setText(speed)
         self.time_lbl.setText(eta)
-        self.downloaded_lbl.setText(f"({percent}%)")
-        if total_size: self.size_lbl.setText(total_size)
+        self.status_lbl.setText(status)
+        self.downloaded_lbl.setText(f"{format_transfer_size(downloaded, total)} ({percent:.1f}%)")
+        if total != "N/A":
+            self.size_lbl.setText(total)
 
 # ==========================================
 # 5. MAIN APP: STRATRUM DOWNLOAD STUDIO
@@ -875,7 +989,7 @@ class BrowserIntegrationDialog(QDialog):
         self.setWindowTitle("Browser Integration")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Copy the local authentication token into the Chrome or Edge extension. "
+            "Copy the local authentication token into the Chrome, Edge, or Firefox extension. "
             "The token is masked and must never be shared or logged."
         ))
         token_field = QLineEdit(app_config.auth_token)
@@ -887,32 +1001,70 @@ class BrowserIntegrationDialog(QDialog):
         copy_button = QPushButton("Copy Token")
         copy_button.clicked.connect(lambda: QApplication.clipboard().setText(app_config.auth_token))
         actions.addWidget(copy_button)
-        reset_button = QPushButton("Reset Browser Pairing")
-        reset_button.clicked.connect(self.reset_pairing)
+        guide_button = QPushButton("Open Extension Guide")
+        guide_button.clicked.connect(self.open_guide)
+        actions.addWidget(guide_button)
+        reset_button = QPushButton("Reset All Pairings")
+        reset_button.clicked.connect(self.reset_all_pairings)
         actions.addWidget(reset_button)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
         actions.addWidget(close_button)
         layout.addLayout(actions)
 
-        paired = app_config.allowed_origin or "No browser extension is currently paired."
-        self.pairing_label = QLabel(f"Paired origin: {paired}")
+        layout.addWidget(QLabel(f"Paired browser origins (maximum {MAX_PAIRED_ORIGINS}):"))
+        pairing_actions = QHBoxLayout()
+        self.origin_combo = QComboBox()
+        pairing_actions.addWidget(self.origin_combo)
+        remove_button = QPushButton("Remove Selected")
+        remove_button.clicked.connect(self.remove_selected_origin)
+        pairing_actions.addWidget(remove_button)
+        layout.addLayout(pairing_actions)
+        self.pairing_label = QLabel()
         layout.addWidget(self.pairing_label)
+        self.refresh_origins()
 
-    def reset_pairing(self):
+    def refresh_origins(self):
+        self.origin_combo.clear()
+        self.origin_combo.addItems(self.app_config.allowed_origins)
+        count = len(self.app_config.allowed_origins)
+        self.pairing_label.setText(
+            f"{count} browser origin{'s' if count != 1 else ''} paired."
+            if count else "No browser extension is currently paired."
+        )
+
+    def open_guide(self):
+        try:
+            if not open_browser_extension_guide():
+                raise OSError("The operating system did not open the guide")
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Guide Unavailable", "The browser extension README could not be opened.")
+
+    def remove_selected_origin(self):
+        origin = self.origin_combo.currentText()
+        if not origin:
+            return
+        try:
+            self.app_config.remove_origin(origin)
+        except OSError:
+            QMessageBox.warning(self, "Removal Failed", "The browser pairing could not be persisted.")
+            return
+        self.refresh_origins()
+
+    def reset_all_pairings(self):
         answer = QMessageBox.question(
             self,
-            "Reset Browser Pairing",
-            "Reset the paired browser extension? The next fully valid authenticated request will create a new pairing.",
+            "Reset All Browser Pairings",
+            "Reset every paired browser extension? Each browser must send a new fully valid authenticated request to pair again.",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            self.app_config.reset_pairing()
+            self.app_config.reset_all_origins()
         except OSError:
-            QMessageBox.warning(self, "Reset Failed", "The browser pairing could not be persisted.")
+            QMessageBox.warning(self, "Reset Failed", "The browser pairings could not be persisted.")
             return
-        self.pairing_label.setText("Paired origin: No browser extension is currently paired.")
+        self.refresh_origins()
 
 
 class StratrumDownloadStudio(QMainWindow):
@@ -926,8 +1078,6 @@ class StratrumDownloadStudio(QMainWindow):
         self.init_tray_icon()
         self.load_downloads_from_file()
         self.init_server()
-        if should_show_extension_prompt(self.app_config):
-            QTimer.singleShot(0, self.show_extension_install_prompt)
 
     def init_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -1027,45 +1177,6 @@ class StratrumDownloadStudio(QMainWindow):
             BrowserIntegrationDialog(self.app_config, self).exec()
         else:
             QMessageBox.information(self, "Stratrum Download Studio", f"'{title}' feature coming soon!")
-
-    def show_extension_install_prompt(self):
-        prompt = QMessageBox(self)
-        prompt.setWindowTitle("Browser Extension")
-        prompt.setText(
-            "Install the Stratrum extension for Chrome or Microsoft Edge? "
-            "Official store listings are pending; the development build can be loaded unpacked."
-        )
-        install_button = prompt.addButton("Install Extension", QMessageBox.ButtonRole.AcceptRole)
-        later_button = prompt.addButton("Remind Me Later", QMessageBox.ButtonRole.ActionRole)
-        never_button = prompt.addButton("Do Not Ask Again", QMessageBox.ButtonRole.RejectRole)
-        prompt.exec()
-        clicked = prompt.clickedButton()
-        if clicked == never_button:
-            apply_extension_prompt_choice(self.app_config, 'never')
-        elif clicked == later_button:
-            apply_extension_prompt_choice(self.app_config, 'later')
-        elif clicked == install_button:
-            apply_extension_prompt_choice(self.app_config, 'install')
-            chooser = QMessageBox(self)
-            chooser.setWindowTitle("Install Browser Extension")
-            chooser.setText(
-                "Chrome Web Store and Edge Add-ons publishing is pending. Open an official store, "
-                "or follow docs/09_PHASE_2A3_MANUAL_TEST.md to load the packaged extension unpacked."
-            )
-            chrome_button = chooser.addButton("Chrome Web Store", QMessageBox.ButtonRole.ActionRole)
-            edge_button = chooser.addButton("Edge Add-ons", QMessageBox.ButtonRole.ActionRole)
-            guide_button = chooser.addButton("Load Unpacked Guide", QMessageBox.ButtonRole.AcceptRole)
-            chooser.exec()
-            if chooser.clickedButton() == chrome_button:
-                webbrowser.open(CHROME_STORE_URL)
-            elif chooser.clickedButton() == edge_button:
-                webbrowser.open(EDGE_STORE_URL)
-            elif chooser.clickedButton() == guide_button:
-                try:
-                    if not open_browser_extension_guide():
-                        raise OSError("The operating system did not open the guide")
-                except (OSError, ValueError):
-                    QMessageBox.warning(self, "Guide Unavailable", "The browser extension README could not be opened.")
 
     def init_ui(self):
         menubar = self.menuBar()
@@ -1246,23 +1357,34 @@ class StratrumDownloadStudio(QMainWindow):
 
     def get_download_by_id(self, id): return next((d for d in self.downloads if d['id'] == id), None)
 
-    def update_progress(self, id, filename, percent, speed, eta):
+    def update_progress(self, id, filename, percent, downloaded, total, speed, eta, status):
         if d := self.get_download_by_id(id):
-            if self.table.item(d['row'], 0).text() == "Connecting...":
+            if filename and filename != "Connecting...":
                 self.table.setItem(d['row'], 0, QTableWidgetItem(filename))
 
+            self.table.setItem(d['row'], 2, QTableWidgetItem(format_transfer_size(downloaded, total)))
             self.table.setItem(d['row'], 4, QTableWidgetItem(eta))
             self.table.setItem(d['row'], 5, QTableWidgetItem(speed))
-            if bar := self.table.cellWidget(d['row'], 3): bar.setValue(int(percent)); bar.setFormat(f"{int(percent)}%")
+            if bar := self.table.cellWidget(d['row'], 3):
+                bar.setValue(int(percent))
+                bar.setFormat(f"{status} {int(percent)}%")
 
-            if id in self.popups: self.popups[id].update_stats(percent, speed, eta, self.table.item(d['row'], 2).text())
+            if id in self.popups:
+                self.popups[id].update_stats(filename, percent, downloaded, total, speed, eta, status)
 
     def update_size(self, id, filename, size):
         if d := self.get_download_by_id(id): self.table.setItem(d['row'], 2, QTableWidgetItem(size))
 
     def update_status(self, id, status):
         if d := self.get_download_by_id(id):
-            if bar := self.table.cellWidget(d['row'], 3): bar.setFormat(status)
+            if bar := self.table.cellWidget(d['row'], 3):
+                if status == 'Completed':
+                    bar.setValue(100)
+                    bar.setFormat("Completed 100%")
+                elif status == 'Downloading' and bar.value() > 0:
+                    bar.setFormat(f"Downloading {bar.value()}%")
+                else:
+                    bar.setFormat(status)
 
     def download_finished(self, id, success, error_msg, filepath):
         if d := self.get_download_by_id(id):
@@ -1276,7 +1398,9 @@ class StratrumDownloadStudio(QMainWindow):
                     d['final_path'] = ''
                     d['thread'] = None
                     return
-                if bar: bar.setValue(100); bar.setFormat("Complete")
+                if bar: bar.setValue(100); bar.setFormat("Complete 100%")
+                completed_size = format_bytes(safe_path.stat().st_size)
+                self.table.setItem(d['row'], 2, QTableWidgetItem(format_transfer_size(completed_size, completed_size)))
                 if id in self.popups: self.popups[id].close(); del self.popups[id]
 
                 dlg = QMessageBox(self)

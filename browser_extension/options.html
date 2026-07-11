@@ -12,6 +12,7 @@
         button.danger:hover { background-color: #a80000; }
         #status { margin-top: 10px; color: green; font-weight: bold; }
         .note { font-size: 0.9em; color: #555; margin-bottom: 15px;}
+        .setting { margin: 16px 0; }
     </style>
 </head>
 <body>
@@ -24,6 +25,10 @@
     </div>
     <button id="save">Save Token</button>
     <button id="clear" class="danger">Clear Token</button>
+    <div class="setting">
+        <label><input type="checkbox" id="show-media-buttons" checked> Show download button on detected media</label>
+    </div>
+    <p class="note">Automatic media detection requires access to HTTP and HTTPS pages, so the browser will display a broad site-access permission warning. Stratrum observes only added video/audio elements and sends a URL only after you click its button.</p>
     <div id="status"></div>
     <script src="options.js"></script>
 </body>

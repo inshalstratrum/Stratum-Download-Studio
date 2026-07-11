@@ -1,57 +1,46 @@
-# Stratrum Download Studio Browser Extension
+# Stratrum Download Studio Browser Extensions
 
-This Manifest V3 extension adds **Download with Stratrum Download Studio** to the link, video, and audio context menus. The same source package is compatible with Google Chrome and Microsoft Edge.
+The Chromium Manifest V3 source in this directory supports Google Chrome and Microsoft Edge. It preserves right-click link/video/audio downloads and adds a user-controlled button beside detected HTML5 video and audio elements.
 
-## Security model
+## Why broad site access is requested
 
-- The extension talks only to `http://127.0.0.1:8000/add_download`.
-- Requests require the 64-character local token copied from desktop **Options > Browser Integration**.
-- The token is stored in browser-local extension storage and is not written to logs.
-- The desktop app pairs the first strictly valid extension origin only after the entire authenticated request passes validation.
-- Use **Reset Browser Pairing** in desktop Options before reinstalling the extension under a different origin.
+Automatic media detection requires a content script on `http://*/*` and `https://*/*`. Chrome and Edge therefore show a broad permission warning. The content script observes only added `VIDEO` and `AUDIO` elements. It does not read forms, cookies, browser history, or unrelated page text, and it sends no URL or telemetry until the user clicks a Stratrum button.
 
-## Load unpacked for development
+Direct HTTP/HTTPS media sources are sent directly. Blob, MediaSource, segmented, unavailable, and unsupported sources fall back to the current HTTP/HTTPS page URL so the desktop downloader can resolve them.
 
-Official Chrome Web Store and Edge Add-ons listings do not exist yet. Do not claim that store installation is available until those listings are published.
+The option **Show download button on detected media** is enabled by default and can be disabled in extension Options.
 
-### Chrome
+## Chrome and Edge development
 
-1. Open `chrome://extensions/`.
-2. Enable **Developer mode**.
-3. Select **Load unpacked**.
-4. Choose this `browser_extension` directory.
-5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
+1. Open `chrome://extensions/` or `edge://extensions/`.
+2. Enable Developer mode.
+3. Select **Load unpacked** once.
+4. Choose this `browser_extension/` directory directly. Do not extract a generated ZIP for development.
+5. Open extension Options, save the masked desktop token, and confirm the media-button option.
 
-### Microsoft Edge
+Do not install the unpacked source and an extracted submission package simultaneously. They receive different extension origins and create confusing duplicate buttons and pairings.
 
-1. Open `edge://extensions/`.
-2. Enable **Developer mode**.
-3. Select **Load unpacked**.
-4. Choose this `browser_extension` directory.
-5. Open the extension's **Options**, paste the desktop token, and select **Save Token**.
+An inactive Manifest V3 service worker is normal: Chromium sleeps it until an extension event needs it. Sleeping is not an error.
 
-## Packaged review builds
+## Connection messages
 
-Run `powershell -ExecutionPolicy Bypass -File browser_extension/package_extension.ps1` from the repository root. It produces:
+- Missing token: Options opens and the page shows where to save the token.
+- Desktop unavailable: the page shows a concise start-the-desktop-app message.
+- Pairing rejected: the page directs the user to reset browser pairing in desktop Options.
+- Tokens are never displayed in page messages or written to logs.
 
-- `extension_packages/stratrum-download-studio-chrome.zip`
-- `extension_packages/stratrum-download-studio-edge.zip`
+## Packaging
 
-These ZIP files are review/submission artifacts. Browser security policies still require normal store review or explicit developer-mode loading; the desktop app never attempts silent installation.
+Run `powershell -ExecutionPolicy Bypass -File browser_extension/package_extension.ps1` from the repository root. It creates separate Chrome, Edge, and Firefox ZIPs under ignored `extension_packages/`. ZIPs are for store submission/testing, not Chromium unpacked development. Packaging does not create tokens or random add-on IDs.
 
-## Store publication gate
+## Distribution limits
 
-Before changing the first-launch prompt from the manual workflow to direct installation:
+- Chrome consumer release requires publication through the Chrome Web Store.
+- Edge consumer release requires publication through Microsoft Edge Add-ons.
+- Firefox self-distribution requires a Mozilla-signed XPI; an unsigned development ZIP is not customer-ready.
+- Enterprise force-install policies are for managed organizations, not normal consumer installation.
+- A future desktop installer may offer a user-confirmed browser-extension suggestion after installation. It must not attempt silent consumer installation.
 
-1. Submit the Chrome ZIP to the Chrome Web Store.
-2. Submit the Edge ZIP to Microsoft Edge Add-ons.
-3. Complete each store's review process.
-4. Replace the official-store landing-page constants in `stratrum_download_studio.py` with the two approved listing URLs.
-5. Re-run the manual checklist in `docs/09_PHASE_2A3_MANUAL_TEST.md`.
+The desktop application never shows extension-install dialogs during normal startup. Browser Integration remains available manually from desktop Options.
 
-## Local connection checks
-
-- Start the desktop app before using the context menu.
-- Confirm the token was saved in extension Options.
-- If a reinstall changes the extension origin, reset browser pairing in the desktop app and send one fully valid link again.
-- If port 8000 is unavailable, exit the desktop app fully and confirm no stale process is listening before restarting.
+Up to six valid extension origins can be paired concurrently. Use **Remove Selected** to retire one browser origin or **Reset All Pairings** before a broad reinstall.

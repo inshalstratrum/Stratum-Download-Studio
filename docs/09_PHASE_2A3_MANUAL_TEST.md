@@ -1,38 +1,52 @@
-# Phase 2A.3 Manual Windows Smoke Test
+# Phase 2A.4 Windows Browser and Progress Checklist
 
-Status: not yet performed. Run these steps on Windows from the repository root after automated verification passes.
+Status: not yet performed. Use only media and URLs the tester owns or is authorized to download. Record the commit, Windows/browser versions, and result for every step.
 
-## Browser extension setup
+## Desktop startup and Chromium development installation
 
-Official Chrome Web Store and Microsoft Edge Add-ons listings are pending. Use the documented **Load unpacked** development workflow; do not attempt silent installation or bypass browser security controls.
+1. Start `python stratrum_download_studio.py`. Confirm no browser-store or extension-install dialog appears automatically.
+2. Open desktop **Options > Browser Integration** and confirm the masked token, paired-origin list, **Remove Selected**, **Reset All Pairings**, and **Open Extension Guide** are available.
+3. In Chrome, remove every older Stratrum copy. Open `chrome://extensions/`, enable Developer mode, select **Load unpacked** once, and choose the repository's `browser_extension/` directory directly.
+4. Do not extract or install a generated submission ZIP. Confirm only one unpacked Stratrum extension is installed.
+5. Open extension Options, save the desktop token, and keep **Show download button on detected media** enabled.
 
-1. Start the application with `python stratrum_download_studio.py`.
-2. On the optional first-launch prompt, confirm these choices are present: **Install Extension**, **Remind Me Later**, and **Do Not Ask Again**. For this test, choose **Remind Me Later**.
-3. Open desktop **Options > Browser Integration** and select **Copy Token**. Confirm the token remains masked in the app and is not printed in the terminal or logs.
-4. In Chrome, open `chrome://extensions/`; in Edge, open `edge://extensions/`.
-5. Enable Developer mode, choose **Load unpacked**, and select the repository's `browser_extension` directory. Repeat in both browsers when both are available.
-6. Open the extension Options page, paste the copied token, select **Save Token**, and clear the clipboard afterward.
+## Automatic media detection and right-click behavior
 
-## Pairing and request validation
+6. Open an authorized normal HTML5 video page over HTTP or HTTPS. Confirm one small Stratrum button appears near the video and no download starts automatically.
+7. Use DevTools on a disposable authorized test page to insert a new `<video controls src="https://authorized.example/sample.mp4">` element. Confirm exactly one new button appears without reloading.
+8. Click the button for a direct HTTP/HTTPS media source. Confirm the desktop add-download dialog receives the direct media URL.
+9. On an authorized blob/MediaSource/segmented player, click the button and confirm the desktop receives the page URL fallback.
+10. Disable **Show download button on detected media** in extension Options. Confirm existing buttons disappear and dynamically added media receives no button. Re-enable it and confirm detection resumes.
+11. Right-click an authorized link, video, and audio element and confirm **Download with Stratrum Download Studio** still sends each target.
 
-7. Right-click a normal HTTPS link and choose **Download with Stratrum Download Studio**. Confirm the desktop add-download dialog receives the link.
-8. Exit the desktop application from its tray **Exit** action. Start it again and send another normal HTTPS link; confirm the stored pairing still works.
-9. Open desktop **Options > Browser Integration**, select **Reset Browser Pairing**, confirm the action, then send one normal link from the intended extension. Confirm that the first fully valid request pairs again.
-10. In extension Options, temporarily save an incorrect 64-character hexadecimal token and send a link. Confirm the request is rejected and no download dialog opens. Restore the correct token. Confirm neither token is printed or logged.
+## Visible connection failures
 
-## Download and safe opening
+12. Clear the token in extension Options and click a media button. Confirm a visible message directs the user to extension Options and no token is shown or logged.
+13. Restore the token, fully exit the desktop app, and click again. Confirm a visible concise message says the desktop app is unavailable.
+14. Restart the desktop app, fill the six-origin pairing limit only in a disposable test configuration, and try another browser origin. Confirm the visible message directs the user to reset browser pairing.
+15. Confirm a sleeping Manifest V3 service worker is not reported as an error; it should wake on a context-menu click or media-button message.
 
-11. Download a harmless, small HTTPS file into a dedicated test directory. Confirm it completes and the history record retains that configured directory.
-12. Use **Open** on the harmless completed file. Confirm exactly that file opens.
-13. Use **Open Folder**. Confirm Explorer selects the completed file.
-14. Add or download a harmless dummy file with an executable extension such as `.exe` without running it. Confirm **Open** is unavailable or blocked, while **Open Folder** remains available for the valid file.
-15. If practical, edit a disposable copy of history so a completed path points outside its recorded directory. Restart and confirm both **Open** and **Open Folder** reject the manipulated path.
+## Multiple browsers and Firefox development
 
-## Conversion and shutdown
+16. Load `browser_extension/` unpacked once in Edge, save the same desktop token, and send an authorized URL from Chrome and Edge. Confirm both origins remain paired and both continue working.
+17. Run `browser_extension/package_extension.ps1`. In Firefox, open `about:debugging` > **This Firefox** > **Load Temporary Add-on** and select the generated Firefox ZIP.
+18. Save the token in Firefox Options and send an authorized URL. Confirm Chrome, Edge, and Firefox appear concurrently in desktop Browser Integration.
+19. Confirm documentation does not describe the unsigned Firefox ZIP as customer-ready; production self-distribution requires a Mozilla-signed XPI.
+20. Delete `extension_packages/` after testing.
 
-16. Place a harmless local media sample in the test download directory and ensure a converted filename such as `sample_converted.mp3` already exists.
-17. Convert the sample to that format. Confirm the existing file is not overwritten, the new output receives a unique name, success is shown only after the output exists, and **Open Folder** selects the converted output.
-18. Exit through the tray **Exit** action.
-19. In PowerShell run `Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue`. Confirm it returns no listening socket for the application.
+## Real download progress
 
-Record browser versions, application commit, each result, and any screenshots or failures in the test execution record. Do not mark this checklist performed until every applicable step has actually been executed.
+21. Start an authorized download with a known nonzero size. Confirm the main table and popup replace **Connecting...** with the actual filename.
+22. Confirm percentage, downloaded bytes/total bytes, numeric speed, ETA, and **Downloading** status change using real transfer data rather than timer-generated values.
+23. Test an authorized fragmented-media download and confirm progress remains bounded from 0% through 100% without jumping above 100.
+24. On successful completion, confirm both the main progress bar and last progress state reach 100%, the completed size reads downloaded/total, and existing safe Open/Open Folder behavior remains intact.
+
+## Persistence, reset, and shutdown
+
+25. Restart the app and confirm paired Chrome/Edge/Firefox origins persist.
+26. Remove one selected origin; confirm the other browsers still work. Re-pair the removed browser with a fully valid request.
+27. Choose **Reset All Pairings**, confirm the list clears, then re-pair one browser.
+28. Exit from the tray **Exit** action.
+29. Run `Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue` and confirm no application listener remains.
+
+Chrome consumer release requires Chrome Web Store publication, Edge consumer release requires Edge Add-ons publication, and enterprise force-install policies are not a normal-customer installation path. A future desktop installer may offer a user-confirmed extension suggestion after installation, but silent consumer installation is not permitted.
