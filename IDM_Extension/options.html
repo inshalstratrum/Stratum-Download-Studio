@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stratrum Extension Options</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 450px; }
+        .input-group { display: flex; margin: 10px 0; }
+        input { flex: 1; padding: 8px; }
+        button { padding: 10px 15px; background-color: #0078d7; color: white; border: none; cursor: pointer; margin-right: 5px;}
+        button:hover { background-color: #005a9e; }
+        button.danger { background-color: #d13438; }
+        button.danger:hover { background-color: #a80000; }
+        #status { margin-top: 10px; color: green; font-weight: bold; }
+        .note { font-size: 0.9em; color: #555; margin-bottom: 15px;}
+    </style>
+</head>
+<body>
+    <h2>Stratrum Download Studio</h2>
+    <p>Enter the Auth Token from the desktop application (Options -> Browser Integration):</p>
+    <p class="note">This token is strictly local and validates requests between your browser and the Stratrum desktop app. <strong>Never share this token with anyone.</strong></p>
+    <div class="input-group">
+        <input type="password" id="token" placeholder="Paste 64-character hex token here">
+        <button id="toggle-visibility" type="button">Show</button>
+    </div>
+    <button id="save">Save Token</button>
+    <button id="clear" class="danger">Clear Token</button>
+    <div id="status"></div>
+    <script src="options.js"></script>
+</body>
+</html>

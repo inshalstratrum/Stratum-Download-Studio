@@ -7,7 +7,37 @@ import socketserver
 import subprocess
 import re
 from datetime import datetime
+import secrets
+import tempfile
+import traceback
+import urllib.parse
 import yt_dlp
+import re
+def generate_safe_filename(save_dir, title, ext):
+    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 
+                'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
+    
+    title = re.sub(r'[\x00-\\/:*?"<>|]', '_', title)
+    title = title.strip('. ')
+    if not title:
+        title = "download"
+    elif title.upper() in reserved:
+        title = title + "_file"
+        
+    if len(title) > 200:
+        title = title[:200]
+        
+    filename = f"{title}.{ext}"
+    out_path = os.path.join(save_dir, filename)
+    
+    counter = 1
+    while os.path.exists(out_path):
+        filename = f"{title}_{counter}.{ext}"
+        out_path = os.path.join(save_dir, filename)
+        counter += 1
+        
+    return out_path
+
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QToolBar,
@@ -46,38 +76,194 @@ def get_ffmpeg_path():
     if os.path.exists(local_ffmpeg): return local_ffmpeg
     return 'ffmpeg'
 
+def get_appdata_dir():
+    appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+    d = os.path.join(appdata, 'Stratrum', 'DownloadStudio')
+    os.makedirs(os.path.join(d, 'config'), exist_ok=True)
+    os.makedirs(os.path.join(d, 'history'), exist_ok=True)
+    os.makedirs(os.path.join(d, 'logs'), exist_ok=True)
+    os.makedirs(os.path.join(d, 'temp'), exist_ok=True)
+    return d
+
+import string
+import threading
+import time
+
+def validate_token(token):
+    return isinstance(token, str) and len(token) == 64 and all(c in string.hexdigits for c in token)
+
+def get_or_create_config():
+    config_path = os.path.join(get_appdata_dir(), 'config', 'config.json')
+    config_dir = os.path.dirname(config_path)
+    os.makedirs(config_dir, exist_ok=True)
+    
+    config = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except Exception:
+            pass
+
+    token = config.get('auth_token', '')
+    if not validate_token(token):
+        token = secrets.token_hex(32)
+        config['auth_token'] = token
+        
+    allowed_origin = config.get('allowed_origin', '')
+    config['allowed_origin'] = allowed_origin
+
+    fd, tmp_path = tempfile.mkstemp(dir=config_dir, prefix="cfg_", suffix=".tmp")
+    with os.fdopen(fd, 'w') as f:
+        json.dump(config, f)
+    os.replace(tmp_path, config_path)
+    
+    return config
+
+def update_allowed_origin(origin):
+    global ALLOWED_ORIGIN
+    ALLOWED_ORIGIN = origin
+    config_path = os.path.join(get_appdata_dir(), 'config', 'config.json')
+    try:
+        with open(config_path, 'r') as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg['allowed_origin'] = origin
+    cfg['auth_token'] = AUTH_TOKEN
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(config_path), prefix="cfg_", suffix=".tmp")
+    with os.fdopen(fd, 'w') as f:
+        json.dump(cfg, f)
+    os.replace(tmp_path, config_path)
+
+config = get_or_create_config()
+AUTH_TOKEN = config['auth_token']
+ALLOWED_ORIGIN = config['allowed_origin']
+
+class RateLimiter:
+    def __init__(self, rate, per):
+        self.rate = rate
+        self.per = per
+        self.allowance = rate
+        self.last_check = time.monotonic()
+        self.lock = threading.Lock()
+
+    def allow(self):
+        with self.lock:
+            current = time.monotonic()
+            time_passed = current - self.last_check
+            self.last_check = current
+            self.allowance += time_passed * (self.rate / self.per)
+            if self.allowance > self.rate:
+                self.allowance = self.rate
+            if self.allowance < 1.0:
+                return False
+            self.allowance -= 1.0
+            return True
+
+rate_limiter = RateLimiter(5, 1.0)
+
+def validate_url(url):
+    if not url or len(url) > 2048:
+        return False, "URL missing or too long"
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ['http', 'https']:
+            return False, "Invalid URL scheme"
+        if not parsed.hostname:
+            return False, "Hostname required"
+        if parsed.username or parsed.password:
+            return False, "Embedded credentials not allowed"
+        return True, ""
+    except Exception:
+        return False, "Malformed URL"
+
+def validate_request(headers, rfile):
+    if not rate_limiter.allow():
+        return 429, b'{"error": "Too many requests"}'
+        
+    auth_header = headers.get('X-Stratrum-Auth', '')
+    if not secrets.compare_digest(auth_header, AUTH_TOKEN):
+        return 401, b'{"error": "Unauthorized"}'
+        
+    origin = headers.get('Origin', '')
+    global ALLOWED_ORIGIN
+    if not ALLOWED_ORIGIN and origin.startswith(('chrome-extension://', 'moz-extension://', 'extension://')):
+        update_allowed_origin(origin)
+    elif origin != ALLOWED_ORIGIN:
+        return 403, b'{"error": "Origin not allowed"}'
+        
+    if headers.get('Content-Type') != 'application/json':
+        return 415, b'{"error": "Unsupported Media Type"}'
+
+    try:
+        content_length = int(headers.get('Content-Length', -1))
+    except ValueError:
+        return 400, b'{"error": "Invalid Content-Length"}'
+
+    if content_length < 0:
+        return 400, b'{"error": "Missing or negative Content-Length"}'
+    if content_length > 16384:
+        return 413, b'{"error": "Payload too large"}'
+
+    try:
+        post_data = rfile.read(content_length)
+        data = json.loads(post_data.decode('utf-8'))
+    except UnicodeDecodeError:
+        return 400, b'{"error": "Invalid UTF-8"}'
+    except json.JSONDecodeError:
+        return 400, b'{"error": "Malformed JSON"}'
+        
+    url = data.get('url', '')
+    is_valid, err_msg = validate_url(url)
+    if not is_valid:
+        return 400, json.dumps({"error": err_msg}).encode('utf-8')
+        
+    return 200, url
+
+HISTORY_FILE = os.path.join(get_appdata_dir(), 'history', 'history.json')
+
 # ==========================================
 # 1. LOCAL SERVER
 # ==========================================
 class IDMServerHandler(http.server.BaseHTTPRequestHandler):
     def send_cors_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
+        origin = self.headers.get('Origin', '')
+        if origin == ALLOWED_ORIGIN or (not ALLOWED_ORIGIN and origin.startswith(('chrome-extension://', 'moz-extension://', 'extension://'))):
+            self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Stratrum-Auth')
+        
     def do_OPTIONS(self):
         self.send_response(200); self.send_cors_headers(); self.end_headers()
+        
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
-        try:
-            data = json.loads(post_data.decode('utf-8'))
-            url = data.get('url', '')
-            if url:
-                self.server.url_signal.emit(url)
-                self.send_response(200); self.send_cors_headers(); self.end_headers()
-                self.wfile.write(b'{"status": "success"}')
-            else:
-                self.send_response(400); self.send_cors_headers(); self.end_headers()
-        except:
-            self.send_response(500); self.send_cors_headers(); self.end_headers()
+        if self.path != '/add_download':
+            self.send_response(404); self.end_headers(); return
+            
+        status_code, result = validate_request(self.headers, self.rfile)
+        
+        self.send_response(status_code); self.send_cors_headers(); self.end_headers()
+        
+        if status_code == 200:
+            self.wfile.write(b'{"status": "success"}')
+            self.server.url_signal.emit(result)
+        else:
+            self.wfile.write(result)
+
+    def log_message(self, format, *args):
+        pass
 
 class ServerThread(QThread):
     url_received = pyqtSignal(str)
     def run(self):
-        socketserver.TCPServer.allow_reuse_address = True
-        self.httpd = socketserver.TCPServer(("127.0.0.1", 8000), IDMServerHandler)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), IDMServerHandler)
         self.httpd.url_signal = self.url_received
         self.httpd.serve_forever()
+    def stop(self):
+        if hasattr(self, 'httpd'):
+            self.httpd.shutdown()
+            self.httpd.server_close()
 
 # ==========================================
 # 2. ASYNC FORMAT FETCHER
@@ -168,14 +354,15 @@ class DownloadThread(QThread):
             else:
                 ydl_opts['merge_output_format'] = self.target_ext 
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([self.url])
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=True)
+                title = info.get('title', 'download')
                 
-            if self.target_ext in audio_formats and self.final_filename:
-                base, _ = os.path.splitext(self.final_filename)
-                self.final_filename = base + f".{self.target_ext}"
-            elif self.final_filename:
-                base, _ = os.path.splitext(self.final_filename)
-                self.final_filename = base + f".{self.target_ext}"
+            safe_final_path = generate_safe_filename(os.path.dirname(self.outtmpl), title, self.target_ext)
+            
+            if self.final_filename and os.path.exists(self.final_filename):
+                os.replace(self.final_filename, safe_final_path)
+                self.final_filename = safe_final_path
 
             if os.path.exists(self.final_filename):
                 self.size_updated.emit(self.id, os.path.basename(self.final_filename), self.format_size(os.path.getsize(self.final_filename)))
@@ -187,7 +374,7 @@ class DownloadThread(QThread):
         except Exception as e: self.status.emit(self.id, 'Error'); self.finished.emit(self.id, False, str(e), "")
 
 # ==========================================
-# 4. EXACT IDM GUI REPLICAS
+# 4. STRATRUM DOWNLOAD STUDIO UI
 # ==========================================
 class DownloadFileInfoDialog(QDialog):
     def __init__(self, parent=None, prefill_url=""):
@@ -420,7 +607,7 @@ class DownloadProgressPopup(QDialog):
 class InshalDM(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Inshal DM - Professional Download Manager")
+        self.setWindowTitle("Stratrum Download Studio")
         self.setGeometry(100, 100, 1150, 680)
         self.downloads = []; self.popups = {} 
         self.init_ui()
@@ -435,7 +622,7 @@ class InshalDM(QMainWindow):
         self.setWindowIcon(icon)
         
         tray_menu = QMenu()
-        tray_menu.addAction("Show Inshal DM", self.show_normal)
+        tray_menu.addAction("Show Stratrum Download Studio", self.show_normal)
         tray_menu.addSeparator()
         tray_menu.addAction("Exit", self.force_quit)
         self.tray_icon.setContextMenu(tray_menu)
@@ -453,7 +640,7 @@ class InshalDM(QMainWindow):
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange and self.windowState() & Qt.WindowState.WindowMinimized:
             event.accept(); self.hide()
-            self.tray_icon.showMessage("Inshal DM", "Running in background.", QSystemTrayIcon.MessageIcon.Information, 1500)
+            self.tray_icon.showMessage("Stratrum Download Studio", "Running in background.", QSystemTrayIcon.MessageIcon.Information, 1500)
             return
         super().changeEvent(event)
 
@@ -461,7 +648,7 @@ class InshalDM(QMainWindow):
         event.ignore(); self.hide()
 
     def force_quit(self):
-        self.save_downloads_to_file(); QApplication.quit()
+        self.save_downloads_to_file(); self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()
 
     def save_downloads_to_file(self):
         save_data = []
@@ -479,12 +666,30 @@ class InshalDM(QMainWindow):
                     'url': self.table.item(row, 7).text() if self.table.item(row, 7) else "",
                     'id': d_info['id'], 'outtmpl': d_info['outtmpl'], 'format': d_info['format'], 'ext': d_info['ext'], 'final_path': d_info.get('final_path', '')
                 })
-        with open('inshaldm_history.json', 'w') as f: json.dump(save_data, f)
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(HISTORY_FILE), prefix="hist_", suffix=".tmp")
+            with os.fdopen(fd, 'w') as f:
+                json.dump(save_data, f)
+            os.replace(tmp_path, HISTORY_FILE)
+        except Exception as e:
+            print(f"Error saving history: {e}")
 
     def load_downloads_from_file(self):
-        if not os.path.exists('inshaldm_history.json'): return
+        old_history = 'inshaldm_history.json'
+        if os.path.exists(old_history) and not os.path.exists(HISTORY_FILE):
+            try:
+                with open(old_history, 'r') as f:
+                    data = f.read()
+                fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(HISTORY_FILE))
+                with os.fdopen(fd, 'w') as f:
+                    f.write(data)
+                os.replace(tmp_path, HISTORY_FILE)
+            except Exception as e:
+                print(f"Migration error: {e}")
+
+        if not os.path.exists(HISTORY_FILE): return
         try:
-            with open('inshaldm_history.json', 'r') as f: save_data = json.load(f)
+            with open(HISTORY_FILE, 'r') as f: save_data = json.load(f)
             for item in save_data:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
@@ -506,9 +711,17 @@ class InshalDM(QMainWindow):
                     'id': item.get('id', ''), 'url': item.get('url', ''), 'outtmpl': item.get('outtmpl', ''),
                     'format': item.get('format', ''), 'ext': item.get('ext', ''), 'thread': None, 'row': row, 'final_path': item.get('final_path', '')
                 })
-        except: pass
+        except json.JSONDecodeError:
+            print("History file is corrupted. Starting fresh.")
+            os.replace(HISTORY_FILE, HISTORY_FILE + ".corrupt")
+        except Exception as e:
+            print(f"Failed to load history: {e}")
 
-    def show_dummy_msg(self, title): QMessageBox.information(self, "Inshal DM", f"'{title}' feature coming soon!")
+    def show_dummy_msg(self, title):
+        if title == "Options":
+            QMessageBox.information(self, "Browser Integration", f"Your Extension Auth Token is:\n\n{AUTH_TOKEN}\n\nPaste this into the Stratrum Extension Options.")
+        else:
+            QMessageBox.information(self, "Stratrum Download Studio", f"'{title}' feature coming soon!")
 
     def init_ui(self):
         menubar = self.menuBar()
@@ -600,15 +813,29 @@ class InshalDM(QMainWindow):
         menu.addAction("Remove").triggered.connect(self.delete_download)
         menu.exec(self.table.viewport().mapToGlobal(position))
 
+    def is_dangerous_file(self, filepath):
+        unsafe_exts = {'.exe', '.msi', '.bat', '.cmd', '.com', '.scr', '.ps1', '.vbs', '.js', '.jar', '.lnk', '.reg'}
+        _, ext = os.path.splitext(filepath)
+        return ext.lower() in unsafe_exts
+
     def open_selected_file(self):
         for idx in self.table.selectionModel().selectedRows():
             if d := next((d for d in self.downloads if d['row'] == idx.row()), None):
-                if d.get('final_path') and os.path.exists(d['final_path']): os.startfile(d['final_path'])
+                if d.get('final_path') and os.path.exists(d['final_path']):
+                    if self.is_dangerous_file(d['final_path']):
+                        QMessageBox.warning(self, "Security Warning", "Execution of downloaded dangerous file types is disabled for your safety. Use 'Open Folder' instead.")
+                        return
+                    os.startfile(d['final_path'])
 
     def open_selected_folder(self):
         for idx in self.table.selectionModel().selectedRows():
             if d := next((d for d in self.downloads if d['row'] == idx.row()), None):
-                if d.get('final_path') and os.path.exists(d['final_path']): subprocess.Popen(f'explorer /select,"{os.path.normpath(d["final_path"])}"')
+                if d.get('final_path'):
+                    norm_path = os.path.normpath(d["final_path"])
+                    if os.path.exists(norm_path):
+                        subprocess.Popen(['explorer', '/select,', norm_path])
+                    else:
+                        QMessageBox.warning(self, "Error", "File does not exist.")
 
     def share_link(self):
         if selected := self.table.selectionModel().selectedRows():
@@ -639,11 +866,12 @@ class InshalDM(QMainWindow):
 
     def start_new_download(self, url, save_dir, quality_idx, target_ext):
         download_id = uuid.uuid4().hex
-        outtmpl = os.path.join(save_dir, '%(title)s.%(ext)s')
         
         if target_ext in ["MP3", "WAV", "FLAC", "M4A"]: format_str = 'bestaudio/best'
         elif target_ext == "MP4": format_str = {0: 'bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 1: 'bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 2: 'bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 3: 'bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best'}.get(quality_idx, 'best')
         else: format_str = {0: 'bestvideo+bestaudio/best', 1: 'bestvideo[height<=1080]+bestaudio/best', 2: 'bestvideo[height<=720]+bestaudio/best', 3: 'bestvideo[height<=480]+bestaudio/best'}.get(quality_idx, 'best')
+
+        outtmpl = os.path.join(save_dir, '%(title)s.%(ext)s') # yt-dlp will handle template, but we post-process filename
 
         row = self.table.rowCount()
         self.table.insertRow(row)
@@ -708,8 +936,11 @@ class InshalDM(QMainWindow):
                 dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
                 dlg.exec()
                 
-                if dlg.clickedButton() == open_btn: os.startfile(filepath)
-                elif dlg.clickedButton() == folder_btn: subprocess.Popen(f'explorer /select,"{os.path.normpath(filepath)}"')
+                if dlg.clickedButton() == open_btn:
+                    if self.check_safe_file(filepath):
+                        os.startfile(filepath)
+                elif dlg.clickedButton() == folder_btn:
+                    subprocess.Popen(['explorer', '/select,', os.path.normpath(filepath)])
             else:
                 if bar: bar.setFormat(f"Error: {error_msg}")
             d['thread'] = None
