@@ -30,16 +30,16 @@ async function sendToDesktopApp(url) {
 
     let response = await fetch("http://127.0.0.1:8000/add_download", {
       method: "POST",
-      headers: { 
+      headers: {
           "Content-Type": "application/json",
           "X-Stratrum-Auth": token
       },
       body: JSON.stringify({ url: url }),
       signal: controller.signal
     });
-    
+
     clearTimeout(timeoutId);
-    
+
     if (!response.ok) {
         console.error("Desktop app rejected request:", response.status);
     } else {

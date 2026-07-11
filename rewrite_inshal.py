@@ -17,7 +17,7 @@ def get_or_create_config():
     config_path = os.path.join(get_appdata_dir(), 'config', 'config.json')
     config_dir = os.path.dirname(config_path)
     os.makedirs(config_dir, exist_ok=True)
-    
+
     config = {}
     if os.path.exists(config_path):
         try:
@@ -30,7 +30,7 @@ def get_or_create_config():
     if not validate_token(token):
         token = secrets.token_hex(32)
         config['auth_token'] = token
-        
+
     allowed_origin = config.get('allowed_origin', '')
     config['allowed_origin'] = allowed_origin
 
@@ -38,7 +38,7 @@ def get_or_create_config():
     with os.fdopen(fd, 'w') as f:
         json.dump(config, f)
     os.replace(tmp_path, config_path)
-    
+
     return config
 
 def update_allowed_origin(origin):
@@ -102,18 +102,18 @@ def validate_url(url):
 def validate_request(headers, rfile):
     if not rate_limiter.allow():
         return 429, b'{"error": "Too many requests"}'
-        
+
     auth_header = headers.get('X-Stratrum-Auth', '')
     if not secrets.compare_digest(auth_header, AUTH_TOKEN):
         return 401, b'{"error": "Unauthorized"}'
-        
+
     origin = headers.get('Origin', '')
     global ALLOWED_ORIGIN
     if not ALLOWED_ORIGIN and origin.startswith(('chrome-extension://', 'moz-extension://', 'extension://')):
         update_allowed_origin(origin)
     elif origin != ALLOWED_ORIGIN:
         return 403, b'{"error": "Origin not allowed"}'
-        
+
     if headers.get('Content-Type') != 'application/json':
         return 415, b'{"error": "Unsupported Media Type"}'
 
@@ -134,12 +134,12 @@ def validate_request(headers, rfile):
         return 400, b'{"error": "Invalid UTF-8"}'
     except json.JSONDecodeError:
         return 400, b'{"error": "Malformed JSON"}'
-        
+
     url = data.get('url', '')
     is_valid, err_msg = validate_url(url)
     if not is_valid:
         return 400, json.dumps({"error": err_msg}).encode('utf-8')
-        
+
     return 200, url
 '''
 
@@ -158,18 +158,18 @@ server_replacement = '''class IDMServerHandler(http.server.BaseHTTPRequestHandle
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Stratrum-Auth')
-        
+
     def do_OPTIONS(self):
         self.send_response(200); self.send_cors_headers(); self.end_headers()
-        
+
     def do_POST(self):
         if self.path != '/add_download':
             self.send_response(404); self.end_headers(); return
-            
+
         status_code, result = validate_request(self.headers, self.rfile)
-        
+
         self.send_response(status_code); self.send_cors_headers(); self.end_headers()
-        
+
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
             self.server.url_signal.emit(result)
@@ -239,35 +239,35 @@ content = content.replace("['-y', '-i'", "['-i'")
 # 5. Safe Filename generation
 safe_name_func = '''import re
 def generate_safe_filename(save_dir, title, ext):
-    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 
+    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
                 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
-    
+
     title = re.sub(r'[\x00-\x1f\\\\/:*?"<>|]', '_', title)
     title = title.strip('. ')
     if not title:
         title = "download"
     elif title.upper() in reserved:
         title = title + "_file"
-        
+
     if len(title) > 200:
         title = title[:200]
-        
+
     filename = f"{title}.{ext}"
     out_path = os.path.join(save_dir, filename)
-    
+
     counter = 1
     while os.path.exists(out_path):
         filename = f"{title}_{counter}.{ext}"
         out_path = os.path.join(save_dir, filename)
         counter += 1
-        
+
     return out_path
 '''
 content = content.replace("import yt_dlp", "import yt_dlp\n" + safe_name_func)
 
 # Fix start_new_download to use safe filename
 download_opts = '''download_id = uuid.uuid4().hex
-        
+
         if target_ext in ["MP3", "WAV", "FLAC", "M4A"]: format_str = 'bestaudio/best'
         elif target_ext == "MP4": format_str = {0: 'bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 1: 'bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 2: 'bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 3: 'bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best'}.get(quality_idx, 'best')
         else: format_str = {0: 'bestvideo+bestaudio/best', 1: 'bestvideo[height<=1080]+bestaudio/best', 2: 'bestvideo[height<=720]+bestaudio/best', 3: 'bestvideo[height<=480]+bestaudio/best'}.get(quality_idx, 'best')
@@ -275,7 +275,7 @@ download_opts = '''download_id = uuid.uuid4().hex
         outtmpl = os.path.join(save_dir, '%(title)s.%(ext)s') # yt-dlp will handle template, but we post-process filename'''
 content = content.replace('''download_id = uuid.uuid4().hex
         outtmpl = os.path.join(save_dir, '%(title)s.%(ext)s')
-        
+
         if target_ext in ["MP3", "WAV", "FLAC", "M4A"]: format_str = 'bestaudio/best'
         elif target_ext == "MP4": format_str = {0: 'bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 1: 'bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 2: 'bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 3: 'bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best'}.get(quality_idx, 'best')
         else: format_str = {0: 'bestvideo+bestaudio/best', 1: 'bestvideo[height<=1080]+bestaudio/best', 2: 'bestvideo[height<=720]+bestaudio/best', 3: 'bestvideo[height<=480]+bestaudio/best'}.get(quality_idx, 'best')''', download_opts)
@@ -283,9 +283,9 @@ content = content.replace('''download_id = uuid.uuid4().hex
 download_thread_run = '''            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
                 title = info.get('title', 'download')
-                
+
             safe_final_path = generate_safe_filename(os.path.dirname(self.outtmpl), title, self.target_ext)
-            
+
             if self.final_filename and os.path.exists(self.final_filename):
                 os.replace(self.final_filename, safe_final_path)
                 self.final_filename = safe_final_path

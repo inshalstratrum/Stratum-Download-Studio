@@ -3,7 +3,7 @@
 ## Stage 1: Stabilization & Security (Phase 2)
 1. **Clean Codebase:** Delete `main.py`, `uiux_reference`, and redundant `idm_history.json`.
 2. **Path Resolution:** Migrate `inshaldm_history.json` to `%APPDATA%\StratrumDownloadStudio\history.json`.
-3. **Security Fixes:** 
+3. **Security Fixes:**
    - Secure the local TCP server (remove `Access-Control-Allow-Origin: *` or implement an auth token).
    - Fix command injection in `subprocess.Popen` by using list arguments: `['explorer', '/select,', path]`.
    - Add a warning prompt before executing files via `os.startfile()`.

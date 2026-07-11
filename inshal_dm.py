@@ -14,28 +14,28 @@ import urllib.parse
 import yt_dlp
 import re
 def generate_safe_filename(save_dir, title, ext):
-    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 
+    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
                 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
-    
+
     title = re.sub(r'[\x00-\\/:*?"<>|]', '_', title)
     title = title.strip('. ')
     if not title:
         title = "download"
     elif title.upper() in reserved:
         title = title + "_file"
-        
+
     if len(title) > 200:
         title = title[:200]
-        
+
     filename = f"{title}.{ext}"
     out_path = os.path.join(save_dir, filename)
-    
+
     counter = 1
     while os.path.exists(out_path):
         filename = f"{title}_{counter}.{ext}"
         out_path = os.path.join(save_dir, filename)
         counter += 1
-        
+
     return out_path
 
 
@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QToolBar,
     QDialog, QLineEdit, QLabel, QFileDialog, QMessageBox,
     QProgressBar, QSystemTrayIcon, QMenu, QStyle, QSpinBox, QVBoxLayout,
-    QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem, 
+    QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem,
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
     QWidget, QGridLayout, QCheckBox
 )
@@ -51,7 +51,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap
 
 # ==========================================
-# MODERN UI STYLESHEET 
+# MODERN UI STYLESHEET
 # ==========================================
 MODERN_STYLE = """
 QMainWindow, QDialog { background-color: #f0f0f0; color: #000000; }
@@ -96,7 +96,7 @@ def get_or_create_config():
     config_path = os.path.join(get_appdata_dir(), 'config', 'config.json')
     config_dir = os.path.dirname(config_path)
     os.makedirs(config_dir, exist_ok=True)
-    
+
     config = {}
     if os.path.exists(config_path):
         try:
@@ -109,7 +109,7 @@ def get_or_create_config():
     if not validate_token(token):
         token = secrets.token_hex(32)
         config['auth_token'] = token
-        
+
     allowed_origin = config.get('allowed_origin', '')
     config['allowed_origin'] = allowed_origin
 
@@ -117,7 +117,7 @@ def get_or_create_config():
     with os.fdopen(fd, 'w') as f:
         json.dump(config, f)
     os.replace(tmp_path, config_path)
-    
+
     return config
 
 def update_allowed_origin(origin):
@@ -179,21 +179,22 @@ def validate_url(url):
         return False, "Malformed URL"
 
 def validate_request(headers, rfile):
-    if not rate_limiter.allow():
-        return 429, b'{"error": "Too many requests"}'
-        
     auth_header = headers.get('X-Stratrum-Auth', '')
     if not secrets.compare_digest(auth_header, AUTH_TOKEN):
         return 401, b'{"error": "Unauthorized"}'
-        
+
     origin = headers.get('Origin', '')
     global ALLOWED_ORIGIN
     if not ALLOWED_ORIGIN and origin.startswith(('chrome-extension://', 'moz-extension://', 'extension://')):
         update_allowed_origin(origin)
     elif origin != ALLOWED_ORIGIN:
         return 403, b'{"error": "Origin not allowed"}'
-        
-    if headers.get('Content-Type') != 'application/json':
+
+    if not rate_limiter.allow():
+        return 429, b'{"error": "Too many requests"}'
+
+    content_type = headers.get('Content-Type', '').lower()
+    if not content_type.startswith('application/json'):
         return 415, b'{"error": "Unsupported Media Type"}'
 
     try:
@@ -213,12 +214,12 @@ def validate_request(headers, rfile):
         return 400, b'{"error": "Invalid UTF-8"}'
     except json.JSONDecodeError:
         return 400, b'{"error": "Malformed JSON"}'
-        
+
     url = data.get('url', '')
     is_valid, err_msg = validate_url(url)
     if not is_valid:
         return 400, json.dumps({"error": err_msg}).encode('utf-8')
-        
+
     return 200, url
 
 HISTORY_FILE = os.path.join(get_appdata_dir(), 'history', 'history.json')
@@ -233,18 +234,18 @@ class IDMServerHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Stratrum-Auth')
-        
+
     def do_OPTIONS(self):
         self.send_response(200); self.send_cors_headers(); self.end_headers()
-        
+
     def do_POST(self):
         if self.path != '/add_download':
             self.send_response(404); self.end_headers(); return
-            
+
         status_code, result = validate_request(self.headers, self.rfile)
-        
+
         self.send_response(status_code); self.send_cors_headers(); self.end_headers()
-        
+
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
             self.server.url_signal.emit(result)
@@ -281,18 +282,31 @@ class FormatFetcherThread(QThread):
             self.error_occurred.emit(str(e))
 
 class ConvertThread(QThread):
-    finished = pyqtSignal(str, bool, str)
+    finished = pyqtSignal(str, bool, str, str)
     def __init__(self, row_id, input_file, target_ext):
         super().__init__()
         self.row_id = row_id; self.input_file = input_file; self.target_ext = target_ext
     def run(self):
         try:
-            base, _ = os.path.splitext(self.input_file)
-            output_file = f"{base}_converted.{self.target_ext}"
-            process = subprocess.run([get_ffmpeg_path(), '-y', '-i', self.input_file, output_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
-            if process.returncode == 0: self.finished.emit(self.row_id, True, "Converted!")
-            else: self.finished.emit(self.row_id, False, "Conversion Failed")
-        except Exception as e: self.finished.emit(self.row_id, False, str(e))
+            if not os.path.exists(self.input_file):
+                self.finished.emit(self.row_id, False, "Input file does not exist", "")
+                return
+
+            valid_exts = {'mp4', 'mkv', 'avi', 'mov', 'webm', 'mp3', 'wav', 'flac', 'm4a'}
+            if self.target_ext.lower() not in valid_exts:
+                self.finished.emit(self.row_id, False, f"Unsupported target format: {self.target_ext}", "")
+                return
+
+            base, ext_old = os.path.splitext(self.input_file)
+            title = os.path.basename(base)
+            save_dir = os.path.dirname(self.input_file)
+
+            output_file = generate_safe_filename(save_dir, title + "_converted", self.target_ext)
+
+            process = subprocess.run([get_ffmpeg_path(), '-i', self.input_file, output_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+            if process.returncode == 0: self.finished.emit(self.row_id, True, "Converted!", output_file)
+            else: self.finished.emit(self.row_id, False, "Conversion Failed", "")
+        except Exception as e: self.finished.emit(self.row_id, False, str(e), "")
 
 # ==========================================
 # 3. DOWNLOAD ENGINE ("THE SPEED GRABBER")
@@ -302,7 +316,7 @@ class PauseException(Exception): pass
 class DownloadThread(QThread):
     progress = pyqtSignal(str, str, float, str, str)
     status = pyqtSignal(str, str)
-    finished = pyqtSignal(str, bool, str, str) 
+    finished = pyqtSignal(str, bool, str, str)
     size_updated = pyqtSignal(str, str, str)
 
     def __init__(self, id, url, outtmpl, format_str, target_ext):
@@ -324,10 +338,10 @@ class DownloadThread(QThread):
             percent_clean = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_percent_str', '0%').strip('%'))
             try: percent = float(percent_clean)
             except ValueError: percent = 0.0
-            
+
             speed = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_speed_str', 'N/A'))
             eta = re.sub(r'\x1b\[[0-9;]*m', '', d.get('_eta_str', 'N/A'))
-            
+
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total_bytes: self.size_updated.emit(self.id, filename, self.format_size(total_bytes))
             self.progress.emit(self.id, filename, percent, speed, eta)
@@ -347,19 +361,19 @@ class DownloadThread(QThread):
                 'concurrent_fragment_downloads': 10,
                 'buffersize': 1024 * 32,
             }
-            
+
             audio_formats = ['mp3', 'wav', 'flac', 'm4a']
             if self.target_ext in audio_formats:
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': self.target_ext, 'preferredquality': '192'}]
             else:
-                ydl_opts['merge_output_format'] = self.target_ext 
+                ydl_opts['merge_output_format'] = self.target_ext
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
                 title = info.get('title', 'download')
-                
+
             safe_final_path = generate_safe_filename(os.path.dirname(self.outtmpl), title, self.target_ext)
-            
+
             if self.final_filename and os.path.exists(self.final_filename):
                 os.replace(self.final_filename, safe_final_path)
                 self.final_filename = safe_final_path
@@ -369,7 +383,7 @@ class DownloadThread(QThread):
 
             self.status.emit(self.id, 'Completed')
             self.finished.emit(self.id, True, '', self.final_filename)
-            
+
         except PauseException: self.status.emit(self.id, 'Paused')
         except Exception as e: self.status.emit(self.id, 'Error'); self.finished.emit(self.id, False, str(e), "")
 
@@ -381,28 +395,28 @@ class DownloadFileInfoDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Download File Info")
         self.setFixedSize(650, 300)
-        
+
         layout = QVBoxLayout()
-        
+
         # Grid layout for exact spacing
         grid = QGridLayout()
-        
+
         # 1. URL
         grid.addWidget(QLabel("URL"), 0, 0)
         self.url_edit = QLineEdit(prefill_url)
         grid.addWidget(self.url_edit, 0, 1, 1, 4)
-        
+
         # 2. Category & Format
         grid.addWidget(QLabel("Category"), 1, 0)
         self.category_combo = QComboBox()
         self.category_combo.addItems(["General", "Compressed", "Documents", "Music", "Programs", "Video"])
         grid.addWidget(self.category_combo, 1, 1, 1, 2)
-        
+
         grid.addWidget(QLabel("Format:"), 1, 3, alignment=Qt.AlignmentFlag.AlignRight)
         self.ext_combo = QComboBox()
         self.ext_combo.addItems(["MP4", "MKV", "AVI", "MOV", "WEBM", "MP3", "WAV", "FLAC", "M4A"])
         grid.addWidget(self.ext_combo, 1, 4)
-        
+
         # 3. Save As
         grid.addWidget(QLabel("Save As"), 2, 0)
         self.save_dir_edit = QLineEdit(os.path.join(os.path.expanduser('~'), 'Downloads'))
@@ -411,19 +425,19 @@ class DownloadFileInfoDialog(QDialog):
         browse_btn.setFixedWidth(40)
         browse_btn.clicked.connect(self.browse_dir)
         grid.addWidget(browse_btn, 2, 4)
-        
+
         # 4. Remember Path Checkbox
         self.remember_cb = QCheckBox("Remember this path for category")
         self.remember_cb.setChecked(True)
         grid.addWidget(self.remember_cb, 3, 1, 1, 4)
-        
+
         # 5. Description
         grid.addWidget(QLabel("Description"), 4, 0)
         self.desc_edit = QLineEdit()
         grid.addWidget(self.desc_edit, 4, 1, 1, 4)
-        
+
         layout.addLayout(grid)
-        
+
         # Size Preview
         self.info_lbl = QLabel("Fetching File Data...")
         self.info_lbl.setStyleSheet("color: #0078d7; font-weight: bold; margin-top: 10px;")
@@ -433,18 +447,18 @@ class DownloadFileInfoDialog(QDialog):
         # Buttons (Bottom)
         btn_layout = QHBoxLayout()
         self.dl_later_btn = QPushButton("Download Later")
-        self.dl_later_btn.clicked.connect(self.reject) 
+        self.dl_later_btn.clicked.connect(self.reject)
         self.start_btn = QPushButton("Start Download")
         self.start_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
-        
+
         btn_layout.addWidget(self.dl_later_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
-        
+
         self.setLayout(layout)
 
         self.ext_combo.currentTextChanged.connect(self.on_ext_changed)
@@ -492,10 +506,10 @@ class DownloadProgressPopup(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         self.details_open = False
         self.filename = filename
-        
+
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
-        
+
         # Tabs
         self.tabs = QTabWidget()
         status_tab = QWidget()
@@ -504,64 +518,64 @@ class DownloadProgressPopup(QDialog):
         self.tabs.addTab(status_tab, "Download status")
         self.tabs.addTab(speed_tab, "Speed Limiter")
         self.tabs.addTab(options_tab, "Options on completion")
-        
-        # Status Tab Layout (Exact IDM replica)
+
+        # Status Tab Layout
         status_layout = QFormLayout()
         status_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        
+
         url_lbl = QLineEdit(url)
         url_lbl.setReadOnly(True)
         url_lbl.setStyleSheet("border: none; background: transparent;")
         status_layout.addRow("", url_lbl)
-        
+
         self.status_lbl = QLabel("Receiving data...")
         self.status_lbl.setStyleSheet("color: blue;")
         status_layout.addRow("Status", self.status_lbl)
-        
+
         self.size_lbl = QLabel("Calculating...")
         status_layout.addRow("File size", self.size_lbl)
-        
+
         self.downloaded_lbl = QLabel("0 MB (0%)")
         status_layout.addRow("Downloaded", self.downloaded_lbl)
-        
+
         self.speed_lbl = QLabel("0 MB/sec")
         status_layout.addRow("Transfer rate", self.speed_lbl)
-        
+
         self.time_lbl = QLabel("Calculating...")
         status_layout.addRow("Time left", self.time_lbl)
-        
+
         status_layout.addRow("Resume capability", QLabel("Yes"))
         status_tab.setLayout(status_layout)
-        
+
         main_layout.addWidget(self.tabs)
-        
+
         # Progress Bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(15)
         main_layout.addWidget(self.progress_bar)
-        
+
         # Action Buttons
         btn_layout = QHBoxLayout()
         self.details_btn = QPushButton("Show details >>")
         self.details_btn.clicked.connect(self.toggle_details)
-        
+
         self.pause_btn = QPushButton("Pause")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.reject)
-        
+
         btn_layout.addWidget(self.details_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(self.pause_btn)
         btn_layout.addWidget(self.cancel_btn)
         main_layout.addLayout(btn_layout)
-        
+
         # Details Panel (Connections Table)
         self.details_widget = QWidget()
         det_layout = QVBoxLayout()
         det_layout.addWidget(QLabel("Start positions and download progress by connections"))
-        
+
         self.conn_table = QTableWidget(4, 3) # Dummy 4 connections to mimic UI
         self.conn_table.setHorizontalHeaderLabels(["N.", "Downloaded", "Info"])
         self.conn_table.verticalHeader().setVisible(False)
@@ -573,11 +587,11 @@ class DownloadProgressPopup(QDialog):
             self.conn_table.setItem(i, 0, QTableWidgetItem(str(i+1)))
             self.conn_table.setItem(i, 1, QTableWidgetItem("Receiving..."))
             self.conn_table.setItem(i, 2, QTableWidgetItem("Downloading data"))
-            
+
         det_layout.addWidget(self.conn_table)
         self.details_widget.setLayout(det_layout)
         self.details_widget.hide()
-        
+
         main_layout.addWidget(self.details_widget)
         self.setLayout(main_layout)
 
@@ -609,10 +623,10 @@ class InshalDM(QMainWindow):
         super().__init__()
         self.setWindowTitle("Stratrum Download Studio")
         self.setGeometry(100, 100, 1150, 680)
-        self.downloads = []; self.popups = {} 
+        self.downloads = []; self.popups = {}
         self.init_ui()
-        self.init_tray_icon() 
-        self.load_downloads_from_file() 
+        self.init_tray_icon()
+        self.load_downloads_from_file()
         self.init_server()
 
     def init_tray_icon(self):
@@ -620,7 +634,7 @@ class InshalDM(QMainWindow):
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
         self.tray_icon.setIcon(icon)
         self.setWindowIcon(icon)
-        
+
         tray_menu = QMenu()
         tray_menu.addAction("Show Stratrum Download Studio", self.show_normal)
         tray_menu.addSeparator()
@@ -696,17 +710,17 @@ class InshalDM(QMainWindow):
                 self.table.setItem(row, 0, QTableWidgetItem(item.get('filename', '')))
                 self.table.setItem(row, 1, QTableWidgetItem(""))
                 self.table.setItem(row, 2, QTableWidgetItem(item.get('size', '')))
-                
+
                 pb = QProgressBar(); pb.setRange(0, 100); status = item.get('status', '')
                 if "Downloading" in status or "Paused" in status: pb.setValue(0); pb.setFormat("Paused")
                 else: pb.setValue(100); pb.setFormat(status)
-                    
+
                 self.table.setCellWidget(row, 3, pb)
                 self.table.setItem(row, 4, QTableWidgetItem(item.get('eta', '')))
                 self.table.setItem(row, 5, QTableWidgetItem(item.get('speed', '')))
                 self.table.setItem(row, 6, QTableWidgetItem(item.get('date', '')))
                 self.table.setItem(row, 7, QTableWidgetItem(item.get('url', '')))
-                
+
                 self.downloads.append({
                     'id': item.get('id', ''), 'url': item.get('url', ''), 'outtmpl': item.get('outtmpl', ''),
                     'format': item.get('format', ''), 'ext': item.get('ext', ''), 'thread': None, 'row': row, 'final_path': item.get('final_path', '')
@@ -730,16 +744,16 @@ class InshalDM(QMainWindow):
         tasks_menu.addAction("Add batch download").triggered.connect(lambda: self.show_dummy_msg("Batch Download"))
         tasks_menu.addAction("Run site grabber").triggered.connect(lambda: self.show_dummy_msg("Site Grabber"))
         tasks_menu.addSeparator(); tasks_menu.addAction("Exit").triggered.connect(self.force_quit)
-        
+
         file_menu = menubar.addMenu("File")
         file_menu.addAction("Stop Download").triggered.connect(self.pause_download)
         file_menu.addAction("Remove").triggered.connect(self.delete_download)
         file_menu.addAction("Download Now").triggered.connect(self.resume_download)
-        
+
         dl_menu = menubar.addMenu("Downloads")
         dl_menu.addAction("Pause All").triggered.connect(self.pause_download)
         dl_menu.addAction("Delete All Completed").triggered.connect(self.delete_completed)
-        
+
         menubar.addMenu("View"); menubar.addMenu("Help"); menubar.addMenu("Registration")
 
         toolbar = QToolBar("Main Toolbar", self)
@@ -777,7 +791,7 @@ class InshalDM(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
-        
+
         splitter.addWidget(self.table)
         splitter.setSizes([200, 950])
 
@@ -858,7 +872,7 @@ class InshalDM(QMainWindow):
 
     def open_add_dialog(self, url=""):
         if isinstance(url, bool): url = ""
-        self.show_normal() 
+        self.show_normal()
         dialog = DownloadFileInfoDialog(self, prefill_url=url)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             final_url, save_dir, quality_idx, target_ext = dialog.get_data()
@@ -866,7 +880,7 @@ class InshalDM(QMainWindow):
 
     def start_new_download(self, url, save_dir, quality_idx, target_ext):
         download_id = uuid.uuid4().hex
-        
+
         if target_ext in ["MP3", "WAV", "FLAC", "M4A"]: format_str = 'bestaudio/best'
         elif target_ext == "MP4": format_str = {0: 'bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 1: 'bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 2: 'bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best', 3: 'bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best'}.get(quality_idx, 'best')
         else: format_str = {0: 'bestvideo+bestaudio/best', 1: 'bestvideo[height<=1080]+bestaudio/best', 2: 'bestvideo[height<=720]+bestaudio/best', 3: 'bestvideo[height<=480]+bestaudio/best'}.get(quality_idx, 'best')
@@ -875,26 +889,26 @@ class InshalDM(QMainWindow):
 
         row = self.table.rowCount()
         self.table.insertRow(row)
-        
+
         pb = QProgressBar(); pb.setRange(0, 100); pb.setValue(0)
         self.table.setItem(row, 0, QTableWidgetItem("Connecting..."))
         self.table.setItem(row, 1, QTableWidgetItem(""))
         self.table.setItem(row, 2, QTableWidgetItem("Calculating"))
-        self.table.setCellWidget(row, 3, pb) 
+        self.table.setCellWidget(row, 3, pb)
         self.table.setItem(row, 4, QTableWidgetItem("--:--"))
         self.table.setItem(row, 5, QTableWidgetItem("0 B/s"))
         self.table.setItem(row, 6, QTableWidgetItem(datetime.now().strftime("%b %d %H:%M:%S %Y")))
         self.table.setItem(row, 7, QTableWidgetItem(url))
-        
+
         thread = DownloadThread(download_id, url, outtmpl, format_str, target_ext)
         thread.progress.connect(self.update_progress)
         thread.status.connect(self.update_status)
         thread.finished.connect(self.download_finished)
         thread.size_updated.connect(self.update_size)
-        
+
         self.downloads.append({'id': download_id, 'url': url, 'outtmpl': outtmpl, 'format': format_str, 'ext': target_ext, 'thread': thread, 'row': row, 'final_path': ''})
         thread.start()
-        
+
         popup = DownloadProgressPopup("Connecting...", url, self)
         popup.show()
         self.popups[download_id] = popup
@@ -905,11 +919,11 @@ class InshalDM(QMainWindow):
         if d := self.get_download_by_id(id):
             if self.table.item(d['row'], 0).text() == "Connecting...":
                 self.table.setItem(d['row'], 0, QTableWidgetItem(filename))
-                
+
             self.table.setItem(d['row'], 4, QTableWidgetItem(eta))
             self.table.setItem(d['row'], 5, QTableWidgetItem(speed))
             if bar := self.table.cellWidget(d['row'], 3): bar.setValue(int(percent)); bar.setFormat(f"{int(percent)}%")
-                
+
             if id in self.popups: self.popups[id].update_stats(percent, speed, eta, self.table.item(d['row'], 2).text())
 
     def update_size(self, id, filename, size):
@@ -924,23 +938,26 @@ class InshalDM(QMainWindow):
             bar = self.table.cellWidget(d['row'], 3)
             if success:
                 if bar: bar.setValue(100); bar.setFormat("Complete")
-                d['final_path'] = filepath 
+                d['final_path'] = filepath
                 if id in self.popups: self.popups[id].close(); del self.popups[id]
-                
+
                 dlg = QMessageBox(self)
                 dlg.setWindowTitle("Download Complete")
                 dlg.setText(f"Download Complete!\n\n{os.path.basename(filepath)}")
-                open_btn = dlg.addButton("Open", QMessageBox.ButtonRole.ActionRole)
+                open_btn = None
+                if not self.is_dangerous_file(filepath):
+                    open_btn = dlg.addButton("Open", QMessageBox.ButtonRole.ActionRole)
                 folder_btn = dlg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
                 dlg.addButton("Close", QMessageBox.ButtonRole.RejectRole)
                 dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
                 dlg.exec()
-                
-                if dlg.clickedButton() == open_btn:
-                    if self.check_safe_file(filepath):
+
+                if open_btn and dlg.clickedButton() == open_btn:
+                    if os.path.exists(filepath):
                         os.startfile(filepath)
                 elif dlg.clickedButton() == folder_btn:
-                    subprocess.Popen(['explorer', '/select,', os.path.normpath(filepath)])
+                    if os.path.exists(filepath):
+                        subprocess.Popen(['explorer', '/select,', os.path.normpath(filepath)])
             else:
                 if bar: bar.setFormat(f"Error: {error_msg}")
             d['thread'] = None
@@ -988,7 +1005,7 @@ class InshalDM(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyleSheet(MODERN_STYLE) 
+    app.setStyleSheet(MODERN_STYLE)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 9))
     window = InshalDM()

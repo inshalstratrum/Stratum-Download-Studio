@@ -5,7 +5,7 @@ The application is a desktop download manager designed as a clone of Internet Do
 
 ## Core Components
 - **Language & Framework:** Python 3, PyQt6 (Desktop UI), JavaScript (Browser Extension).
-- **Entry Points:** 
+- **Entry Points:**
   - `inshal_dm.py` - The primary GUI desktop application.
   - `main.py` - An alternative/legacy FastAPI backend server (seems obsolete compared to the built-in PyQt server).
 - **Download Engine:** Uses `yt-dlp` to resolve formats and download media streams. Handles HTTP/HTTPS and extraction from various media platforms.
@@ -14,7 +14,7 @@ The application is a desktop download manager designed as a clone of Internet Do
 ## Browser Integration
 - **Extension Path:** `IDM_Extension` (Manifest V3).
 - **Mechanism:** Injects a "Download this video" hover button over `<video>` tags and adds a right-click context menu.
-- **Communication:** Sends HTTP POST requests with `{ "url": "..." }` to a local TCP server running on `http://127.0.0.1:8000`. 
+- **Communication:** Sends HTTP POST requests with `{ "url": "..." }` to a local TCP server running on `http://127.0.0.1:8000`.
 - **Desktop Receiver:** `inshal_dm.py` spins up a local `socketserver.TCPServer` on port 8000 to listen for URLs pushed from the browser.
 
 ## Data & Configuration
