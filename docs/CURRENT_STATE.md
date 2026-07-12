@@ -1,22 +1,23 @@
 # Current State
 
-- Phase: 2A.6C.3 — audio-only manifest classification and master-manifest preference corrected.
-- Branch: `phase-2a6c2-manifest-routing`.
-- Commit: `Phase 2A.6C.3: Prefer master manifests and classify audio variants` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
-- Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
-- Test command: `python -m pytest -q`; current expected count: 254 passed.
-- Working features: Phase 2A.6B one-token delivery and desktop-controlled Quick Download/Options routing remain intact. Supported extractor pages, complete HLS/DASH manifests with signed operational queries, explicit video/audio/source URLs, strong attachment responses, and verified top-level media documents remain the only candidate routes.
-- Candidate quality: strong playlist naming/MIME evidence identifies audio-only HLS variants as audio. A recognised same-family HLS master suppresses inferior audio/video/unknown children in either observation order; deterministic player identifiers, frame identity and path families prevent cross-player suppression. Labels remain query-safe while the latest signed URL is retained for delivery.
-- Safety boundaries: DRM/EME blocks and clears the owning frame with a clear unsupported message. Existing scheme, credential, payload, origin, token and rate controls remain unchanged; FFprobe, desktop/converter and Phase 2B code were not changed.
-- Unresolved blockers: no automated blockers. Manual retesting remains required for Shaka master/audio variants and Al Jazeera/Brightcove master preference; the previously passed DASH-IF, MP4, NLM, ABC CMAF, CNBC and browser compatibility cases should receive a regression spot-check.
-- Next task: Phase 2B only when explicitly authorized.
+- Phase: 2A.7A — documentation-only media backend capability audit complete.
+- Branch: `phase-2a7a-media-backend-audit`.
+- Baseline preserved: `898e949fb6a04ee439acc555a29b03fe0b54df77`.
+- Commit: `Phase 2A.7A: Audit media engines and website compatibility` (this phase commit; use `git rev-parse HEAD` after commit for the immutable hash).
+- Audit documents: `docs/14_MEDIA_BACKEND_CAPABILITY_AUDIT.md`, `docs/15_WEBSITE_COMPATIBILITY_MATRIX.md`, and `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`.
+- Detected backend: Stratum imports the user-site pip `yt_dlp` module, version `2026.03.17`; it does not invoke the `yt-dlp.exe` subprocess. There is no repository lock or pin. Proposed controlled stable target is `2026.06.09`, not installed in this phase.
+- Dependency gaps: `yt-dlp-ejs`, Deno/another governed enabled JS runtime, Brotli, `curl_cffi`, and `pycryptodomex` are missing. System Node 24.14.1 exists but is not enabled by Stratum. Repo-local FFmpeg/FFprobe 8.1.1 remain GPL-enabled development binaries and release blockers.
+- Engine decisions: evaluate gallery-dl 1.32.6 only as a version-pinned, optional, isolated subprocess PoC after GPL review; evaluate Poppler 26.07.0 only from verified official source through a reproducible minimal Windows-build PoC after GPL review. Neither was installed or executed.
+- Compatibility matrix: all 161 numbered entries were classified by source type, access/protection, upstream extractor evidence, likely engine, fixture, priority and risk. Zero sites were newly tested or certified compatible.
+- Current implementation evidence: URL/browser security controls and final FFprobe verification remain intact. The browser recognizes extractor pages only for YouTube, Vimeo and CNBC, while candidate selection is frame-wide rather than player/element-local; these are documented causes/likely causes only and were not changed.
+- Scope confirmation: no application, extension, test, dependency, binary, requirements/lock, specification/build, or packaging file changed; no research artifact was stored; yt-dlp was not updated; gallery-dl and Poppler were not installed; packaging was not run.
+- Unresolved release blockers: unpinned ambient dependency collection, missing modern yt-dlp support components, unproven frozen binary inclusion, GPL-enabled FFmpeg provenance/distribution, gallery-dl/Poppler GPL decisions, canonical social routing, player-local ownership, and lawful manual certification.
+- Next task: only a separately authorized phase from `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`; browser-picker UX work and Phase 2B remain unstarted.
 
 ## Roadmap — record only
 
-- Phase 2A.6B: Popup completion, foreground activation, source URL and Quick Download.
-- Phase 2A.6C: Broad secure browser media detection.
-- Phase 2B — General download engine: HTTP/HTTPS files, images, documents, ZIP/RAR, installers and ISOs; resume, redirects, filenames, checksums and browser interception.
-- Phase 2B.1 — Queue and performance: priorities, concurrency, per-host limits, real speed limiting, bounded retry and multi-connection segmented downloads.
-- Phase 2B.2 — Link collector: collect detected links into a review screen, group into packages, choose files and destination, then move them into the queue.
-- Phase 2C — Advanced tools: scheduler, archive extraction, clipboard monitoring, authenticated sites, proxy support and restricted site grabbing.
-- Phase 3 — Commercial UI and packaging: PySide6 migration, original modern responsive interface, installer, console-free executable, extension onboarding, licensing and accessibility.
+- A–C: controlled yt-dlp upgrade/dependencies and normalized video/audio selection.
+- D–H: separate gallery and PDF/Poppler proofs of concept, licensing decisions and bounded engines.
+- I–M: unified router, Windows-safe output planning, canonical social routing, player-local ownership and simple presentation.
+- N–P: lawful fixtures/manual certification, later governed authenticated support and the release regression matrix.
+- Phase 2B remains a later, separately authorized general download engine phase.
