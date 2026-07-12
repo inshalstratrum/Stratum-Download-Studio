@@ -1,22 +1,21 @@
 # Current State
 
-- Phase: 2A.7A — documentation-only media backend capability audit complete; yt-dlp stable-target correction verified on 2026-07-12.
-- Branch: `phase-2a7a-media-backend-audit`.
-- Baseline preserved: `898e949fb6a04ee439acc555a29b03fe0b54df77`.
-- Commit: `Phase 2A.7A: Correct yt-dlp stable target` (this correction commit; use `git rev-parse HEAD` after commit for the immutable hash).
-- Audit documents: `docs/14_MEDIA_BACKEND_CAPABILITY_AUDIT.md`, `docs/15_WEBSITE_COMPATIBILITY_MATRIX.md`, and `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`.
-- Detected backend: Stratum imports the user-site pip `yt_dlp` module, version `2026.03.17`; it does not invoke the `yt-dlp.exe` subprocess. There is no repository lock or pin. Proposed controlled stable target is `2026.07.04`, verified from official GitHub release metadata on 2026-07-12 and not installed in this phase; reconfirm the latest approved stable immediately before implementation.
-- Dependency gaps: `yt-dlp-ejs`, Deno/another governed enabled JS runtime, Brotli, `curl_cffi`, and `pycryptodomex` are missing. System Node 24.14.1 exists but is not enabled by Stratum. Repo-local FFmpeg/FFprobe 8.1.1 remain GPL-enabled development binaries and release blockers.
-- Engine decisions: evaluate gallery-dl 1.32.6 only as a version-pinned, optional, isolated subprocess PoC after GPL review; evaluate Poppler 26.07.0 only from verified official source through a reproducible minimal Windows-build PoC after GPL review. Neither was installed or executed.
-- Compatibility matrix: all 161 numbered entries were classified by source type, access/protection, upstream extractor evidence, likely engine, fixture, priority and risk. Zero sites were newly tested or certified compatible.
-- Current implementation evidence: URL/browser security controls and final FFprobe verification remain intact. The browser recognizes extractor pages only for YouTube, Vimeo and CNBC, while candidate selection is frame-wide rather than player/element-local; these are documented causes/likely causes only and were not changed.
-- Scope confirmation: no application, extension, test, dependency, binary, requirements/lock, specification/build, or packaging file changed; no research artifact was stored; yt-dlp was not updated; gallery-dl and Poppler were not installed; packaging was not run.
-- Unresolved release blockers: unpinned ambient dependency collection, missing modern yt-dlp support components, unproven frozen binary inclusion, GPL-enabled FFmpeg provenance/distribution, gallery-dl/Poppler GPL decisions, canonical social routing, player-local ownership, and lawful manual certification.
-- Next task: only a separately authorized phase from `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`; browser-picker UX work and Phase 2B remain unstarted.
+- Phase: 2A.7B — controlled yt-dlp upgrade and reproducible version pinning complete on 2026-07-12.
+- Branch: `phase-2a7b-ytdlp-upgrade`.
+- Baseline preserved: `3c7f8d71b1bc8b3814fd18d1059ea35ed58f1506`.
+- Commit: `Phase 2A.7B: Pin and upgrade yt-dlp to 2026.07.04` (this phase commit; use `git rev-parse HEAD` after commit for its immutable hash).
+- Approved backend: official stable GitHub release `2026.07.04`, corresponding to official PyPI package metadata `2026.7.4`. The official universal wheel is locked by SHA-256 `f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266`.
+- Controlled development resolution: `scripts/bootstrap_ytdlp.ps1` uses isolated pip, the official PyPI index, wheel-only/no-dependency installation, `--require-hashes`, and a clean staging directory. It promotes the verified package into ignored repo-local `.deps/`; Stratum refuses an absent, ambient, wrong-version, wrong-path, or wheel-RECORD-invalid module.
+- Runtime policy: Python-module integration remains `import yt_dlp` through `load_controlled_yt_dlp()`. Package version, module release, controlled path and installed wheel contents are verified. Ambient yt-dlp plugins and unapproved Phase B optional modules are disabled/excluded.
+- Packaging gate: `StratumDownloadStudio.spec` validates `.deps`, searches it first, copies only its `yt-dlp` metadata, and excludes ambient optional backends. A clean PyInstaller build completed; recursive archive inspection found the pinned module/metadata and zero excluded optional-module entries. Generated `build/` and `dist/` artifacts remain ignored.
+- Regression: 6 dependency-policy tests, 36 focused metadata/format-selection/download/cancellation/verification tests, and the final full suite of 260 tests passed.
+- Scope confirmation: no new extraction feature, website routing, browser-picker change, gallery-dl, Poppler, EJS/runtime/network optional dependency, Phase 2B work, UI redesign, extension file, FFmpeg binary, or media behavior was added. Extension packaging was not rerun because extension files were unchanged.
+- Remaining blockers: Phase B must separately govern `yt-dlp-ejs`, one approved JavaScript runtime, and optional network/media dependencies. Repo-local FFmpeg/FFprobe remain GPL-enabled development binaries; wider engine routing, lawful site certification and release dependency/SBOM work remain pending.
+- Next task: only a separately authorized later phase from `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`; Phase 2B and UI redesign remain unstarted.
 
 ## Roadmap — record only
 
-- A–C: controlled yt-dlp upgrade/dependencies and normalized video/audio selection.
+- B–C: modern yt-dlp dependency completion and normalized video/audio selection.
 - D–H: separate gallery and PDF/Poppler proofs of concept, licensing decisions and bounded engines.
 - I–M: unified router, Windows-safe output planning, canonical social routing, player-local ownership and simple presentation.
 - N–P: lawful fixtures/manual certification, later governed authenticated support and the release regression matrix.

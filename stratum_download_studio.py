@@ -19,7 +19,9 @@ import webbrowser
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
-import yt_dlp
+from stratum_dependency_policy import load_controlled_yt_dlp
+
+yt_dlp = load_controlled_yt_dlp()
 
 APP_NAME = "Stratum Download Studio"
 EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
