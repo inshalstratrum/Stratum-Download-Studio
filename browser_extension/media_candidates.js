@@ -431,7 +431,7 @@
       if (manifests.length) candidates = candidates.filter((item) => item.priority !== 5 && item.priority !== 6);
       if (candidates.some((item) => item.priority < 6)) candidates = candidates.filter((item) => item.priority < 6);
       candidates.sort((left, right) => left.priority - right.priority || left.manifestRank - right.manifestRank || right.lastObserved - left.lastObserved || left.id.localeCompare(right.id));
-      return distinctLabels(candidates).map((item) => ({ ...item, evidence: [...item.evidence] }));
+      return deduplicateLabels(candidates).map((item) => ({ ...item, evidence: [...item.evidence] }));
     }
 
     sameOwner(left, right) {
@@ -563,18 +563,13 @@
     return leftPath === rightPath || leftPath.startsWith(`${rightPath}/`) || rightPath.startsWith(`${leftPath}/`);
   }
 
-  function distinctLabels(candidates) {
-    const groups = new Map();
-    for (const item of candidates) {
-      const group = groups.get(item.label) || [];
-      group.push(item);
-      groups.set(item.label, group);
-    }
-    return candidates.map((item) => {
-      const group = groups.get(item.label);
-      if (group.length === 1) return item;
-      const ordered = [...group].sort((left, right) => left.id.localeCompare(right.id));
-      return { ...item, label: `${item.label} • Source ${ordered.indexOf(item) + 1}` };
+  function deduplicateLabels(candidates) {
+    const seen = new Set();
+    return candidates.filter((item) => {
+      const key = `${item.tabId}|${item.frameId}|${item.pageUrl}|${item.playerId}|${item.label}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
   }
 

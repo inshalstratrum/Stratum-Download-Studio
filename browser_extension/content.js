@@ -167,7 +167,7 @@ function showPicker(candidates, button) {
     const choice = document.createElement("button");
     choice.type = "button";
     choice.textContent = candidateLabel(candidate);
-    choice.title = candidate.safeTarget || candidateLabel(candidate);
+    choice.title = candidateLabel(candidate);
     choice.setAttribute("role", "menuitem");
     Object.assign(choice.style, {
       display: "block", width: "100%", padding: "7px 8px", border: "0", borderRadius: "4px",

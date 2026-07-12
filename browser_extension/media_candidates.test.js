@@ -118,7 +118,8 @@ test("bounds candidates and expires stale observations", () => {
     now += 10;
     store.observe({ tabId: 1, frameId: 0, pageUrl, url: `https://cdn.test/${index}.mp4`, evidence: "dom-media" });
   }
-  assert.equal(store.list().length, 2);
+  assert.equal(store.items.size, 2);
+  assert.equal(store.list().length, 1);
   now += 1001;
   assert.equal(store.list().length, 0);
 });
@@ -215,15 +216,18 @@ test("trusted sender ownership overrides page-supplied identifiers", () => {
   assert.equal(owned.frameId, 34);
 });
 
-test("candidate labels are useful, distinct, and query-safe", () => {
-  const store = new CandidateStore();
+test("duplicate customer labels keep only the preferred candidate without source numbering", () => {
+  let now = 1000;
+  const store = new CandidateStore({ clock: () => now });
   const owner = { tabId: 11, frameId: 0, pageUrl };
   store.observe({ ...owner, url: "https://one.test/path/movie.mp4?token=secret", evidence: "dom-media", width: 1920, height: 1080 });
-  store.observe({ ...owner, url: "https://two.test/other/movie.mp4?signature=hidden", evidence: "dom-media", width: 1920, height: 1080 });
-  const labels = store.list(owner).map((item) => item.label);
-  assert.equal(new Set(labels).size, 2);
-  assert.ok(labels.every((label) => /Video • 1920×1080 • Source [12]/.test(label)));
-  assert.ok(labels.every((label) => !/secret|hidden|token|signature/i.test(label)));
+  now += 1;
+  const preferred = store.observe({ ...owner, url: "https://two.test/other/movie.mp4?signature=hidden", evidence: "dom-media", width: 1920, height: 1080 });
+  const listed = store.list(owner);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].id, preferred.id);
+  assert.equal(listed[0].label, "Video • 1920×1080");
+  assert.doesNotMatch(listed[0].label, /source|secret|hidden|token|signature/i);
   assert.equal(canonicalCandidateUrl("https://one.test/path/movie.mp4?token=a&id=public"), "https://one.test/path/movie.mp4?id=public");
 });
 

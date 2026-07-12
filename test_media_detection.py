@@ -62,8 +62,16 @@ def test_picker_uses_safe_model_labels_not_raw_signed_urls():
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     picker = content.split("function candidateLabel", 1)[1].split("async function handleControlClick", 1)[0]
     assert "candidate.label" in picker
-    assert "candidate.safeTarget" in picker
+    assert "choice.textContent = candidateLabel(candidate)" in picker
+    assert "choice.title = candidateLabel(candidate)" in picker
+    assert "candidate.safeTarget" not in picker
     assert "choice.title = candidate.url" not in picker
+
+
+def test_customer_labels_never_use_source_number_disambiguation():
+    model = (EXTENSION / "media_candidates.js").read_text(encoding="utf-8")
+    assert "deduplicateLabels(candidates)" in model
+    assert "Source ${" not in model
 
 
 def test_one_token_and_desktop_default_action_are_unchanged():
