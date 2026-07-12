@@ -1,14 +1,14 @@
 # Current State
 
-- Phase: 2A.6C.2 — adaptive manifest routing and duplicate player overlays corrected.
+- Phase: 2A.6C.3 — audio-only manifest classification and master-manifest preference corrected.
 - Branch: `phase-2a6c2-manifest-routing`.
-- Commit: `Phase 2A.6C.2: Fix adaptive manifest routing and duplicate player overlays` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Commit: `Phase 2A.6C.3: Prefer master manifests and classify audio variants` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
 - Entry points: `StratumDownloadStudio.pyw` (Windows development launcher) and `stratum_download_studio.py` (`main()`).
 - Test command: `python -m pytest -q`; current expected count: 254 passed.
-- Working features: Phase 2A.6B one-token delivery and desktop-controlled Quick Download/Options routing remain intact. Supported extractor pages, complete HLS/DASH manifests (with required query strings), explicit video/audio/source URLs, strong attachment responses, and verified top-level media documents are the only candidate routes. DASH-IF, Shaka, Brightcove-style and ordinary HLS traffic use trusted tab/frame ownership and manifest-first selection.
-- Candidate quality: network `.mp4`/`.m4a`/`.webm` extensions alone are not complete-file evidence. CMAF init/media segments, byte ranges, adaptive representations, Google Video fragments, generic page fallbacks, and unstored download requests are rejected. Frame-local video/audio elements are the only automatic overlay targets, preventing parent iframe duplicates.
+- Working features: Phase 2A.6B one-token delivery and desktop-controlled Quick Download/Options routing remain intact. Supported extractor pages, complete HLS/DASH manifests with signed operational queries, explicit video/audio/source URLs, strong attachment responses, and verified top-level media documents remain the only candidate routes.
+- Candidate quality: strong playlist naming/MIME evidence identifies audio-only HLS variants as audio. A recognised same-family HLS master suppresses inferior audio/video/unknown children in either observation order; deterministic player identifiers, frame identity and path families prevent cross-player suppression. Labels remain query-safe while the latest signed URL is retained for delivery.
 - Safety boundaries: DRM/EME blocks and clears the owning frame with a clear unsupported message. Existing scheme, credential, payload, origin, token and rate controls remain unchanged; FFprobe, desktop/converter and Phase 2B code were not changed.
-- Unresolved blockers: no automated blockers. Manual retesting remains required for DASH-IF, Shaka, top-level MP4, NLM two-iframe ownership, Al Jazeera/Brightcove, ABC CMAF, CNBC and representative Chrome/Edge/Firefox media pages.
+- Unresolved blockers: no automated blockers. Manual retesting remains required for Shaka master/audio variants and Al Jazeera/Brightcove master preference; the previously passed DASH-IF, MP4, NLM, ABC CMAF, CNBC and browser compatibility cases should receive a regression spot-check.
 - Next task: Phase 2B only when explicitly authorized.
 
 ## Roadmap — record only

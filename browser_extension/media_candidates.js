@@ -118,6 +118,17 @@
     return "video";
   }
 
+  function inferManifestKind(raw, contentType, parsed) {
+    const path = parsed.pathname.toLowerCase();
+    const audioMime = /^audio\//i.test(contentType) || /audio[^/;]*mpegurl/i.test(contentType);
+    const audioName = /(?:^|\/)(?:audio(?:[_-]|\/)|[^/]*playlist[_-]a(?:[_-]|\.)|[^/]*[_-]a(?:ac)?[_-][^/]*)/i.test(path);
+    const videoName = /(?:^|\/)(?:video(?:[_-]|\/)|[^/]*playlist[_-]v(?:[_-]|\.))/i.test(path);
+    if (audioMime || audioName) return { kind: "audio", strong: true };
+    if (/^video\//i.test(contentType) || videoName) return { kind: "video", strong: true };
+    if (raw.mediaKind === "audio" || raw.mediaKind === "video") return { kind: raw.mediaKind, strong: true };
+    return { kind: inferKind(raw, contentType, parsed), strong: false };
+  }
+
   function classifyCandidate(raw) {
     raw = raw && typeof raw === "object" ? raw : {};
     const pageUrl = stablePageUrl(raw.pageUrl || "");
@@ -137,10 +148,12 @@
       return finish(stable, "page", inferKind(raw, contentType, parsed), raw, evidence, pageUrl || stable);
     }
     if (HLS_EXTENSION.test(parsed.href) || /mpegurl|vnd\.apple\.mpegurl/i.test(contentType)) {
-      return finish(parsed.href, "hls", inferKind(raw, contentType, parsed), raw, evidence, pageUrl);
+      const manifestKind = inferManifestKind(raw, contentType, parsed);
+      return finish(parsed.href, "hls", manifestKind.kind, { ...raw, strongMediaKind: manifestKind.strong ? manifestKind.kind : "" }, evidence, pageUrl);
     }
     if (DASH_EXTENSION.test(parsed.href) || /dash\+xml/i.test(contentType)) {
-      return finish(parsed.href, "dash", inferKind(raw, contentType, parsed), raw, evidence, pageUrl);
+      const manifestKind = inferManifestKind(raw, contentType, parsed);
+      return finish(parsed.href, "dash", manifestKind.kind, { ...raw, strongMediaKind: manifestKind.strong ? manifestKind.kind : "" }, evidence, pageUrl);
     }
     const completeAttachment = /\battachment\b/i.test(disposition) && MEDIA_DISPOSITION.test(disposition);
     if (isNetworkFragment(raw, parsed, evidence, completeAttachment)) return null;
@@ -158,7 +171,7 @@
     const title = sanitizeTitle(raw.title || raw.label || "");
     const canonicalUrl = canonicalCandidateUrl(url);
     const priority = candidatePriority(type, url, cleanEvidence, raw);
-    const kindConfidence = raw.mediaKind === "audio" || raw.mediaKind === "video" || /^(?:audio|video)\//i.test(String(raw.contentType || "")) ? 3 : 1;
+    const kindConfidence = raw.strongMediaKind || raw.mediaKind === "audio" || raw.mediaKind === "video" || /^(?:audio|video)\//i.test(String(raw.contentType || "")) ? 3 : 1;
     const metadata = candidateMetadata(url, type, mediaKind, raw, contentFormat(raw, url, type, mediaKind));
     return {
       id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${type}|${canonicalUrl}`),
@@ -174,6 +187,9 @@
       resolution: metadata.resolution,
       bitrateKbps: metadata.bitrateKbps,
       safeTarget: metadata.safeTarget,
+      manifestRole: metadata.manifestRole,
+      manifestFamily: metadata.manifestFamily,
+      manifestRank: metadata.manifestRank,
       label: buildLabel(type, mediaKind, title, metadata),
       priority,
       kindConfidence,
@@ -224,6 +240,7 @@
     const width = Number(raw.width) || 0;
     const height = Number(raw.height) || 0;
     const bitrate = Number(raw.bitrateKbps || raw.bitrate) || 0;
+    const manifest = describeManifest(parsed, type, mediaKind, filename);
     return {
       format,
       resolution: width > 0 && height > 0 ? `${Math.round(width)}×${Math.round(height)}` : "",
@@ -231,15 +248,54 @@
       safeTarget: (type === "direct_media" || type === "hls" || type === "dash") && filename ? filename.slice(0, 100) : hostname.slice(0, 100),
       pageDescriptor: /(^|\.)youtu(?:be\.com|\.be)$/.test(hostname) || /(^|\.)youtube-nocookie\.com$/.test(hostname) ? "YouTube" : /(^|\.)vimeo\.com$/.test(hostname) ? "Vimeo" : /(^|\.)cnbc\.com$/.test(hostname) ? "CNBC page" : "Page",
       provider: /(?:^|\.)(?:brightcove\.com|boltdns\.net)$/.test(hostname) ? "Brightcove" : "",
+      manifestRole: manifest.role,
+      manifestFamily: manifest.family,
+      manifestRank: manifest.rank,
       mediaKind
     };
+  }
+
+  function describeManifest(parsed, type, mediaKind, filename) {
+    if (!parsed || (type !== "hls" && type !== "dash")) return { role: "", family: "", rank: 99 };
+    const lowerName = filename.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    const familyPath = parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/"))) || "/";
+    const family = manifestFamily(parsed, familyPath);
+    if (type === "dash") return { role: "master", family, rank: 0 };
+    if (mediaKind === "audio" || /playlist[_-]a(?:[_-]|\.)|(?:^|[_-])audio(?:[_-]|\.)/i.test(lowerName)) {
+      return { role: "audio_variant", family, rank: 30 };
+    }
+    if (/playlist[_-]v(?:[_-]|\.)|(?:^|[_-])video(?:[_-]|\.)/i.test(lowerName)) {
+      return { role: "video_variant", family, rank: 20 };
+    }
+    const masterNames = new Map([["master.m3u8", 0], ["hls.m3u8", 1], ["index.m3u8", 2], ["manifest.m3u8", 3], ["main.m3u8", 4]]);
+    if (masterNames.has(lowerName) || /(?:^|[_-])master(?:[_-]|\.)/i.test(lowerName)) {
+      return { role: "master", family, rank: masterNames.get(lowerName) ?? 5 };
+    }
+    if (/(?:^|\/)(?:audio|video|variant|rendition)(?:\/|[_-])/i.test(path) || /(?:\d{3,4}p|\d{2,6}k)/i.test(lowerName)) {
+      return { role: "variant", family, rank: 25 };
+    }
+    return { role: "unknown", family, rank: 10 };
+  }
+
+  function manifestFamily(parsed, familyPath) {
+    const identityKeys = /^(?:id|video|videoid|asset|assetid|contentid|playbackid)$/i;
+    const identity = Array.from(parsed.searchParams.entries())
+      .filter(([key]) => identityKeys.test(key))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key.toLowerCase()}=${value}`)
+      .join("&");
+    return `${parsed.origin}${familyPath}::${identity}`;
   }
 
   function buildLabel(type, mediaKind, title, metadata) {
     const parts = [mediaKind === "audio" ? "Audio" : "Video"];
     if (type === "page") parts.push(metadata.pageDescriptor);
     if (type === "direct_media") parts.push(`Direct${metadata.format ? ` ${metadata.format}` : ""}`);
-    if (type === "hls") parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}HLS manifest`);
+    if (type === "hls") {
+      const role = metadata.manifestRole === "master" ? " master" : metadata.manifestRole === "audio_variant" ? " audio variant" : metadata.manifestRole === "video_variant" ? " video variant" : " manifest";
+      parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}HLS${role}`);
+    }
     if (type === "dash") parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}DASH manifest`);
     if (metadata.resolution) parts.push(metadata.resolution);
     if (metadata.bitrateKbps) parts.push(`${metadata.bitrateKbps} kbps`);
@@ -292,12 +348,28 @@
           existing.resolution = candidate.resolution || existing.resolution;
           existing.bitrateKbps = candidate.bitrateKbps || existing.bitrateKbps;
           existing.safeTarget = candidate.safeTarget || existing.safeTarget;
+          existing.manifestRole = candidate.manifestRole || existing.manifestRole;
+          existing.manifestFamily = candidate.manifestFamily || existing.manifestFamily;
+          existing.manifestRank = candidate.manifestRank;
           existing.label = candidate.label;
           existing.kindConfidence = candidate.kindConfidence;
         }
         if (existingPageWasSelf && candidate.pageUrl !== candidate.url) existing.pageUrl = candidate.pageUrl;
         existing.evidence = Array.from(new Set(existing.evidence.concat(candidate.evidence)));
         return { ...existing, evidence: [...existing.evidence] };
+      }
+      if (candidate.type === "hls") {
+        const related = Array.from(this.items.values()).filter((item) => manifestsRelated(item, candidate));
+        if (candidate.manifestRole !== "master" && related.some((item) => item.manifestRole === "master")) return null;
+        if (candidate.manifestRole === "master") {
+          const preferredMaster = related
+            .filter((item) => item.manifestRole === "master")
+            .sort((left, right) => left.manifestRank - right.manifestRank || left.id.localeCompare(right.id))[0];
+          if (preferredMaster && preferredMaster.manifestRank <= candidate.manifestRank) return null;
+          for (const item of related) {
+            if (item.manifestRole === "master" || isChildManifest(item)) this.items.delete(item.id);
+          }
+        }
       }
       this.items.set(candidate.id, candidate);
       if (candidate.priority <= 2) this.removeDominatedCandidates(candidate);
@@ -316,7 +388,7 @@
       const manifests = candidates.filter((item) => item.priority === 2);
       if (manifests.length) candidates = candidates.filter((item) => item.priority !== 5 && item.priority !== 6);
       if (candidates.some((item) => item.priority < 6)) candidates = candidates.filter((item) => item.priority < 6);
-      candidates.sort((left, right) => left.priority - right.priority || right.lastObserved - left.lastObserved || left.id.localeCompare(right.id));
+      candidates.sort((left, right) => left.priority - right.priority || left.manifestRank - right.manifestRank || right.lastObserved - left.lastObserved || left.id.localeCompare(right.id));
       return distinctLabels(candidates).map((item) => ({ ...item, evidence: [...item.evidence] }));
     }
 
@@ -380,6 +452,20 @@
         this.items.delete(oldest[index].id);
       }
     }
+  }
+
+  function isChildManifest(candidate) {
+    return candidate.manifestRole === "audio_variant" || candidate.manifestRole === "video_variant" || candidate.manifestRole === "variant" || candidate.manifestRole === "unknown";
+  }
+
+  function manifestsRelated(left, right) {
+    if (left.type !== "hls" || right.type !== "hls") return false;
+    if (left.tabId !== right.tabId || left.frameId !== right.frameId || left.pageUrl !== right.pageUrl) return false;
+    if (!left.manifestFamily || !right.manifestFamily) return false;
+    const [leftPath, leftIdentity = ""] = left.manifestFamily.split("::", 2);
+    const [rightPath, rightIdentity = ""] = right.manifestFamily.split("::", 2);
+    if (leftIdentity !== rightIdentity) return false;
+    return leftPath === rightPath || leftPath.startsWith(`${rightPath}/`) || rightPath.startsWith(`${leftPath}/`);
   }
 
   function distinctLabels(candidates) {

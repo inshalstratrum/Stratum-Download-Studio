@@ -42,7 +42,7 @@ test("classifies one HLS or DASH manifest", () => {
   const dash = classify("https://cdn.test/manifest.mpd", { contentType: "application/dash+xml" });
   assert.equal(hls.type, "hls");
   assert.equal(hls.priority, 2);
-  assert.equal(hls.label, "Video • HLS manifest • master.m3u8");
+  assert.equal(hls.label, "Video • HLS master • master.m3u8");
   assert.equal(dash.type, "dash");
   assert.equal(dash.priority, 2);
   assert.equal(dash.label, "Video • DASH manifest • manifest.mpd");
@@ -265,7 +265,7 @@ test("Brightcove manifest replaces an Al Jazeera-style page fallback", () => {
   assert.equal(store.observe({ ...owner, url: owner.pageUrl, blobOnly: true, evidence: "dom-media" }), null);
   const manifest = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/manifest/v1/hls/master.m3u8?token=secret", contentType: "application/x-mpegURL", evidence: "webRequest-response" });
   assert.equal(manifest.type, "hls");
-  assert.match(manifest.label, /^Video • Brightcove HLS manifest/);
+  assert.match(manifest.label, /^Video • Brightcove HLS master/);
   assert.equal(store.list(owner).length, 1);
   assert.match(store.list(owner)[0].url, /\?token=secret$/);
 });
@@ -285,4 +285,55 @@ test("embedded iframe overlay ownership yields two buttons, not four", () => {
   const frameTargets = [{ tagName: "video" }, { tagName: "video" }];
   assert.equal(parentTargets.filter(isOverlayTargetDescriptor).length, 0);
   assert.equal(frameTargets.filter(isOverlayTargetDescriptor).length, 2);
+});
+
+test("recognizes Shaka audio-only and video HLS variants", () => {
+  const audio = classify("https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_a-eng-0128k-aac-2c.mp4.m3u8", { contentType: "application/vnd.apple.mpegurl", evidence: "webRequest-response" });
+  const video = classify("https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_v-0720p-2500k-libx264.mp4.m3u8", { contentType: "application/vnd.apple.mpegurl", evidence: "webRequest-response" });
+  assert.equal(audio.mediaKind, "audio");
+  assert.equal(audio.manifestRole, "audio_variant");
+  assert.match(audio.label, /^Audio • HLS audio variant/);
+  assert.equal(video.mediaKind, "video");
+  assert.equal(video.manifestRole, "video_variant");
+  assert.match(video.label, /^Video • HLS video variant/);
+  const store = new CandidateStore();
+  const owner = { tabId: 19, frameId: 0, pageUrl };
+  store.observe({ ...owner, url: "https://cdn.test/stream.m3u8", evidence: "performance-resource" });
+  store.observe({ ...owner, url: "https://cdn.test/stream.m3u8", contentType: "audio/mpegurl", evidence: "webRequest-response" });
+  assert.equal(store.list(owner)[0].mediaKind, "audio");
+  assert.match(store.list(owner)[0].label, /^Audio • HLS/);
+});
+
+test("Shaka master manifest suppresses related child variants in either observation order", () => {
+  const owner = { tabId: 20, frameId: 0, pageUrl: "https://shaka-project.github.io/demo" };
+  const store = new CandidateStore();
+  store.observe({ ...owner, url: "https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_a-eng-0128k-aac-2c.mp4.m3u8", evidence: "webRequest-response" });
+  store.observe({ ...owner, url: "https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_v-0720p-2500k-libx264.mp4.m3u8", evidence: "webRequest-response" });
+  const master = store.observe({ ...owner, url: "https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/hls.m3u8?token=signed", evidence: "webRequest-response" });
+  assert.deepEqual(store.list(owner).map((item) => item.id), [master.id]);
+  assert.equal(store.observe({ ...owner, url: "https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_a-fra-0064k-aac-2c.mp4.m3u8", evidence: "webRequest-response" }), null);
+});
+
+test("Brightcove master preference keeps signed URL and redacts its label", () => {
+  const owner = { tabId: 21, frameId: 0, pageUrl: "https://news.test/article" };
+  const store = new CandidateStore();
+  store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/player-42/playlist_a-eng-128k.m3u8?token=child-secret", evidence: "webRequest-response" });
+  store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/player-42/playlist_v-720p-2500k.m3u8?token=video-secret", evidence: "webRequest-response" });
+  store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/player-42/master.m3u8?token=first-secret", evidence: "webRequest-response" });
+  const refreshed = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/player-42/master.m3u8?token=fresh-secret", evidence: "webRequest-response" });
+  const listed = store.list(owner);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].url, refreshed.url);
+  assert.match(listed[0].url, /token=fresh-secret/);
+  assert.doesNotMatch(listed[0].label, /token|secret/i);
+});
+
+test("master preference never crosses player identity or trusted frame", () => {
+  const store = new CandidateStore();
+  const pageUrl = "https://news.test/article";
+  const masterA = store.observe({ tabId: 22, frameId: 1, pageUrl, url: "https://cdn.test/shared/master.m3u8?videoId=A&token=secret", evidence: "webRequest-response" });
+  const variantB = store.observe({ tabId: 22, frameId: 1, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=B&token=secret", evidence: "webRequest-response" });
+  const variantOtherFrame = store.observe({ tabId: 22, frameId: 2, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=A&token=secret", evidence: "webRequest-response" });
+  assert.deepEqual(store.list({ tabId: 22, frameId: 1 }).map((item) => item.id).sort(), [masterA.id, variantB.id].sort());
+  assert.deepEqual(store.list({ tabId: 22, frameId: 2 }).map((item) => item.id), [variantOtherFrame.id]);
 });
