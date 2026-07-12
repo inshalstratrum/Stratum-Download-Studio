@@ -6,6 +6,7 @@ const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
 const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
 const framePageUrls = new Map();
+const blockedFrames = new Set();
 const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
@@ -107,6 +108,7 @@ async function showResultInTab(tabId, result) {
 function observeFromMessage(message, sender) {
   const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
   const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+  if (blockedFrames.has(frameKey(tabId, frameId))) return null;
   const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.candidate && message.candidate.pageUrl, sender));
   return candidateStore.observe(candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId));
 }
@@ -130,7 +132,10 @@ function bindFramePage(tabId, frameId, pageUrl) {
   const key = frameKey(tabId, frameId);
   const previous = framePageUrls.get(key);
   if (!previous) candidateStore.reassignFramePage(tabId, frameId, stable);
-  else if (previous !== stable) candidateStore.removeFrame(tabId, frameId);
+  else if (previous !== stable) {
+    candidateStore.removeFrame(tabId, frameId);
+    blockedFrames.delete(key);
+  }
   framePageUrls.set(key, stable);
   return stable;
 }
@@ -165,7 +170,15 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
     const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.pageUrl, sender));
-    sendResponse({ candidates: candidateStore.list({ tabId, frameId, pageUrl }) });
+    sendResponse({ candidates: blockedFrames.has(frameKey(tabId, frameId)) ? [] : candidateStore.list({ tabId, frameId, pageUrl }) });
+    return false;
+  }
+  if (message.type === "stratrum-frame-blocked") {
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+    const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+    blockedFrames.add(frameKey(tabId, frameId));
+    candidateStore.removeFrame(tabId, frameId);
+    sendResponse({ success: true });
     return false;
   }
   if (message.type === "stratrum-remove-candidates") {
@@ -176,6 +189,13 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (message.type === "stratrum-download-request") {
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
+    const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
+    const selected = candidateStore.list({ tabId, frameId }).find((candidate) => candidate.url === message.url);
+    if (!selected) {
+      sendResponse({ success: false, code: "invalid_candidate", message: "No complete downloadable media detected." });
+      return false;
+    }
     sendToDesktopApp(message.url, "default").then(sendResponse);
     return true;
   }
@@ -186,6 +206,7 @@ if (extensionApi.tabs && extensionApi.tabs.onRemoved) {
   extensionApi.tabs.onRemoved.addListener((tabId) => {
     candidateStore.removeTab(tabId);
     for (const key of framePageUrls.keys()) if (key.startsWith(`${tabId}:`)) framePageUrls.delete(key);
+    for (const key of blockedFrames) if (key.startsWith(`${tabId}:`)) blockedFrames.delete(key);
   });
 }
 
@@ -194,7 +215,9 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
     if (details.tabId < 0 || candidateApi.isSegmentUrl(details.url)) return;
     const frameId = Number.isInteger(details.frameId) ? details.frameId : 0;
     const isFrameDocument = details.type === "main_frame" || details.type === "sub_frame";
+    if (isFrameDocument) blockedFrames.delete(frameKey(details.tabId, frameId));
     if (isFrameDocument) bindFramePage(details.tabId, frameId, details.url);
+    if (blockedFrames.has(frameKey(details.tabId, frameId))) return;
     const headers = details.responseHeaders || [];
     const headerValue = (name) => {
       const header = headers.find((item) => String(item.name || "").toLowerCase() === name);
@@ -202,6 +225,7 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
     };
     const contentType = headerValue("content-type");
     const contentDisposition = headerValue("content-disposition");
+    const contentRange = headerValue("content-range");
     if (!candidateApi.isUsefulResponseEvidence(contentType, contentDisposition) && !/\.(?:m3u8|mpd)(?:$|[?#])/i.test(details.url)) return;
     candidateStore.observe({
       tabId: details.tabId,
@@ -210,6 +234,9 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
       url: details.url,
       contentType,
       contentDisposition,
+      contentRange,
+      statusCode: details.statusCode,
+      requestType: details.type,
       topLevelDocument: details.type === "main_frame",
       evidence: details.type === "main_frame" ? "webRequest-main-frame" : "webRequest-response"
     });

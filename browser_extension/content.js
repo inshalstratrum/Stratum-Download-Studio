@@ -1,4 +1,5 @@
 const extensionApi = globalThis.browser || globalThis.chrome;
+const candidateApi = globalThis.StratumMediaCandidates;
 const mediaControls = new Map();
 const elementCandidateIds = new WeakMap();
 const elementEvidence = new WeakMap();
@@ -41,11 +42,6 @@ function mediaKindFor(element) {
 }
 
 function elementCandidates(element, evidence = "dom-media") {
-  if (element.tagName === "A") {
-    const kind = /\.(?:mp3|m4a|aac|ogg|oga|opus|wav|flac)(?:$|[?#])/i.test(element.href || "") ? "audio" : "video";
-    return [rawCandidate(element.href, kind, "media-link", { title: element.textContent || element.title || pageTitle() })];
-  }
-
   if (drmMedia.has(element) || element.mediaKeys) return [];
 
   const kind = mediaKindFor(element);
@@ -63,7 +59,6 @@ function elementCandidates(element, evidence = "dom-media") {
     candidates.push(rawCandidate(source.url, kind, source.source, {
       contentType: source.type,
       blobOnly,
-      allowPage: true,
       title: element.getAttribute("aria-label") || element.title || pageTitle(),
       width: Number(element.videoWidth) || 0,
       height: Number(element.videoHeight) || 0
@@ -175,7 +170,7 @@ async function handleControlClick(element, button) {
     return;
   }
   if (candidates.length === 0) {
-    showStatus("No safe downloadable media was detected on this player.");
+    showStatus("No complete downloadable media detected.");
   } else if (candidates.length === 1) {
     await requestDownload(candidates[0], button);
   } else {
@@ -192,7 +187,7 @@ function positionControls() {
       continue;
     }
     const rect = element.getBoundingClientRect();
-    const minimumHeight = element.tagName === "AUDIO" || element.tagName === "A" ? 28 : 80;
+    const minimumHeight = element.tagName === "AUDIO" ? 28 : 80;
     const usefulSize = rect.width >= 160 && rect.height >= minimumHeight;
     button.hidden = !usefulSize || rect.bottom < 0 || rect.right < 0;
     if (!button.hidden) {
@@ -228,17 +223,17 @@ function attachControl(element) {
   schedulePositionUpdate();
 }
 
-function isMediaLink(element) {
-  return element.tagName === "A" && /\.(?:mp4|webm|mov|mkv|avi|mp3|m4a|aac|ogg|oga|opus|wav|flac|m3u8|mpd)(?:$|[?#])/i.test(element.href || "");
+function isOverlayTarget(element) {
+  return candidateApi.isOverlayTargetDescriptor({ tagName: element.tagName, href: element.href || "" });
 }
 
 function scanNode(node) {
   if (!showMediaButtons || !(node instanceof Element)) return;
   const consider = (element) => {
-    if (element.matches("video, audio") || isMediaLink(element)) attachControl(element);
+    if (isOverlayTarget(element)) attachControl(element);
   };
   consider(node);
-  node.querySelectorAll("video, audio, a[href]").forEach(consider);
+  node.querySelectorAll("video, audio").forEach(consider);
 }
 
 function removeAllControls() {
@@ -308,7 +303,7 @@ if (supportedPageUrl()) {
     }
     schedulePositionUpdate();
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "poster", "href"] });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "poster"] });
 
   document.addEventListener("loadstart", (event) => {
     if (event.target instanceof HTMLMediaElement && mediaControls.has(event.target)) {
@@ -323,6 +318,8 @@ if (supportedPageUrl()) {
   document.addEventListener("encrypted", (event) => {
     if (!(event.target instanceof HTMLMediaElement)) return;
     drmMedia.add(event.target);
+    extensionApi.runtime.sendMessage({ type: "stratrum-frame-blocked" }).catch(() => {});
+    showStatus("DRM or access-controlled media is not supported.");
     removeElementCandidates(event.target);
     const button = mediaControls.get(event.target);
     if (button) button.remove();

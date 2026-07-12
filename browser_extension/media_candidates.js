@@ -11,13 +11,14 @@
   const DIRECT_EXTENSIONS = /\.(?:mp4|webm|mov|mkv|avi|mp3|m4a|aac|ogg|oga|opus|wav|flac)(?:$|[?#])/i;
   const HLS_EXTENSION = /\.m3u8(?:$|[?#])/i;
   const DASH_EXTENSION = /\.mpd(?:$|[?#])/i;
-  const SEGMENT_PATH = /(?:\.(?:ts|m4s|cmfv|cmfa)(?:$|[?#])|(?:^|[\/_-])(?:segment|seg|chunk|frag|fragment|videoplayback)[\/_-]?\d*(?:[.?#/_-]|$))/i;
+  const SEGMENT_PATH = /(?:\.(?:ts|m4s|cmfv|cmfa)(?:$|[?#])|(?:^|\/)(?:init(?:ialization)?|segment|seg|chunk|frag|fragment)(?:[-_.][^/?#]*)?\.(?:mp4|m4a|webm)(?:$|[?#])|(?:^|[\/_-])videoplayback(?:[.?#/_-]|$))/i;
+  const ADAPTIVE_REPRESENTATION_PATH = /(?:^|\/)(?:[av]-\d{3,4}p-\d+k[^/]*|[^/]*(?:representation|bitrate)[_-]\d+[^/]*|[^/]*[_-](?:\d{3,4}p|\d{2,6}k)[_-][^/]*)\.(?:mp4|m4a|webm)(?:$|[?#])/i;
   const MEDIA_CONTENT_TYPE = /^(?:video|audio)\//i;
   const MANIFEST_CONTENT_TYPE = /(?:mpegurl|vnd\.apple\.mpegurl|dash\+xml)/i;
   const MEDIA_DISPOSITION = /filename\*?\s*=\s*(?:UTF-8''|["'])?[^;"']+\.(?:mp4|webm|mov|mkv|avi|mp3|m4a|aac|ogg|oga|opus|wav|flac|m3u8|mpd)/i;
   const MAX_TITLE_LENGTH = 160;
   const MAX_URL_LENGTH = 8192;
-  const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata", "media-link"]);
+  const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata"]);
   const TRANSIENT_QUERY_KEYS = /^(?:token|access_token|auth|authorization|signature|sig|expires?|expiry|exp|e|policy|key-pair-id|hdnts|hdntl|hdnea|hmac|jwt|session|sessionid|acl|ip|ipbits|st|__gda__|x-amz-.+|x-goog-.+|range|rn|rbuf|sq)$/i;
 
   function safeUrl(value, baseUrl) {
@@ -87,7 +88,7 @@
       return false;
     }
     const host = parsed.hostname.toLowerCase();
-    return Boolean(youtubeVideoId(parsed)) || /(^|\.)vimeo\.com$/.test(host);
+    return Boolean(youtubeVideoId(parsed)) || /(^|\.)vimeo\.com$/.test(host) || (/(^|\.)cnbc\.com$/.test(host) && /^\/video\//.test(parsed.pathname));
   }
 
   function isSegmentUrl(value) {
@@ -96,7 +97,15 @@
       return false;
     }
     const host = parsed.hostname.toLowerCase();
-    return host === "googlevideo.com" || host.endsWith(".googlevideo.com") || SEGMENT_PATH.test(`${parsed.pathname}${parsed.search}`);
+    return host === "googlevideo.com" || host.endsWith(".googlevideo.com") || SEGMENT_PATH.test(`${parsed.pathname}${parsed.search}`) || parsed.searchParams.has("range");
+  }
+
+  function isNetworkFragment(raw, parsed, evidence, completeAttachment) {
+    const networkOnly = evidence.some((item) => item === "performance-resource" || item === "webRequest-response");
+    if (!networkOnly) return false;
+    if (Number(raw.statusCode) === 206 || String(raw.contentRange || "").trim()) return true;
+    if (completeAttachment) return false;
+    return ADAPTIVE_REPRESENTATION_PATH.test(`${parsed.pathname}${parsed.search}`);
   }
 
   function inferKind(raw, contentType, parsed) {
@@ -118,12 +127,7 @@
     const disposition = String(raw.contentDisposition || "");
     const evidence = Array.isArray(raw.evidence) ? raw.evidence : [raw.evidence || "unknown"];
 
-    if (raw.blobOnly) {
-      if (!pageUrl) {
-        return null;
-      }
-      return finish(pageUrl, "page", raw.mediaKind || "video", raw, evidence.concat("blob-page-fallback"), pageUrl);
-    }
+    if (raw.blobOnly) return pageUrl && isExtractorPage(pageUrl) ? finish(pageUrl, "page", raw.mediaKind || "video", raw, evidence.concat("extractor-page"), pageUrl) : null;
     if (!parsed || isSegmentUrl(parsed.href)) {
       return null;
     }
@@ -138,11 +142,13 @@
     if (DASH_EXTENSION.test(parsed.href) || /dash\+xml/i.test(contentType)) {
       return finish(parsed.href, "dash", inferKind(raw, contentType, parsed), raw, evidence, pageUrl);
     }
-    if (DIRECT_EXTENSIONS.test(parsed.href) || MEDIA_CONTENT_TYPE.test(contentType) || MEDIA_DISPOSITION.test(disposition)) {
+    const completeAttachment = /\battachment\b/i.test(disposition) && MEDIA_DISPOSITION.test(disposition);
+    if (isNetworkFragment(raw, parsed, evidence, completeAttachment)) return null;
+    const explicitDomSource = evidence.some((item) => DOM_EVIDENCE.has(item));
+    const verifiedMainFrameMedia = evidence.includes("webRequest-main-frame") && MEDIA_CONTENT_TYPE.test(contentType);
+    const verifiedDocumentMedia = raw.topLevelDocument && evidence.includes("top-level-media-document") && MEDIA_CONTENT_TYPE.test(contentType) && DIRECT_EXTENSIONS.test(parsed.href);
+    if (explicitDomSource || verifiedMainFrameMedia || verifiedDocumentMedia || completeAttachment) {
       return finish(parsed.href, "direct_media", inferKind(raw, contentType, parsed), raw, evidence, pageUrl);
-    }
-    if (raw.allowPage && pageUrl) {
-      return finish(pageUrl, "page", raw.mediaKind || "video", raw, evidence.concat("page-fallback"), pageUrl);
     }
     return null;
   }
@@ -222,8 +228,9 @@
       format,
       resolution: width > 0 && height > 0 ? `${Math.round(width)}×${Math.round(height)}` : "",
       bitrateKbps: bitrate > 0 ? Math.round(bitrate) : 0,
-      safeTarget: type === "direct_media" && filename ? filename.slice(0, 100) : hostname.slice(0, 100),
-      pageDescriptor: /(^|\.)youtu(?:be\.com|\.be)$/.test(hostname) || /(^|\.)youtube-nocookie\.com$/.test(hostname) ? "YouTube page" : /(^|\.)vimeo\.com$/.test(hostname) ? "Vimeo page" : "Page",
+      safeTarget: (type === "direct_media" || type === "hls" || type === "dash") && filename ? filename.slice(0, 100) : hostname.slice(0, 100),
+      pageDescriptor: /(^|\.)youtu(?:be\.com|\.be)$/.test(hostname) || /(^|\.)youtube-nocookie\.com$/.test(hostname) ? "YouTube" : /(^|\.)vimeo\.com$/.test(hostname) ? "Vimeo" : /(^|\.)cnbc\.com$/.test(hostname) ? "CNBC page" : "Page",
+      provider: /(?:^|\.)(?:brightcove\.com|boltdns\.net)$/.test(hostname) ? "Brightcove" : "",
       mediaKind
     };
   }
@@ -232,8 +239,8 @@
     const parts = [mediaKind === "audio" ? "Audio" : "Video"];
     if (type === "page") parts.push(metadata.pageDescriptor);
     if (type === "direct_media") parts.push(`Direct${metadata.format ? ` ${metadata.format}` : ""}`);
-    if (type === "hls") parts.push("HLS manifest");
-    if (type === "dash") parts.push("DASH manifest");
+    if (type === "hls") parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}HLS manifest`);
+    if (type === "dash") parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}DASH manifest`);
     if (metadata.resolution) parts.push(metadata.resolution);
     if (metadata.bitrateKbps) parts.push(`${metadata.bitrateKbps} kbps`);
     if (metadata.safeTarget) parts.push(metadata.safeTarget);
@@ -402,5 +409,10 @@
     return MEDIA_CONTENT_TYPE.test(String(contentType || "")) || MANIFEST_CONTENT_TYPE.test(String(contentType || "")) || MEDIA_DISPOSITION.test(String(contentDisposition || ""));
   }
 
-  return { CandidateStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl };
+  function isOverlayTargetDescriptor(descriptor) {
+    const tagName = String(descriptor && descriptor.tagName || "").toUpperCase();
+    return tagName === "VIDEO" || tagName === "AUDIO";
+  }
+
+  return { CandidateStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl };
 });

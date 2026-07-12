@@ -5,6 +5,7 @@ const {
   applyTrustedOwner,
   canonicalCandidateUrl,
   classifyCandidate,
+  isOverlayTargetDescriptor,
   isSegmentUrl,
   isUsefulResponseEvidence,
   stablePageUrl
@@ -18,20 +19,21 @@ function classify(url, extra = {}) {
 
 test("classifies direct video and audio formats", () => {
   for (const url of ["movie.mp4", "movie.webm"]) {
-    const item = classify(url);
+    const item = classify(url, { evidence: "dom-media" });
     assert.equal(item.type, "direct_media");
     assert.equal(item.mediaKind, "video");
   }
   for (const url of ["song.mp3", "song.m4a"]) {
-    const item = classify(url);
+    const item = classify(url, { evidence: "dom-media" });
     assert.equal(item.type, "direct_media");
     assert.equal(item.mediaKind, "audio");
   }
 });
 
 test("uses response evidence for extensionless media", () => {
-  assert.equal(classify("https://cdn.test/play?id=1", { contentType: "video/mp4" }).type, "direct_media");
-  assert.equal(classify("https://cdn.test/get?id=2", { contentDisposition: "attachment; filename=track.m4a" }).mediaKind, "audio");
+  assert.equal(classify("https://cdn.test/play?id=1", { contentType: "video/mp4", evidence: "webRequest-response" }), null);
+  assert.equal(classify("https://cdn.test/play?id=1", { contentType: "video/mp4", evidence: "webRequest-main-frame" }).type, "direct_media");
+  assert.equal(classify("https://cdn.test/get?id=2", { contentDisposition: "attachment; filename=track.m4a", evidence: "webRequest-response" }).mediaKind, "audio");
   assert.equal(isUsefulResponseEvidence("audio/aac", ""), true);
 });
 
@@ -40,10 +42,12 @@ test("classifies one HLS or DASH manifest", () => {
   const dash = classify("https://cdn.test/manifest.mpd", { contentType: "application/dash+xml" });
   assert.equal(hls.type, "hls");
   assert.equal(hls.priority, 2);
-  assert.match(hls.label, /Video • HLS manifest • cdn\.test/);
+  assert.equal(hls.label, "Video • HLS manifest • master.m3u8");
   assert.equal(dash.type, "dash");
   assert.equal(dash.priority, 2);
+  assert.equal(dash.label, "Video • DASH manifest • manifest.mpd");
   assert.equal(classify("https://cdn.test/live", { contentType: "application/vnd.apple.mpegurl" }).type, "hls");
+  assert.equal(classify("https://cdn.test/initialization/manifest.mpd").type, "dash");
 });
 
 test("suppresses segments, chunks, and googlevideo fragments", () => {
@@ -69,13 +73,14 @@ test("normalizes YouTube and embedded YouTube to one stable page", () => {
   );
 });
 
-test("rejects unsupported schemes and supports blob page fallback", () => {
+test("rejects unsupported schemes and only permits extractor blob fallback", () => {
   for (const url of ["blob:https://example.test/id", "data:video/mp4;base64,AAAA", "javascript:void(0)", "chrome-extension://id/file.mp4", "moz-extension://id/file.mp4", "file:///movie.mp4"]) {
     assert.equal(classify(url), null);
   }
   const fallback = classifyCandidate({ pageUrl, url: "blob:https://example.test/id", blobOnly: true, mediaKind: "video", evidence: "dom-media" });
-  assert.equal(fallback.type, "page");
-  assert.equal(fallback.url, pageUrl);
+  assert.equal(fallback, null);
+  const extractorFallback = classifyCandidate({ pageUrl: "https://www.youtube.com/embed/AbCdEf12345", url: "blob:https://youtube.com/id", blobOnly: true, mediaKind: "video", evidence: "dom-media" });
+  assert.equal(extractorFallback.type, "page");
   assert.equal(classify("https://user:secret@cdn.test/movie.mp4"), null);
   assert.equal(classify(`https://cdn.test/${"x".repeat(8200)}.mp4`), null);
 });
@@ -86,17 +91,17 @@ test("deduplicates DOM, performance, and webRequest evidence", () => {
   const base = { tabId: 4, frameId: 0, pageUrl, url: "https://cdn.test/movie.mp4" };
   const first = store.observe({ ...base, evidence: "dom-media" });
   now += 10;
-  const second = store.observe({ ...base, evidence: "performance-resource" });
+  const second = store.observe({ ...base, evidence: "nested-source" });
   now += 10;
-  store.observe({ ...base, contentType: "video/mp4", evidence: "webRequest-response" });
+  store.observe({ ...base, contentType: "video/mp4", evidence: "source-change" });
   assert.equal(first.id, second.id);
   assert.equal(store.list({ tabId: 4 }).length, 1);
-  assert.deepEqual(store.list({ tabId: 4 })[0].evidence, ["dom-media", "performance-resource", "webRequest-response"]);
+  assert.deepEqual(store.list({ tabId: 4 })[0].evidence, ["dom-media", "nested-source", "source-change"]);
 });
 
 test("keeps tab and frame candidates separate", () => {
   const store = new CandidateStore();
-  const base = { pageUrl, url: "https://cdn.test/movie.mp4", evidence: "fixture" };
+  const base = { pageUrl, url: "https://cdn.test/movie.mp4", evidence: "dom-media" };
   const main = store.observe({ ...base, tabId: 1, frameId: 0 });
   const frame = store.observe({ ...base, tabId: 1, frameId: 2 });
   const otherTab = store.observe({ ...base, tabId: 2, frameId: 0 });
@@ -110,7 +115,7 @@ test("bounds candidates and expires stale observations", () => {
   const store = new CandidateStore({ maxCandidates: 2, ttlMs: 1000, clock: () => now });
   for (let index = 0; index < 3; index += 1) {
     now += 10;
-    store.observe({ tabId: 1, frameId: 0, pageUrl, url: `https://cdn.test/${index}.mp4`, evidence: "fixture" });
+    store.observe({ tabId: 1, frameId: 0, pageUrl, url: `https://cdn.test/${index}.mp4`, evidence: "dom-media" });
   }
   assert.equal(store.list().length, 2);
   now += 1001;
@@ -119,14 +124,14 @@ test("bounds candidates and expires stale observations", () => {
 
 test("removes only candidates owned by the addressed tab and frame", () => {
   const store = new CandidateStore();
-  const first = store.observe({ tabId: 1, frameId: 0, pageUrl, url: "https://cdn.test/one.mp4", evidence: "fixture" });
-  const second = store.observe({ tabId: 1, frameId: 2, pageUrl, url: "https://cdn.test/two.mp4", evidence: "fixture" });
+  const first = store.observe({ tabId: 1, frameId: 0, pageUrl, url: "https://cdn.test/one.mp4", evidence: "dom-media" });
+  const second = store.observe({ tabId: 1, frameId: 2, pageUrl, url: "https://cdn.test/two.mp4", evidence: "dom-media" });
   store.removeIds([first.id, second.id], { tabId: 1, frameId: 0 });
   assert.deepEqual(store.list().map((item) => item.id), [second.id]);
 });
 
-test("creates a direct top-level MP4 document candidate", () => {
-  const byExtension = classifyCandidate({
+test("creates a direct top-level MP4 only from strong document evidence", () => {
+  const extensionOnly = classifyCandidate({
     tabId: 8,
     frameId: 0,
     pageUrl: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
@@ -134,19 +139,22 @@ test("creates a direct top-level MP4 document candidate", () => {
     topLevelDocument: true,
     evidence: "top-level-media-document"
   });
-  const byContentType = classifyCandidate({
-    tabId: 8, frameId: 0, pageUrl: "https://media.test/play", url: "https://media.test/play",
+  const byDocumentType = classifyCandidate({
+    tabId: 8, frameId: 0,
+    pageUrl: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+    url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
     contentType: "video/mp4", topLevelDocument: true, evidence: "top-level-media-document"
   });
   const byVerifiedResponse = classifyCandidate({
     tabId: 8, frameId: 0, pageUrl: "https://media.test/file", url: "https://media.test/file",
     contentType: "video/mp4", evidence: "webRequest-main-frame"
   });
-  for (const item of [byExtension, byContentType, byVerifiedResponse]) {
+  assert.equal(extensionOnly, null);
+  for (const item of [byDocumentType, byVerifiedResponse]) {
     assert.equal(item.type, "direct_media");
     assert.equal(item.priority, 4);
   }
-  assert.equal(byExtension.label, "Video • Direct MP4 • flower.mp4");
+  assert.equal(byDocumentType.label, "Video • Direct MP4 • flower.mp4");
 });
 
 test("captures MPD response evidence and prefers it over DASH segments", () => {
@@ -224,4 +232,57 @@ test("late trusted frame-page binding keeps an early manifest owned by its playe
   store.reassignFramePage(13, 2, "https://shaka.test/demo/player");
   store.observe({ tabId: 13, frameId: 2, pageUrl: "https://shaka.test/demo/player", url: "https://shaka.test/demo/player", blobOnly: true, evidence: "dom-media" });
   assert.deepEqual(store.list({ tabId: 13, frameId: 2, pageUrl: "https://shaka.test/demo/player" }).map((item) => item.id), [manifest.id]);
+});
+
+test("rejects CMAF init, byte-range, and fragmented representation requests", () => {
+  const network = { pageUrl: "https://player.test", contentType: "video/mp4", evidence: "webRequest-response" };
+  for (const url of [
+    "https://cdn.test/init-f1-a1.mp4",
+    "https://cdn.test/video/init_0.mp4",
+    "https://cdn.test/v-0576p-1400k-libx264-s6.mp4",
+    "https://cdn.test/movie.mp4?range=0-999"
+  ]) assert.equal(classifyCandidate({ ...network, url }), null);
+  assert.equal(classifyCandidate({ ...network, url: "https://cdn.test/movie.mp4", statusCode: 206 }), null);
+  assert.equal(classifyCandidate({ ...network, url: "https://cdn.test/movie.mp4", contentRange: "bytes 0-999/5000" }), null);
+});
+
+test("media extension alone is not complete-file evidence", () => {
+  assert.equal(classify("https://cdn.test/movie.mp4", { evidence: "performance-resource" }), null);
+  assert.equal(classify("https://cdn.test/audio.m4a", { contentType: "audio/mp4", evidence: "webRequest-response" }), null);
+  assert.equal(classify("https://cdn.test/movie.mp4", { evidence: "dom-media" }).type, "direct_media");
+  assert.equal(classify("https://cdn.test/download", { contentDisposition: "attachment; filename=movie.mp4", evidence: "webRequest-response" }).type, "direct_media");
+  assert.equal(classify("https://cdn.test/movie_1080p_final.mp4", { contentDisposition: "attachment; filename=movie_1080p_final.mp4", evidence: "webRequest-response" }).type, "direct_media");
+});
+
+test("normal HTML never becomes a direct media document", () => {
+  assert.equal(classifyCandidate({ pageUrl: "https://example.test/article.mp4", url: "https://example.test/article.mp4", contentType: "text/html", topLevelDocument: true, evidence: "top-level-media-document" }), null);
+  assert.equal(classifyCandidate({ pageUrl: "https://example.test/article", url: "https://example.test/article", contentType: "text/html", evidence: "webRequest-main-frame" }), null);
+});
+
+test("Brightcove manifest replaces an Al Jazeera-style page fallback", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 14, frameId: 0, pageUrl: "https://www.aljazeera.com/news/example" };
+  assert.equal(store.observe({ ...owner, url: owner.pageUrl, blobOnly: true, evidence: "dom-media" }), null);
+  const manifest = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/manifest/v1/hls/master.m3u8?token=secret", contentType: "application/x-mpegURL", evidence: "webRequest-response" });
+  assert.equal(manifest.type, "hls");
+  assert.match(manifest.label, /^Video • Brightcove HLS manifest/);
+  assert.equal(store.list(owner).length, 1);
+  assert.match(store.list(owner)[0].url, /\?token=secret$/);
+});
+
+test("CNBC supported extractor page and HLS MIME regressions remain accepted", () => {
+  const cnbc = classifyCandidate({ pageUrl: "https://www.cnbc.com/video/2026/07/11/example.html", url: "https://www.cnbc.com/video/2026/07/11/example.html", title: "Housing reform", evidence: "page-url" });
+  assert.equal(cnbc.type, "page");
+  assert.match(cnbc.label, /Video • CNBC page/);
+  assert.equal(classify("https://cdn.test/live?id=public", { contentType: "application/x-mpegURL", evidence: "webRequest-response" }).type, "hls");
+});
+
+test("embedded iframe overlay ownership yields two buttons, not four", () => {
+  const parentTargets = [
+    { tagName: "iframe", href: "https://www.youtube.com/embed/AbCdEf12345" },
+    { tagName: "iframe", href: "https://www.youtube.com/embed/ZyXwVu98765" }
+  ];
+  const frameTargets = [{ tagName: "video" }, { tagName: "video" }];
+  assert.equal(parentTargets.filter(isOverlayTargetDescriptor).length, 0);
+  assert.equal(frameTargets.filter(isOverlayTargetDescriptor).length, 2);
 });

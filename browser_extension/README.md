@@ -4,7 +4,7 @@ The Chromium Manifest V3 source in this directory supports Google Chrome and Mic
 
 ## Why broad site access is requested
 
-Automatic media detection requires content scripts in permitted HTTP/HTTPS frames and non-blocking response observations on those sites. Chrome and Edge therefore show a broad permission warning. Detection observes media elements, nested sources, safe media links, supported embedded player URLs, resource URLs, and media response types. It does not read forms, cookies, authorization headers, private page contents, or unrelated page text. Candidate metadata remains inside the extension until the user clicks a Stratum button; no telemetry is sent externally.
+Automatic media detection requires content scripts in permitted HTTP/HTTPS frames and non-blocking response observations on those sites. Chrome and Edge therefore show a broad permission warning. Detection observes media elements, nested sources, supported frame-local extractor pages, manifest resource URLs, and strong complete-file response evidence. A media-looking network extension alone is not treated as a complete download. The extension does not read forms, cookies, authorization headers, private page contents, or unrelated page text. Candidate metadata remains inside the extension until the user clicks a Stratum button; no telemetry is sent externally.
 
 Direct HTTP/HTTPS media and HLS/DASH manifests are offered once. Segment and chunk floods are suppressed. Blob-only players fall back to the safe page URL; `blob:`, `data:`, extension, file, and script URLs are never sent. DRM/EME media is unsupported. Detection does not claim universal site support and does not cover general files such as images, documents, archives, installers, or ISOs.
 
