@@ -1,0 +1,13 @@
+{
+  "deno": {
+    "product": "Deno",
+    "version": "2.8.3",
+    "architecture": "x86_64-pc-windows-msvc",
+    "official_release_url": "https://github.com/denoland/deno/releases/download/v2.8.3/deno-x86_64-pc-windows-msvc.zip",
+    "archive_sha256": "7fdd1f42e6b0855421ecf27bb406e2492ade1087c85e30ebf0deab6280ea743c",
+    "expected_executable": "deno.exe",
+    "executable_sha256": "c5db43554211b07181bf92702789466d3403e450cffc09e123583f1c315063ec",
+    "licence": "MIT",
+    "provenance": "https://github.com/denoland/deno/releases/tag/v2.8.3"
+  }
+}

@@ -1,17 +1,16 @@
 # Current State
 
-- Phase: 2A.7B — controlled yt-dlp upgrade and reproducible version pinning complete on 2026-07-12.
-- Branch: `phase-2a7b-ytdlp-upgrade`.
-- Baseline preserved: `3c7f8d71b1bc8b3814fd18d1059ea35ed58f1506`.
-- Commit: `Phase 2A.7B: Pin and upgrade yt-dlp to 2026.07.04` (this phase commit; use `git rev-parse HEAD` after commit for its immutable hash).
-- Approved backend: official stable GitHub release `2026.07.04`, corresponding to official PyPI package metadata `2026.7.4`. The official universal wheel is locked by SHA-256 `f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266`.
-- Controlled development resolution: `scripts/bootstrap_ytdlp.ps1` uses isolated pip, the official PyPI index, wheel-only/no-dependency installation, `--require-hashes`, and a clean staging directory. It promotes the verified package into ignored repo-local `.deps/`; Stratum refuses an absent, ambient, wrong-version, wrong-path, or wheel-RECORD-invalid module.
-- Runtime policy: Python-module integration remains `import yt_dlp` through `load_controlled_yt_dlp()`. Package version, module release, controlled path and installed wheel contents are verified. Ambient yt-dlp plugins and unapproved Phase B optional modules are disabled/excluded.
-- Packaging gate: `StratumDownloadStudio.spec` validates `.deps`, searches it first, copies only its `yt-dlp` metadata, and excludes ambient optional backends. A clean PyInstaller build completed; recursive archive inspection found the pinned module/metadata and zero excluded optional-module entries. Generated `build/` and `dist/` artifacts remain ignored.
-- Regression: 6 dependency-policy tests, 36 focused metadata/format-selection/download/cancellation/verification tests, and the final full suite of 260 tests passed.
-- Scope confirmation: no new extraction feature, website routing, browser-picker change, gallery-dl, Poppler, EJS/runtime/network optional dependency, Phase 2B work, UI redesign, extension file, FFmpeg binary, or media behavior was added. Extension packaging was not rerun because extension files were unchanged.
-- Remaining blockers: Phase B must separately govern `yt-dlp-ejs`, one approved JavaScript runtime, and optional network/media dependencies. Repo-local FFmpeg/FFprobe remain GPL-enabled development binaries; wider engine routing, lawful site certification and release dependency/SBOM work remain pending.
-- Next task: only a separately authorized later phase from `docs/16_MEDIA_ENGINE_UPGRADE_AND_BACKEND_PLAN.md`; Phase 2B and UI redesign remain unstarted.
+- Phase: 2A.7C — controlled modern yt-dlp capability dependencies complete on 2026-07-12.
+- Branch: `phase-2a7c-ytdlp-capabilities`; baseline `054dabf1360089d814f40a60ef88728cd7bfc845` preserved.
+- Commit: `Phase 2A.7C: Add controlled yt-dlp capability dependencies` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Backend: yt-dlp `2026.07.04` remains pinned. Eighteen exact official PyPI wheels, including `yt-dlp-ejs 0.8.0`, are hash-locked and RECORD-verified under `.deps/`; Deno `2.8.3` is ZIP/executable-hash-verified under `.tools/`.
+- Runtime: metadata and downloads pass only `{'deno': {'path': <controlled deno.exe>}}`; remote EJS components remain disabled, ambient PATH runtimes/plugins cannot be selected, and curl impersonation is available but never globally forced.
+- Bootstrap: isolated wheel-only official-PyPI install and exact official GitHub Deno download occur in separate staging roots. Both bundles must verify before promotion; a failed promotion restores prior local bundles. Global Python, PATH, registry and pip are unchanged.
+- Packaging: clean PyInstaller 6.20.0/Python 3.14.4 build passed. Recursive inspection found approved metadata, EJS/CA/native data and controlled Deno; excluded alternatives/plugins/self-tests had zero entries. Frozen startup stayed healthy and embedded Deno executed as `2.8.3`. Development EXE: 116,325,205 bytes, +70,986,226 bytes over 2A.7B.
+- Regression: 14 dependency/capability tests, 20 focused existing contracts, and the one-time full suite of 267 tests passed. Python compilation, lock/policy verification and frozen inspection passed.
+- Scope: gallery-dl, Poppler, canonical routing, picker redesign, social-site fixes, Phase 2B, UI work and extension files were not started or changed; extension packaging was not rerun.
+- Remaining: listed live-site/manual checks, routing-phase failures, FFmpeg/FFprobe provenance, Mutagen GPL-2.0-or-later and complete release SBOM/licence/legal review remain release gates. This was not a commercial release build.
+- Detail: `docs/18_PHASE_2A7C_YTDLP_CAPABILITIES.md`.
 
 ## Roadmap — record only
 

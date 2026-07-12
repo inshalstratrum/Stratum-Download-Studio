@@ -1,6 +1,6 @@
 # Phase 2A.7A Media Engine Upgrade and Backend Plan
 
-Status: design and sequencing only. Nothing in this document authorizes an update, install, proof of concept, packaging run, source edit, browser-picker change, or Phase 2B.
+Status: roadmap and sequencing record. Controlled phases A and B were separately authorized and completed in Phase 2A.7B/2A.7C; this document does not authorize any later proof of concept, picker/routing work, or Phase 2B.
 
 ## Gate principles
 
@@ -14,8 +14,8 @@ Status: design and sequencing only. Nothing in this document authorizes an updat
 
 | Item | Required decision/procedure |
 |---|---|
-| Current / target | Current imported pip module `2026.03.17`; proposed stable target [`2026.07.04`](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04), verified from the official GitHub `releases/latest` redirect on 2026-07-12. Reconfirm the latest approved stable immediately before the authorized upgrade; do not float the target mid-phase. |
-| Integration method | Keep Python-module integration initially. Create an isolated build environment and exact lock/constraints with hashes for `yt-dlp[default]` and the approved optional extras. Import from that environment and freeze that same environment. |
+| Current / target | Completed target [`2026.07.04`](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04), corresponding to PyPI `2026.7.4`; retained unchanged through Phase 2A.7C. |
+| Integration method | Python-module integration now loads the exact hash-locked controlled wheel set from `.deps`; the frozen build collects that same verified set. |
 | Why not `yt-dlp -U` | Officially for release binaries. Stratum imports a pip module and never invokes the console launcher. `-U` cannot update an already frozen application and is not reproducible/auditable. |
 | Channels | Development: stable by default; a pinned nightly may be evaluated only to diagnose an upstream break, never merged implicitly. Release: exact stable only. Master is excluded. |
 | Official source/integrity | PyPI package linked by the official installation docs or official GitHub release/tag. Resolve hashes into the lock; verify package hashes and tag/release provenance. If any official binary is evaluated, verify upstream signed checksum files/public key. |
@@ -27,7 +27,7 @@ Status: design and sequencing only. Nothing in this document authorizes an updat
 | Manual gate | Owned/authorized public fixtures for priority sites in document 15, plus authentication/DRM rejection, browser-to-desktop routing, quality/audio choices and verified output. Record date/version/OS/result; failures block certification. |
 | Future updater | Signed Stratum release manifest from one hardcoded first-party endpoint, exact allowed package/build IDs and hashes, staged atomic replacement, health check and rollback. It updates the whole tested backend bundle, never `--update-to` user input or arbitrary repositories. |
 
-Important current gaps that block a credible upgrade: no requirements/lock, user-site import, missing `yt-dlp-ejs`, no enabled governed JS runtime, missing Brotli/curl_cffi/pycryptodomex, GPL-enabled FFmpeg release blocker, and a spec with empty binary/data declarations.
+Phase A/B dependency gaps are closed by documents 17 and 18. Remaining release gates are live-site certification, full SBOM/licence/legal review (including Mutagen), and the existing GPL-enabled FFmpeg/FFprobe provenance decision; later routing/selection phases remain separate.
 
 ## Controlled gallery-dl plan
 
@@ -51,7 +51,7 @@ Likely files are forecasts, not authorization. “Full” means `python -m pytes
 | Phase | Purpose and exact scope | Likely files / dependencies / principal risks | Focused tests, full/manual gate, stopping condition and exclusions |
 |---|---|---|---|
 | A. Controlled yt-dlp upgrade | Establish isolated, exact 2026.07.04 module baseline only, after reconfirming the approved stable; no router/UI behavior work. | New dependency lock/constraints, build bootstrap/spec, notices, dependency tests, state docs. Depends on licence/SBOM decision. Risks extractor regressions and accidental ambient imports. | Version/path/hash, clean/frozen import, existing extractor/output tests; Full; priority owned public fixtures. Stop when reproducible and rollback proven. Excludes new dependencies beyond the approved lock and all picker/router changes. |
-| B. Modern yt-dlp dependency completion | Add individually approved EJS/runtime/network/HLS dependencies; configure explicit discovery. | Lock/spec/build manifest, dependency locator/config, tests/notices. Depends A. Risks native binary supply chain, runtime script execution, size/licences. | Present/missing/version/path, EJS sandbox, YouTube fixture, Brotli, TLS impersonation, AES-128 non-DRM HLS; Full; owned sites. Stop at explicit capability inventory. Excludes DRM/auth automation. |
+| B. Modern yt-dlp dependency completion — **complete in Phase 2A.7C (2026-07-12)** | Added individually approved EJS/runtime/network/HLS dependencies with explicit controlled discovery. | Exact wheel lock, Deno manifest, atomic bootstrap, dependency policy, frozen collection and notices are recorded in document 18. | Local capability fixtures, controlled EJS/Deno, archive inspection and full regression passed. Live owned/public site checks and release licence review remain; DRM/auth automation remains excluded. |
 | C. Normalized video/audio metadata and selection | Introduce normalized media info and deterministic complete/split A/V selection; preserve verified output. | Backend model/selector in `stratum_download_studio.py` or extracted modules, tests, docs. Depends A/B. Risks schema loss and wrong format merges. | Complete-with-audio default, split merge, height fallback, smaller-file, deliberate audio, incomplete metadata, no raw fragments/video-only simple choices, FFprobe; Full/manual matrix subset. Stop when selection is deterministic. Excludes other engines/router UI. |
 | D. gallery-dl PoC and licensing decision | Isolated subprocess adapter experiment only; measure coverage, size, IPC and GPL approach. | PoC adapter/fixtures outside production route, lock/build manifest, notices, decision record. Depends legal review. Risks GPL coupling, config/plugin injection and auth leakage. | Isolation, hash, config-ignore, progress/errors, archive, pagination bounds, cancellation tree, malicious templates; Full unaffected; owned gallery fixtures. Stop with explicit include/separate/exclude decision. Excludes production gallery jobs. |
 | E. Image/gallery job engine | Implement approved gallery engine plus direct single-image path, archive/dedup/bounds. | Job model/router-adjacent backend, direct HTTP support subset, adapter, tests/UI contract docs. Depends D and direct-fetch security primitives. Risks huge collections, sensitive metadata, rate limits. | Single/all images, album/profile pagination, archive, collision, concurrency/rate/retry, auth refusal, output validation; Full/manual. Stop at verified local outputs. Excludes PDFs and broad site certification. |

@@ -9,6 +9,10 @@ downloads/
 venv/
 .deps/
 .deps-staging/
+.deps-rollback/
+.tools/
+.tools-staging/
+.tools-rollback/
 *.log
 *.tmp
 *.bak

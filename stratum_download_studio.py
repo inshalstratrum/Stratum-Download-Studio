@@ -19,7 +19,7 @@ import webbrowser
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
-from stratum_dependency_policy import load_controlled_yt_dlp
+from stratum_dependency_policy import controlled_yt_dlp_options, load_controlled_yt_dlp
 
 yt_dlp = load_controlled_yt_dlp()
 
@@ -674,6 +674,7 @@ def build_download_options(profile_name, outtmpl, height=None, metadata=None,
                            progress_hooks=None, postprocessor_hooks=None, speed_limit_bps=0):
     profile = output_profile(profile_name)
     options = {
+        **controlled_yt_dlp_options(),
         'outtmpl': outtmpl,
         'format': build_format_selector(profile_name, height),
         'progress_hooks': list(progress_hooks or []),
@@ -1261,7 +1262,7 @@ class FormatFetcherThread(QThread):
         super().__init__(); self.url = url
     def run(self):
         try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl:
+            with yt_dlp.YoutubeDL({**controlled_yt_dlp_options(), 'quiet': True, 'noplaylist': True}) as ydl:
                 self.formats_ready.emit(ydl.extract_info(self.url, download=False))
         except Exception as e:
             self.error_occurred.emit(str(e))

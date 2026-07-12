@@ -3,40 +3,60 @@
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 
 REPOSITORY_ROOT = Path(SPECPATH).resolve()
 CONTROLLED_DEPENDENCIES = REPOSITORY_ROOT / '.deps'
+CONTROLLED_DENO = REPOSITORY_ROOT / '.tools' / 'deno' / 'deno.exe'
 sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(CONTROLLED_DEPENDENCIES))
 
 from stratum_dependency_policy import (
-    APPROVED_YT_DLP_PACKAGE_VERSION,
-    UNAPPROVED_YT_DLP_OPTIONAL_MODULES,
+    APPROVED_CONTROLLED_MODULES,
+    APPROVED_DISTRIBUTIONS,
+    FORBIDDEN_AMBIENT_RUNTIME_MODULES,
+    INTENTIONALLY_EXCLUDED_MODULES,
+    verify_controlled_deno,
     verify_controlled_install,
 )
 
-distribution = verify_controlled_install(CONTROLLED_DEPENDENCIES)
-if distribution.version != APPROVED_YT_DLP_PACKAGE_VERSION:
-    raise RuntimeError('Refusing to package an unapproved yt-dlp version')
-yt_dlp_metadata = copy_metadata('yt-dlp')
-if not yt_dlp_metadata or any(
-    not Path(source).resolve().is_relative_to(CONTROLLED_DEPENDENCIES)
-    for source, _destination in yt_dlp_metadata
-):
-    raise RuntimeError('Refusing to package yt-dlp metadata outside .deps')
+verified = verify_controlled_install(CONTROLLED_DEPENDENCIES)
+verify_controlled_deno(REPOSITORY_ROOT, CONTROLLED_DENO)
+if set(verified) != set(APPROVED_DISTRIBUTIONS):
+    raise RuntimeError('Refusing to package an incomplete dependency manifest')
+
+datas = [(str(REPOSITORY_ROOT / 'controlled-tools.json'), '.')]
+for distribution_name in APPROVED_DISTRIBUTIONS:
+    metadata = copy_metadata(distribution_name)
+    if not metadata or any(
+        not Path(source).resolve().is_relative_to(CONTROLLED_DEPENDENCIES)
+        for source, _destination in metadata
+    ):
+        raise RuntimeError(f'Refusing metadata for {distribution_name} outside .deps')
+    datas.extend(metadata)
+
+hiddenimports = []
+for module_name in APPROVED_CONTROLLED_MODULES:
+    hiddenimports.append(module_name)
+    hiddenimports.extend(collect_submodules(
+        module_name, filter=lambda name: not name.startswith('Cryptodome.SelfTest')))
+for data_module in ('certifi', 'curl_cffi', 'yt_dlp_ejs'):
+    package_data = collect_data_files(data_module)
+    if any(not Path(source).resolve().is_relative_to(CONTROLLED_DEPENDENCIES) for source, _ in package_data):
+        raise RuntimeError(f'Refusing package data for {data_module} outside .deps')
+    datas.extend(package_data)
 
 a = Analysis(
     ['stratum_download_studio.py'],
     pathex=[str(CONTROLLED_DEPENDENCIES)],
-    binaries=[],
-    datas=yt_dlp_metadata,
-    hiddenimports=['yt_dlp'],
+    binaries=[(str(CONTROLLED_DENO), 'tools/deno')],
+    datas=datas,
+    hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=list(UNAPPROVED_YT_DLP_OPTIONAL_MODULES),
+    excludes=list(INTENTIONALLY_EXCLUDED_MODULES + FORBIDDEN_AMBIENT_RUNTIME_MODULES) + ['Cryptodome.SelfTest'],
     noarchive=False,
     optimize=0,
 )
