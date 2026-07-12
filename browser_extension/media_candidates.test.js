@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CandidateStore,
+  PlayerOwnershipStore,
   applyTrustedOwner,
   canonicalCandidateUrl,
   classifyCandidate,
@@ -41,11 +42,11 @@ test("classifies one HLS or DASH manifest", () => {
   const hls = classify("https://cdn.test/master.m3u8");
   const dash = classify("https://cdn.test/manifest.mpd", { contentType: "application/dash+xml" });
   assert.equal(hls.type, "hls");
-  assert.equal(hls.priority, 2);
-  assert.equal(hls.label, "Video • HLS master • master.m3u8");
+  assert.equal(hls.priority, 0);
+  assert.equal(hls.label, "Video • Best quality");
   assert.equal(dash.type, "dash");
-  assert.equal(dash.priority, 2);
-  assert.equal(dash.label, "Video • DASH manifest • manifest.mpd");
+  assert.equal(dash.priority, 0);
+  assert.equal(dash.label, "Video • Best quality");
   assert.equal(classify("https://cdn.test/live", { contentType: "application/vnd.apple.mpegurl" }).type, "hls");
   assert.equal(classify("https://cdn.test/initialization/manifest.mpd").type, "dash");
 });
@@ -152,9 +153,9 @@ test("creates a direct top-level MP4 only from strong document evidence", () => 
   assert.equal(extensionOnly, null);
   for (const item of [byDocumentType, byVerifiedResponse]) {
     assert.equal(item.type, "direct_media");
-    assert.equal(item.priority, 4);
+    assert.equal(item.priority, 0);
   }
-  assert.equal(byDocumentType.label, "Video • Direct MP4 • flower.mp4");
+  assert.equal(byDocumentType.label, "Video • Best quality");
 });
 
 test("captures MPD response evidence and prefers it over DASH segments", () => {
@@ -221,7 +222,7 @@ test("candidate labels are useful, distinct, and query-safe", () => {
   store.observe({ ...owner, url: "https://two.test/other/movie.mp4?signature=hidden", evidence: "dom-media", width: 1920, height: 1080 });
   const labels = store.list(owner).map((item) => item.label);
   assert.equal(new Set(labels).size, 2);
-  assert.ok(labels.every((label) => /Video • Direct MP4 • 1920×1080 • movie\.mp4 • Source [12]/.test(label)));
+  assert.ok(labels.every((label) => /Video • 1920×1080 • Source [12]/.test(label)));
   assert.ok(labels.every((label) => !/secret|hidden|token|signature/i.test(label)));
   assert.equal(canonicalCandidateUrl("https://one.test/path/movie.mp4?token=a&id=public"), "https://one.test/path/movie.mp4?id=public");
 });
@@ -265,7 +266,7 @@ test("Brightcove manifest replaces an Al Jazeera-style page fallback", () => {
   assert.equal(store.observe({ ...owner, url: owner.pageUrl, blobOnly: true, evidence: "dom-media" }), null);
   const manifest = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/manifest/v1/hls/master.m3u8?token=secret", contentType: "application/x-mpegURL", evidence: "webRequest-response" });
   assert.equal(manifest.type, "hls");
-  assert.match(manifest.label, /^Video • Brightcove HLS master/);
+  assert.equal(manifest.label, "Video • Best quality");
   assert.equal(store.list(owner).length, 1);
   assert.match(store.list(owner)[0].url, /\?token=secret$/);
 });
@@ -273,7 +274,7 @@ test("Brightcove manifest replaces an Al Jazeera-style page fallback", () => {
 test("CNBC supported extractor page and HLS MIME regressions remain accepted", () => {
   const cnbc = classifyCandidate({ pageUrl: "https://www.cnbc.com/video/2026/07/11/example.html", url: "https://www.cnbc.com/video/2026/07/11/example.html", title: "Housing reform", evidence: "page-url" });
   assert.equal(cnbc.type, "page");
-  assert.match(cnbc.label, /Video • CNBC page/);
+  assert.equal(cnbc.label, "Housing reform • Best quality");
   assert.equal(classify("https://cdn.test/live?id=public", { contentType: "application/x-mpegURL", evidence: "webRequest-response" }).type, "hls");
 });
 
@@ -292,16 +293,16 @@ test("recognizes Shaka audio-only and video HLS variants", () => {
   const video = classify("https://storage.googleapis.com/shaka-demo-assets/bbb-dark-truths-hls/playlist_v-0720p-2500k-libx264.mp4.m3u8", { contentType: "application/vnd.apple.mpegurl", evidence: "webRequest-response" });
   assert.equal(audio.mediaKind, "audio");
   assert.equal(audio.manifestRole, "audio_variant");
-  assert.match(audio.label, /^Audio • HLS audio variant/);
+  assert.equal(audio.label, "Audio • Audio only");
   assert.equal(video.mediaKind, "video");
   assert.equal(video.manifestRole, "video_variant");
-  assert.match(video.label, /^Video • HLS video variant/);
+  assert.equal(video.label, "Video • Video only");
   const store = new CandidateStore();
   const owner = { tabId: 19, frameId: 0, pageUrl };
   store.observe({ ...owner, url: "https://cdn.test/stream.m3u8", evidence: "performance-resource" });
   store.observe({ ...owner, url: "https://cdn.test/stream.m3u8", contentType: "audio/mpegurl", evidence: "webRequest-response" });
-  assert.equal(store.list(owner)[0].mediaKind, "audio");
-  assert.match(store.list(owner)[0].label, /^Audio • HLS/);
+  assert.equal(store.list(owner).length, 0);
+  assert.equal(store.list({ ...owner, simpleMode: false })[0].label, "Audio • Audio only");
 });
 
 test("Shaka master manifest suppresses related child variants in either observation order", () => {
@@ -334,6 +335,103 @@ test("master preference never crosses player identity or trusted frame", () => {
   const masterA = store.observe({ tabId: 22, frameId: 1, pageUrl, url: "https://cdn.test/shared/master.m3u8?videoId=A&token=secret", evidence: "webRequest-response" });
   const variantB = store.observe({ tabId: 22, frameId: 1, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=B&token=secret", evidence: "webRequest-response" });
   const variantOtherFrame = store.observe({ tabId: 22, frameId: 2, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=A&token=secret", evidence: "webRequest-response" });
-  assert.deepEqual(store.list({ tabId: 22, frameId: 1 }).map((item) => item.id).sort(), [masterA.id, variantB.id].sort());
-  assert.deepEqual(store.list({ tabId: 22, frameId: 2 }).map((item) => item.id), [variantOtherFrame.id]);
+  assert.deepEqual(store.list({ tabId: 22, frameId: 1 }).map((item) => item.id), [masterA.id]);
+  assert.equal(store.items.has(variantB.id), true);
+  assert.deepEqual(store.list({ tabId: 22, frameId: 2 }).map((item) => item.id), []);
+  assert.equal(store.items.has(variantOtherFrame.id), true);
+});
+
+test("two players in one frame remain isolated by extension player identity", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 30, frameId: 0, pageUrl: "https://example.test/feed", evidence: "dom-media" };
+  const first = store.observe({ ...owner, playerId: "player-aaaaaaaa", url: "https://cdn.test/first.mp4", title: "First" });
+  const second = store.observe({ ...owner, playerId: "player-bbbbbbbb", url: "https://cdn.test/second.mp4", title: "Second" });
+  assert.deepEqual(store.list({ ...owner, playerId: "player-aaaaaaaa" }).map((item) => item.id), [first.id]);
+  assert.deepEqual(store.list({ ...owner, playerId: "player-bbbbbbbb" }).map((item) => item.id), [second.id]);
+});
+
+test("navigation rejects reused player ownership and removes stale candidates", () => {
+  const owners = new PlayerOwnershipStore();
+  const store = new CandidateStore();
+  const playerId = "player-reused01";
+  assert.equal(owners.bind(31, 0, playerId, "https://example.test/one"), true);
+  const stale = store.observe({ tabId: 31, frameId: 0, playerId, pageUrl: "https://example.test/one", url: "https://cdn.test/old.mp4", evidence: "dom-media" });
+  assert.equal(owners.bind(31, 0, playerId, "https://example.test/two"), false);
+  store.removeFrame(31, 0);
+  owners.removeFrame(31, 0);
+  assert.equal(store.items.has(stale.id), false);
+  assert.equal(owners.bind(31, 0, "player-reused02", "https://example.test/two"), true);
+});
+
+test("canonical social page routing strips tracking but keeps required identifiers", () => {
+  const fixtures = new Map([
+    ["https://www.dailymotion.com/video/x9abc?playlist=x&token=secret", "https://www.dailymotion.com/video/x9abc"],
+    ["https://m.facebook.com/watch/?v=12345&utm_source=x", "https://www.facebook.com/watch/?v=12345"],
+    ["https://www.instagram.com/reel/ABC_123/?igsh=secret", "https://www.instagram.com/reel/ABC_123/"],
+    ["https://www.tiktok.com/@creator/video/741234567890?is_from_webapp=1", "https://www.tiktok.com/@creator/video/741234567890"],
+    ["https://twitter.com/creator/status/182345678901?ref_src=x", "https://x.com/creator/status/182345678901"]
+  ]);
+  for (const [input, expected] of fixtures) {
+    assert.equal(stablePageUrl(input), expected);
+    const candidate = classifyCandidate({ tabId: 32, frameId: 0, playerId: "player-social01", pageUrl: input, url: input, title: "Post title", evidence: "dom-media" });
+    assert.equal(candidate.type, "page");
+    assert.equal(candidate.url, expected);
+    assert.equal(candidate.label, "Post title • Best quality");
+  }
+});
+
+test("canonical page beats components while complete master and direct top-level media survive", () => {
+  const social = { tabId: 33, frameId: 0, playerId: "player-social02", pageUrl: "https://www.instagram.com/reel/ABC/" };
+  const store = new CandidateStore();
+  store.observe({ ...social, url: "https://cdn.test/video-only.mp4", mediaKind: "video", evidence: "dom-media" });
+  const page = store.observe({ ...social, url: social.pageUrl, title: "Reel", evidence: "dom-media" });
+  assert.deepEqual(store.list(social).map((item) => item.id), [page.id]);
+
+  const masterStore = new CandidateStore();
+  const master = masterStore.observe({ ...social, url: "https://cdn.test/master.m3u8?token=signed-secret", evidence: "webRequest-response" });
+  masterStore.observe({ ...social, url: social.pageUrl, title: "Reel", evidence: "dom-media" });
+  assert.deepEqual(masterStore.list(social).map((item) => item.id), [master.id]);
+  assert.match(masterStore.list(social)[0].url, /token=signed-secret/);
+  assert.doesNotMatch(masterStore.list(social)[0].label, /m3u8|HLS|signed|secret|CDN/i);
+
+  const direct = classifyCandidate({ ...social, url: "https://files.test/movie.mp4?signature=live", contentType: "video/mp4", topLevelDocument: true, evidence: "top-level-media-document" });
+  assert.equal(direct.priority, 0);
+  assert.match(direct.url, /signature=live/);
+});
+
+test("simple selection suppresses component renditions and never calls them complete", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 34, frameId: 1, playerId: "player-components", pageUrl: "https://player.test/watch" };
+  const audio = store.observe({ ...owner, url: "https://cdn.test/media/playlist_a-eng-128k.m3u8", evidence: "webRequest-response" });
+  const video = store.observe({ ...owner, url: "https://cdn.test/media/playlist_v-720p-2m.m3u8", evidence: "webRequest-response" });
+  const master = store.observe({ ...owner, url: "https://cdn.test/media/master.m3u8", evidence: "webRequest-response" });
+  assert.equal(audio.label, "Audio • Audio only");
+  assert.equal(video.label, "Video • Video only");
+  assert.deepEqual(store.list(owner).map((item) => item.id), [master.id]);
+
+  const componentsOnly = new CandidateStore();
+  componentsOnly.observe({ ...owner, url: "https://cdn.test/other/playlist_a-eng-128k.m3u8", evidence: "webRequest-response" });
+  componentsOnly.observe({ ...owner, url: "https://cdn.test/other/playlist_v-720p-2m.m3u8", evidence: "webRequest-response" });
+  assert.equal(componentsOnly.list(owner).length, 0);
+});
+
+test("NLM-style iframe ownership remains frame and player local", () => {
+  const store = new CandidateStore();
+  const first = store.observe({ tabId: 35, frameId: 7, playerId: "player-nlm0001", pageUrl: "https://www.youtube-nocookie.com/embed/AbCdEf12345", url: "https://www.youtube-nocookie.com/embed/AbCdEf12345", evidence: "dom-media" });
+  store.observe({ tabId: 35, frameId: 8, playerId: "player-nlm0002", pageUrl: "https://www.youtube-nocookie.com/embed/ZyXwVu98765", url: "https://www.youtube-nocookie.com/embed/ZyXwVu98765", evidence: "dom-media" });
+  assert.deepEqual(store.list({ tabId: 35, frameId: 7, playerId: "player-nlm0001" }).map((item) => item.id), [first.id]);
+  assert.equal(first.url, "https://www.youtube.com/watch?v=AbCdEf12345");
+});
+
+test("ownership storage is bounded and rejects cross-tab frame player requests", () => {
+  const owners = new PlayerOwnershipStore(2);
+  assert.equal(owners.bind(40, 0, "player-owner001", "https://example.test/a"), true);
+  assert.equal(owners.bind(40, 0, "player-owner002", "https://example.test/a"), true);
+  assert.equal(owners.bind(40, 0, "player-owner003", "https://example.test/a"), true);
+  assert.equal(owners.items.size, 2);
+  assert.equal(owners.owns(40, 0, "player-owner001", "https://example.test/a"), false);
+  assert.equal(owners.owns(41, 0, "player-owner003", "https://example.test/a"), false);
+  assert.equal(owners.owns(40, 1, "player-owner003", "https://example.test/a"), false);
+  assert.equal(owners.owns(40, 0, "player-owner003", "https://example.test/b"), false);
+  assert.equal(owners.owns(40, 0, "player-owner003", "https://example.test/a"), true);
 });

@@ -18,6 +18,7 @@
   const MEDIA_DISPOSITION = /filename\*?\s*=\s*(?:UTF-8''|["'])?[^;"']+\.(?:mp4|webm|mov|mkv|avi|mp3|m4a|aac|ogg|oga|opus|wav|flac|m3u8|mpd)/i;
   const MAX_TITLE_LENGTH = 160;
   const MAX_URL_LENGTH = 8192;
+  const PLAYER_ID_PATTERN = /^player-[a-z0-9_-]{6,96}$/i;
   const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata"]);
   const TRANSIENT_QUERY_KEYS = /^(?:token|access_token|auth|authorization|signature|sig|expires?|expiry|exp|e|policy|key-pair-id|hdnts|hdntl|hdnea|hmac|jwt|session|sessionid|acl|ip|ipbits|st|__gda__|x-amz-.+|x-goog-.+|range|rn|rbuf|sq)$/i;
 
@@ -58,6 +59,8 @@
       return `https://www.youtube.com/watch?v=${encodeURIComponent(youtubeId)}`;
     }
     const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const social = canonicalSocialPage(parsed, host);
+    if (social) return social;
     if (host === "vimeo.com" || host.endsWith(".vimeo.com")) {
       const match = parsed.pathname.match(/\/(?:video\/)?(\d+)/);
       if (match) {
@@ -66,6 +69,41 @@
     }
     parsed.hash = "";
     return parsed.href;
+  }
+
+  function canonicalSocialPage(parsed, host) {
+    parsed.hash = "";
+    if (host === "dai.ly") {
+      const id = parsed.pathname.split("/").filter(Boolean)[0] || "";
+      return /^[A-Za-z0-9]+$/.test(id) ? `https://www.dailymotion.com/video/${id}` : null;
+    }
+    if (host === "dailymotion.com" || host.endsWith(".dailymotion.com")) {
+      const match = parsed.pathname.match(/^\/video\/([A-Za-z0-9]+)/);
+      return match ? `https://www.dailymotion.com/video/${match[1]}` : null;
+    }
+    if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch") {
+      if (host === "fb.watch") return `https://fb.watch${parsed.pathname.replace(/\/$/, "")}/`;
+      const watchId = parsed.searchParams.get("v");
+      if (/^\/watch\/?$/.test(parsed.pathname) && watchId) return `https://www.facebook.com/watch/?v=${encodeURIComponent(watchId)}`;
+      const storyId = parsed.searchParams.get("story_fbid");
+      const ownerId = parsed.searchParams.get("id");
+      if (/^\/permalink\.php$/.test(parsed.pathname) && storyId && ownerId) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(storyId)}&id=${encodeURIComponent(ownerId)}`;
+      const match = parsed.pathname.match(/^\/(?:reel\/[^/?#]+|[^/?#]+\/videos\/[^/?#]+|share\/v\/[^/?#]+)/);
+      return match ? `https://www.facebook.com${match[0].replace(/\/$/, "")}/` : null;
+    }
+    if (host === "instagram.com" || host.endsWith(".instagram.com")) {
+      const match = parsed.pathname.match(/^\/(?:p|reel|tv)\/[^/?#]+/);
+      return match ? `https://www.instagram.com${match[0].replace(/\/$/, "")}/` : null;
+    }
+    if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
+      const match = parsed.pathname.match(/^\/@[^/?#]+\/video\/\d+/);
+      return match ? `https://www.tiktok.com${match[0]}` : null;
+    }
+    if (host === "x.com" || host === "twitter.com" || host.endsWith(".twitter.com")) {
+      const match = parsed.pathname.match(/^\/([^/?#]+)\/status\/(\d+)/);
+      return match ? `https://x.com/${match[1]}/status/${match[2]}` : null;
+    }
+    return null;
   }
 
   function canonicalCandidateUrl(value) {
@@ -88,7 +126,7 @@
       return false;
     }
     const host = parsed.hostname.toLowerCase();
-    return Boolean(youtubeVideoId(parsed)) || /(^|\.)vimeo\.com$/.test(host) || (/(^|\.)cnbc\.com$/.test(host) && /^\/video\//.test(parsed.pathname));
+    return Boolean(youtubeVideoId(parsed)) || Boolean(canonicalSocialPage(parsed, host.replace(/^www\./, ""))) || /(^|\.)vimeo\.com$/.test(host) || (/(^|\.)cnbc\.com$/.test(host) && /^\/video\//.test(parsed.pathname));
   }
 
   function isSegmentUrl(value) {
@@ -174,9 +212,10 @@
     const kindConfidence = raw.strongMediaKind || raw.mediaKind === "audio" || raw.mediaKind === "video" || /^(?:audio|video)\//i.test(String(raw.contentType || "")) ? 3 : 1;
     const metadata = candidateMetadata(url, type, mediaKind, raw, contentFormat(raw, url, type, mediaKind));
     return {
-      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${type}|${canonicalUrl}`),
+      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${raw.playerId || ""}|${type}|${canonicalUrl}`),
       tabId: Number.isInteger(raw.tabId) ? raw.tabId : -1,
       frameId: Number.isInteger(raw.frameId) ? raw.frameId : 0,
+      playerId: validPlayerId(raw.playerId) ? raw.playerId : "",
       pageUrl: pageUrl || url,
       url,
       canonicalUrl,
@@ -190,6 +229,7 @@
       manifestRole: metadata.manifestRole,
       manifestFamily: metadata.manifestFamily,
       manifestRank: metadata.manifestRank,
+      componentOnly: mediaKind === "audio" || raw.hasAudio === false || raw.componentOnly === true || metadata.manifestRole === "audio_variant" || metadata.manifestRole === "video_variant" || metadata.manifestRole === "variant",
       label: buildLabel(type, mediaKind, title, metadata),
       priority,
       kindConfidence,
@@ -212,6 +252,10 @@
   }
 
   function candidatePriority(type, url, evidence, raw) {
+    if (type === "direct_media" && (raw.topLevelDocument || evidence.includes("top-level-media-document") || evidence.includes("webRequest-main-frame"))) return 0;
+    const parsed = safeUrl(url);
+    const filename = parsed ? parsed.pathname.split("/").pop() || "" : "";
+    if ((type === "hls" || type === "dash") && describeManifest(parsed, type, raw.mediaKind || "video", filename).role === "master") return 0;
     if (type === "page" && isExtractorPage(url)) return 1;
     if (type === "hls" || type === "dash") return 2;
     if (type === "direct_media" && evidence.some((item) => DOM_EVIDENCE.has(item))) return 3;
@@ -289,19 +333,10 @@
   }
 
   function buildLabel(type, mediaKind, title, metadata) {
-    const parts = [mediaKind === "audio" ? "Audio" : "Video"];
-    if (type === "page") parts.push(metadata.pageDescriptor);
-    if (type === "direct_media") parts.push(`Direct${metadata.format ? ` ${metadata.format}` : ""}`);
-    if (type === "hls") {
-      const role = metadata.manifestRole === "master" ? " master" : metadata.manifestRole === "audio_variant" ? " audio variant" : metadata.manifestRole === "video_variant" ? " video variant" : " manifest";
-      parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}HLS${role}`);
-    }
-    if (type === "dash") parts.push(`${metadata.provider ? `${metadata.provider} ` : ""}DASH manifest`);
-    if (metadata.resolution) parts.push(metadata.resolution);
-    if (metadata.bitrateKbps) parts.push(`${metadata.bitrateKbps} kbps`);
-    if (metadata.safeTarget) parts.push(metadata.safeTarget);
-    if (type === "page" && title) parts.push(title.slice(0, 100));
-    return parts.join(" • ");
+    const cleanTitle = title || (mediaKind === "audio" ? "Audio" : "Video");
+    if (mediaKind === "audio" || metadata.manifestRole === "audio_variant") return `${cleanTitle} • Audio only`;
+    if (metadata.manifestRole === "video_variant" || metadata.manifestRole === "variant") return `${cleanTitle} • Video only${metadata.resolution ? ` • ${metadata.resolution}` : ""}`;
+    return `${cleanTitle} • ${metadata.resolution || "Best quality"}`;
   }
 
   function defaultLabel(type, mediaKind) {
@@ -351,6 +386,7 @@
           existing.manifestRole = candidate.manifestRole || existing.manifestRole;
           existing.manifestFamily = candidate.manifestFamily || existing.manifestFamily;
           existing.manifestRank = candidate.manifestRank;
+          existing.componentOnly = candidate.componentOnly;
           existing.label = candidate.label;
           existing.kindConfidence = candidate.kindConfidence;
         }
@@ -382,9 +418,15 @@
       let candidates = Array.from(this.items.values())
         .filter((item) => filter.tabId === undefined || item.tabId === filter.tabId)
         .filter((item) => filter.frameId === undefined || item.frameId === filter.frameId)
-        .filter((item) => !filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl));
-      const extractorPages = candidates.filter((item) => item.priority === 1);
-      if (extractorPages.length) candidates = extractorPages;
+        .filter((item) => filter.playerId === undefined || item.playerId === filter.playerId)
+        .filter((item) => !filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl))
+        .filter((item) => filter.simpleMode === false || !item.componentOnly);
+      const completeDirectOrMaster = candidates.filter((item) => item.priority === 0);
+      if (completeDirectOrMaster.length) candidates = completeDirectOrMaster;
+      else {
+        const extractorPages = candidates.filter((item) => item.priority === 1);
+        if (extractorPages.length) candidates = extractorPages;
+      }
       const manifests = candidates.filter((item) => item.priority === 2);
       if (manifests.length) candidates = candidates.filter((item) => item.priority !== 5 && item.priority !== 6);
       if (candidates.some((item) => item.priority < 6)) candidates = candidates.filter((item) => item.priority < 6);
@@ -393,7 +435,7 @@
     }
 
     sameOwner(left, right) {
-      return left.tabId === right.tabId && left.frameId === right.frameId && left.pageUrl === right.pageUrl;
+      return left.tabId === right.tabId && left.frameId === right.frameId && left.pageUrl === right.pageUrl && left.playerId === right.playerId;
     }
 
     hasDominantCandidate(candidate) {
@@ -408,7 +450,7 @@
     removeDominatedCandidates(candidate) {
       for (const [id, item] of this.items) {
         if (id === candidate.id || !this.sameOwner(item, candidate)) continue;
-        if (candidate.priority === 1 || item.priority === 5 || item.priority === 6) this.items.delete(id);
+        if ((candidate.priority === 1 && item.priority > 1) || item.priority === 5 || item.priority === 6) this.items.delete(id);
       }
     }
 
@@ -421,6 +463,13 @@
     removeFrame(tabId, frameId) {
       for (const [id, item] of this.items) {
         if (item.tabId === tabId && item.frameId === frameId) this.items.delete(id);
+      }
+    }
+
+    removeFrameNetwork(tabId, frameId) {
+      for (const [id, item] of this.items) {
+        if (item.tabId !== tabId || item.frameId !== frameId) continue;
+        if (item.evidence.every((value) => value === "webRequest-response" || value === "performance-resource")) this.items.delete(id);
       }
     }
 
@@ -438,6 +487,7 @@
         if (!item) continue;
         if (filter.tabId !== undefined && item.tabId !== filter.tabId) continue;
         if (filter.frameId !== undefined && item.frameId !== filter.frameId) continue;
+        if (filter.playerId !== undefined && item.playerId !== filter.playerId) continue;
         this.items.delete(id);
       }
     }
@@ -454,13 +504,58 @@
     }
   }
 
+  class PlayerOwnershipStore {
+    constructor(maxOwners = 400) {
+      this.maxOwners = Math.max(1, Number(maxOwners) || 400);
+      this.items = new Map();
+    }
+
+    key(tabId, frameId, playerId) {
+      return `${tabId}:${frameId}:${playerId}`;
+    }
+
+    bind(tabId, frameId, playerId, pageUrl) {
+      const stable = stablePageUrl(pageUrl || "");
+      if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || !validPlayerId(playerId) || !stable) return false;
+      const key = this.key(tabId, frameId, playerId);
+      const existing = this.items.get(key);
+      if (existing && existing !== stable) return false;
+      this.items.delete(key);
+      this.items.set(key, stable);
+      while (this.items.size > this.maxOwners) this.items.delete(this.items.keys().next().value);
+      return true;
+    }
+
+    owns(tabId, frameId, playerId, pageUrl) {
+      return validPlayerId(playerId) && this.items.get(this.key(tabId, frameId, playerId)) === stablePageUrl(pageUrl || "");
+    }
+
+    playerIds(tabId, frameId, pageUrl) {
+      const stable = stablePageUrl(pageUrl || "");
+      const prefix = `${tabId}:${frameId}:`;
+      return Array.from(this.items.entries())
+        .filter(([key, value]) => key.startsWith(prefix) && value === stable)
+        .map(([key]) => key.slice(prefix.length));
+    }
+
+    removeFrame(tabId, frameId) {
+      const prefix = `${tabId}:${frameId}:`;
+      for (const key of this.items.keys()) if (key.startsWith(prefix)) this.items.delete(key);
+    }
+
+    removeTab(tabId) {
+      const prefix = `${tabId}:`;
+      for (const key of this.items.keys()) if (key.startsWith(prefix)) this.items.delete(key);
+    }
+  }
+
   function isChildManifest(candidate) {
     return candidate.manifestRole === "audio_variant" || candidate.manifestRole === "video_variant" || candidate.manifestRole === "variant" || candidate.manifestRole === "unknown";
   }
 
   function manifestsRelated(left, right) {
     if (left.type !== "hls" || right.type !== "hls") return false;
-    if (left.tabId !== right.tabId || left.frameId !== right.frameId || left.pageUrl !== right.pageUrl) return false;
+    if (left.tabId !== right.tabId || left.frameId !== right.frameId || left.pageUrl !== right.pageUrl || left.playerId !== right.playerId) return false;
     if (!left.manifestFamily || !right.manifestFamily) return false;
     const [leftPath, leftIdentity = ""] = left.manifestFamily.split("::", 2);
     const [rightPath, rightIdentity = ""] = right.manifestFamily.split("::", 2);
@@ -483,11 +578,16 @@
     });
   }
 
-  function applyTrustedOwner(raw, tabId, frameId) {
+  function validPlayerId(value) {
+    return typeof value === "string" && PLAYER_ID_PATTERN.test(value);
+  }
+
+  function applyTrustedOwner(raw, tabId, frameId, playerId) {
     return {
       ...(raw && typeof raw === "object" ? raw : {}),
       tabId: Number.isInteger(tabId) ? tabId : -1,
-      frameId: Number.isInteger(frameId) ? frameId : 0
+      frameId: Number.isInteger(frameId) ? frameId : 0,
+      playerId: validPlayerId(playerId) ? playerId : ""
     };
   }
 
@@ -500,5 +600,5 @@
     return tagName === "VIDEO" || tagName === "AUDIO";
   }
 
-  return { CandidateStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl };
+  return { CandidateStore, PlayerOwnershipStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl, validPlayerId };
 });

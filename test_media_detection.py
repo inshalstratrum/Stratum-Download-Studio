@@ -52,7 +52,7 @@ def test_direct_media_document_and_trusted_frame_contract():
     assert '"top-level-media-document"' in content
     assert "window.top === window" in content
     assert "topLevelDocument," in content
-    assert "candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId)" in background
+    assert "candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId, playerId)" in background
     assert 'details.type === "main_frame" ? "webRequest-main-frame"' in background
     assert "trustedSenderPage(message.pageUrl, sender)" in background
     assert "reassignFramePage(tabId, frameId, stable)" in background
@@ -70,7 +70,7 @@ def test_one_token_and_desktop_default_action_are_unchanged():
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
     assert background.count('"authToken"') == 1
     assert '"X-Stratrum-Auth": token' in background
-    assert 'sendToDesktopApp(message.url, "default")' in background
+    assert 'sendToDesktopApp(selected.url, "default")' in background
 
 
 def test_complete_source_policy_and_fragment_evidence_contract():
@@ -104,7 +104,9 @@ def test_background_routes_only_stored_complete_candidates():
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     handler = background.split('message.type === "stratrum-download-request"', 1)[1].split("return true", 1)[0]
-    assert "candidateStore.list({ tabId, frameId }).find" in handler
+    assert "candidateStore.list({ tabId, frameId, pageUrl, playerId: message.playerId }).find" in handler
+    assert "ownsPlayer(tabId, frameId, message.playerId, pageUrl)" in handler
+    assert "candidate.id === message.candidateId" in handler
     assert 'code: "invalid_candidate"' in handler
     assert '"No complete downloadable media detected."' in handler
     for required in ("content-range", "statusCode: details.statusCode", "requestType: details.type"):

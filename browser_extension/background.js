@@ -7,6 +7,7 @@ const candidateApi = globalThis.StratumMediaCandidates;
 const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
 const framePageUrls = new Map();
 const blockedFrames = new Set();
+const playerOwners = new candidateApi.PlayerOwnershipStore(400);
 const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
@@ -109,12 +110,30 @@ function observeFromMessage(message, sender) {
   const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
   const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
   if (blockedFrames.has(frameKey(tabId, frameId))) return null;
+  const playerId = message.candidate && message.candidate.playerId;
+  if (!candidateApi.validPlayerId(playerId)) return null;
   const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.candidate && message.candidate.pageUrl, sender));
-  return candidateStore.observe(candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId));
+  if (!bindPlayerOwner(tabId, frameId, playerId, pageUrl)) return null;
+  return candidateStore.observe(candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId, playerId));
 }
 
 function frameKey(tabId, frameId) {
   return `${tabId}:${frameId}`;
+}
+
+function bindPlayerOwner(tabId, frameId, playerId, pageUrl) {
+  const before = playerOwners.playerIds(tabId, frameId, pageUrl).length;
+  const bound = playerOwners.bind(tabId, frameId, playerId, pageUrl);
+  if (bound && before === 1 && playerOwners.playerIds(tabId, frameId, pageUrl).length === 2) candidateStore.removeFrameNetwork(tabId, frameId);
+  return bound;
+}
+
+function ownsPlayer(tabId, frameId, playerId, pageUrl) {
+  return playerOwners.owns(tabId, frameId, playerId, pageUrl);
+}
+
+function removeFrameOwners(tabId, frameId) {
+  playerOwners.removeFrame(tabId, frameId);
 }
 
 function trustedSenderPage(requestedPageUrl, sender) {
@@ -134,6 +153,7 @@ function bindFramePage(tabId, frameId, pageUrl) {
   if (!previous) candidateStore.reassignFramePage(tabId, frameId, stable);
   else if (previous !== stable) {
     candidateStore.removeFrame(tabId, frameId);
+    removeFrameOwners(tabId, frameId);
     blockedFrames.delete(key);
   }
   framePageUrls.set(key, stable);
@@ -170,7 +190,8 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
     const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.pageUrl, sender));
-    sendResponse({ candidates: blockedFrames.has(frameKey(tabId, frameId)) ? [] : candidateStore.list({ tabId, frameId, pageUrl }) });
+    const playerId = message.playerId;
+    sendResponse({ candidates: blockedFrames.has(frameKey(tabId, frameId)) || !ownsPlayer(tabId, frameId, playerId, pageUrl) ? [] : candidateStore.list({ tabId, frameId, pageUrl, playerId }) });
     return false;
   }
   if (message.type === "stratrum-frame-blocked") {
@@ -178,25 +199,30 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
     blockedFrames.add(frameKey(tabId, frameId));
     candidateStore.removeFrame(tabId, frameId);
+    removeFrameOwners(tabId, frameId);
     sendResponse({ success: true });
     return false;
   }
   if (message.type === "stratrum-remove-candidates") {
     const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
-    candidateStore.removeIds(message.ids, { tabId, frameId });
+    const pageUrl = framePageUrls.get(frameKey(tabId, frameId)) || null;
+    if (ownsPlayer(tabId, frameId, message.playerId, pageUrl)) candidateStore.removeIds(message.ids, { tabId, frameId, playerId: message.playerId });
     sendResponse({ success: true });
     return false;
   }
   if (message.type === "stratrum-download-request") {
     const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : -1;
     const frameId = sender && Number.isInteger(sender.frameId) ? sender.frameId : 0;
-    const selected = candidateStore.list({ tabId, frameId }).find((candidate) => candidate.url === message.url);
+    const pageUrl = framePageUrls.get(frameKey(tabId, frameId)) || null;
+    const selected = ownsPlayer(tabId, frameId, message.playerId, pageUrl)
+      ? candidateStore.list({ tabId, frameId, pageUrl, playerId: message.playerId }).find((candidate) => candidate.id === message.candidateId)
+      : null;
     if (!selected) {
       sendResponse({ success: false, code: "invalid_candidate", message: "No complete downloadable media detected." });
       return false;
     }
-    sendToDesktopApp(message.url, "default").then(sendResponse);
+    sendToDesktopApp(selected.url, "default").then(sendResponse);
     return true;
   }
   return false;
@@ -207,6 +233,7 @@ if (extensionApi.tabs && extensionApi.tabs.onRemoved) {
     candidateStore.removeTab(tabId);
     for (const key of framePageUrls.keys()) if (key.startsWith(`${tabId}:`)) framePageUrls.delete(key);
     for (const key of blockedFrames) if (key.startsWith(`${tabId}:`)) blockedFrames.delete(key);
+    playerOwners.removeTab(tabId);
   });
 }
 
@@ -227,10 +254,14 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
     const contentDisposition = headerValue("content-disposition");
     const contentRange = headerValue("content-range");
     if (!candidateApi.isUsefulResponseEvidence(contentType, contentDisposition) && !/\.(?:m3u8|mpd)(?:$|[?#])/i.test(details.url)) return;
+    const pageUrl = isFrameDocument ? details.url : framePageUrls.get(frameKey(details.tabId, frameId)) || details.documentUrl || details.initiator || details.url;
+    const players = playerOwners.playerIds(details.tabId, frameId, pageUrl);
+    if (players.length !== 1) return;
     candidateStore.observe({
       tabId: details.tabId,
       frameId,
-      pageUrl: isFrameDocument ? details.url : framePageUrls.get(frameKey(details.tabId, frameId)) || details.documentUrl || details.initiator || details.url,
+      playerId: players[0],
+      pageUrl,
       url: details.url,
       contentType,
       contentDisposition,

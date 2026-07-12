@@ -1,21 +1,13 @@
 # Current State
 
-- Phase: 2A.7C — controlled modern yt-dlp capability dependencies complete on 2026-07-12.
-- Branch: `phase-2a7c-ytdlp-capabilities`; baseline `054dabf1360089d814f40a60ef88728cd7bfc845` preserved.
-- Commit: `Phase 2A.7C: Add controlled yt-dlp capability dependencies` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
-- Backend: yt-dlp `2026.07.04` remains pinned. Eighteen exact official PyPI wheels, including `yt-dlp-ejs 0.8.0`, are hash-locked and RECORD-verified under `.deps/`; Deno `2.8.3` is ZIP/executable-hash-verified under `.tools/`.
-- Runtime: metadata and downloads pass only `{'deno': {'path': <controlled deno.exe>}}`; remote EJS components remain disabled, ambient PATH runtimes/plugins cannot be selected, and curl impersonation is available but never globally forced.
-- Bootstrap: isolated wheel-only official-PyPI install and exact official GitHub Deno download occur in separate staging roots. Both bundles must verify before promotion; a failed promotion restores prior local bundles. Global Python, PATH, registry and pip are unchanged.
-- Packaging: clean PyInstaller 6.20.0/Python 3.14.4 build passed. Recursive inspection found approved metadata, EJS/CA/native data and controlled Deno; excluded alternatives/plugins/self-tests had zero entries. Frozen startup stayed healthy and embedded Deno executed as `2.8.3`. Development EXE: 116,325,205 bytes, +70,986,226 bytes over 2A.7B.
-- Regression: 14 dependency/capability tests, 20 focused existing contracts, and the one-time full suite of 267 tests passed. Python compilation, lock/policy verification and frozen inspection passed.
-- Scope: gallery-dl, Poppler, canonical routing, picker redesign, social-site fixes, Phase 2B, UI work and extension files were not started or changed; extension packaging was not rerun.
-- Remaining: listed live-site/manual checks, routing-phase failures, FFmpeg/FFprobe provenance, Mutagen GPL-2.0-or-later and complete release SBOM/licence/legal review remain release gates. This was not a commercial release build.
-- Detail: `docs/18_PHASE_2A7C_YTDLP_CAPABILITIES.md`.
-
-## Roadmap — record only
-
-- B–C: modern yt-dlp dependency completion and normalized video/audio selection.
-- D–H: separate gallery and PDF/Poppler proofs of concept, licensing decisions and bounded engines.
-- I–M: unified router, Windows-safe output planning, canonical social routing, player-local ownership and simple presentation.
-- N–P: lawful fixtures/manual certification, later governed authenticated support and the release regression matrix.
-- Phase 2B remains a later, separately authorized general download engine phase.
+- Phase: 2A.7D — canonical page routing and player-local browser selection complete on 2026-07-13.
+- Branch: `phase-2a7d-browser-routing`; baseline `a9818c0644bf88354eaa8b32993949c0daf85900` preserved.
+- Commit: `Phase 2A.7D: Add canonical player-local browser routing` (this phase commit; use `git rev-parse HEAD` for its immutable hash).
+- Ownership: every media element receives an extension-generated player ID. Candidate observation, listing, removal and download authorization are bound to tab, frame, canonical page and player; navigation, DOM reuse, frame blocking and tab closure clear stale ownership.
+- Routing: public Dailymotion, Facebook, Instagram, TikTok and X post URLs normalize to canonical yt-dlp page routes. Operational Facebook identifiers and full signed media URLs are preserved; customer-visible labels and errors do not expose tokens or transport details.
+- Selection: simple mode prefers a complete top-level file, safe master manifest or canonical page and suppresses audio-only, video-only, renditions, fragments and stale candidates. A single remaining choice is sent directly.
+- Isolation: sibling players do not share candidates. Network evidence is player-bound only for a sole owner and is purged if ownership becomes ambiguous; NLM/YouTube iframe isolation remains frame-local.
+- Storage: candidate and player-owner stores are TTL/size bounded, and background requests reject mismatched tab, frame, page, player or candidate IDs.
+- Regression: 36 deterministic offline JS tests and 26 focused Python extension/security contracts pass. The one-time full suite recorded 267 passes and one unrelated Qt 10 ms timing failure; that exact test passed immediately in isolation. Syntax and diff validation pass.
+- Scope: desktop filename logic, history persistence, dependencies, yt-dlp pins, gallery-dl, Poppler, Phase 2B, extension manifests and packaging were not changed; packaging was not rerun.
+- Manual retests: live Dailymotion/Facebook/Instagram/TikTok/X downloads, multi-player feeds, SPA navigation/DOM reuse, signed master refresh and NLM iframe behavior remain required before release.

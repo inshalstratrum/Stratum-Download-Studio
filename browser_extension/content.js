@@ -2,11 +2,14 @@ const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
 const mediaControls = new Map();
 const elementCandidateIds = new WeakMap();
+const elementPlayerIds = new WeakMap();
 const elementEvidence = new WeakMap();
 const drmMedia = new WeakSet();
 let showMediaButtons = true;
 let positionFrame = null;
 let lastPageUrl = window.location.href;
+let playerSequence = 0;
+let pageGeneration = 0;
 const mediaResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => schedulePositionUpdate()) : null;
 
 function supportedPageUrl() {
@@ -15,6 +18,23 @@ function supportedPageUrl() {
 
 function pageTitle() {
   return String(document.title || "Media").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+function newPlayerId() {
+  playerSequence += 1;
+  const random = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID().replace(/-/g, "")
+    : `${Date.now().toString(36)}${playerSequence.toString(36)}`;
+  return `player-${pageGeneration.toString(36)}-${playerSequence.toString(36)}-${random}`;
+}
+
+function playerIdFor(element) {
+  let id = elementPlayerIds.get(element);
+  if (!id) {
+    id = newPlayerId();
+    elementPlayerIds.set(element, id);
+  }
+  return id;
 }
 
 function rawCandidate(url, mediaKind, evidence, extra = {}) {
@@ -45,6 +65,7 @@ function elementCandidates(element, evidence = "dom-media") {
   if (drmMedia.has(element) || element.mediaKeys) return [];
 
   const kind = mediaKindFor(element);
+  const playerId = playerIdFor(element);
   const candidates = [];
   const sources = [
     { url: element.currentSrc, type: element.getAttribute("type") || "", source: evidence },
@@ -61,11 +82,14 @@ function elementCandidates(element, evidence = "dom-media") {
       blobOnly,
       title: element.getAttribute("aria-label") || element.title || pageTitle(),
       width: Number(element.videoWidth) || 0,
-      height: Number(element.videoHeight) || 0
+      height: Number(element.videoHeight) || 0,
+      playerId
     }));
   }
-  if (element.srcObject || candidates.length === 0) {
-    candidates.push(rawCandidate(window.location.href, kind, evidence, { blobOnly: true, title: pageTitle() }));
+  if (candidateApi.isExtractorPage(window.location.href)) {
+    candidates.push(rawCandidate(window.location.href, kind, evidence, { title: pageTitle(), playerId }));
+  } else if (element.srcObject || candidates.length === 0) {
+    candidates.push(rawCandidate(window.location.href, kind, evidence, { blobOnly: true, title: pageTitle(), playerId }));
   }
   return candidates;
 }
@@ -83,7 +107,8 @@ async function observeElement(element, evidence) {
 function removeElementCandidates(element) {
   const ids = Array.from(elementCandidateIds.get(element) || []);
   elementCandidateIds.delete(element);
-  if (ids.length) extensionApi.runtime.sendMessage({ type: "stratrum-remove-candidates", ids }).catch(() => {});
+  const playerId = elementPlayerIds.get(element) || "";
+  if (ids.length) extensionApi.runtime.sendMessage({ type: "stratrum-remove-candidates", ids, playerId }).catch(() => {});
 }
 
 function showStatus(message, success = false) {
@@ -107,7 +132,7 @@ async function requestDownload(candidate, button) {
   button.textContent = "Sending…";
   button.disabled = true;
   try {
-    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-download-request", url: candidate.url });
+    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-download-request", candidateId: candidate.id, playerId: candidate.playerId });
     showStatus(result && result.message ? result.message : "The extension did not receive a response.", Boolean(result && result.success));
     button.textContent = result && result.success ? "Sent ✓" : originalText;
   } catch (error) {
@@ -163,7 +188,7 @@ async function handleControlClick(element, button) {
   await observeElement(element, "control-click");
   let candidates = [];
   try {
-    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-get-candidates", pageUrl: window.location.href });
+    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-get-candidates", pageUrl: window.location.href, playerId: playerIdFor(element) });
     candidates = result && Array.isArray(result.candidates) ? result.candidates : [];
   } catch (error) {
     showStatus("Stratum could not load detected media choices.");
@@ -227,6 +252,11 @@ function isOverlayTarget(element) {
   return candidateApi.isOverlayTargetDescriptor({ tagName: element.tagName, href: element.href || "" });
 }
 
+function soleConnectedPlayerId() {
+  const elements = Array.from(mediaControls.keys()).filter((element) => element.isConnected && !drmMedia.has(element));
+  return elements.length === 1 ? playerIdFor(elements[0]) : "";
+}
+
 function scanNode(node) {
   if (!showMediaButtons || !(node instanceof Element)) return;
   const consider = (element) => {
@@ -260,7 +290,13 @@ function observeDirectPage() {
 function handleNavigation() {
   if (lastPageUrl === window.location.href) return;
   lastPageUrl = window.location.href;
+  pageGeneration += 1;
   closePicker();
+  for (const element of mediaControls.keys()) {
+    removeElementCandidates(element);
+    elementPlayerIds.set(element, newPlayerId());
+    elementEvidence.set(element, "dom-media");
+  }
   extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href }).catch(() => {});
   observeDirectPage();
   scanNode(document.documentElement);
@@ -331,7 +367,8 @@ if (supportedPageUrl()) {
     try {
       const performanceObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          reportCandidate(rawCandidate(entry.name, null, "performance-resource"));
+          const playerId = soleConnectedPlayerId();
+          if (playerId) reportCandidate(rawCandidate(entry.name, null, "performance-resource", { playerId }));
         }
       });
       performanceObserver.observe({ type: "resource", buffered: true });

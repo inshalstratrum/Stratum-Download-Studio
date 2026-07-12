@@ -1622,7 +1622,7 @@ def test_one_shared_authentication_token_accepts_both_explicit_actions(runtime):
 def test_extension_normal_button_sends_neutral_default_action():
     background = Path('browser_extension/background.js').read_text(encoding='utf-8')
     normal_handler = background.split('runtime.onMessage.addListener', 1)[1]
-    assert 'sendToDesktopApp(message.url, "default")' in normal_handler
+    assert 'sendToDesktopApp(selected.url, "default")' in normal_handler
     assert 'primaryAction' not in background
 
 
