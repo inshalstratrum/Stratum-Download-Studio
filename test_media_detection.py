@@ -52,7 +52,7 @@ def test_direct_media_document_and_trusted_frame_contract():
     assert '"top-level-media-document"' in content
     assert "window.top === window" in content
     assert "topLevelDocument," in content
-    assert "candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId, playerId)" in background
+    assert "candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId, playerId, documentGeneration)" in background
     assert 'details.type === "main_frame" ? "webRequest-main-frame"' in background
     assert "trustedSenderPage(message.pageUrl, sender)" in background
     assert "reassignFramePage(tabId, frameId, stable)" in background
@@ -78,7 +78,7 @@ def test_one_token_and_desktop_default_action_are_unchanged():
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
     assert background.count('"authToken"') == 1
     assert '"X-Stratrum-Auth": token' in background
-    assert 'sendToDesktopApp(selected.url, "default")' in background
+    assert 'sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl))' in background
 
 
 def test_complete_source_policy_and_fragment_evidence_contract():
@@ -95,7 +95,8 @@ def test_complete_source_policy_and_fragment_evidence_contract():
     ):
         assert required in model
     assert "raw.allowPage" not in model
-    assert 'raw.blobOnly) return pageUrl && isExtractorPage(pageUrl)' in model
+    assert 'sourcePage && isExtractorPage(sourcePage)' in model
+    assert 'raw.articleFallback && raw.visiblePlayer && sourcePage' in model
 
 
 def test_overlay_targets_are_frame_local_and_exclude_iframes():
@@ -112,8 +113,8 @@ def test_background_routes_only_stored_complete_candidates():
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     handler = background.split('message.type === "stratrum-download-request"', 1)[1].split("return true", 1)[0]
-    assert "candidateStore.list({ tabId, frameId, pageUrl, playerId: message.playerId }).find" in handler
-    assert "ownsPlayer(tabId, frameId, message.playerId, pageUrl)" in handler
+    assert "candidateStore.list({ tabId, frameId, documentGeneration: message.documentGeneration, pageUrl, playerId: message.playerId }).find" in handler
+    assert "ownsPlayer(tabId, frameId, message.documentGeneration, message.playerId, pageUrl)" in handler
     assert "candidate.id === message.candidateId" in handler
     assert 'code: "invalid_candidate"' in handler
     assert '"No complete downloadable media detected."' in handler
@@ -122,6 +123,19 @@ def test_background_routes_only_stored_complete_candidates():
     assert 'message.type === "stratrum-frame-blocked"' in background
     assert 'type: "stratrum-frame-blocked"' in content
     assert "DRM or access-controlled media is not supported." in content
+
+
+def test_player_registry_provenance_and_lease_contracts_replace_sole_player_gate():
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+    background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    model = (EXTENSION / "media_candidates.js").read_text(encoding="utf-8")
+    for required in ("PlayerRegistry", "documentGeneration", "leaseUntil", "lastActivity", "correlate(raw)", "QuarantineStore"):
+        assert required in model
+    for required in ("nearestPermalink", "canonicalUrl", "ogUrl", "jsonLdUrl", 'type: "stratrum-player-state"'):
+        assert required in content
+    assert "soleConnectedPlayerId" not in content
+    assert "players.length !== 1" not in background
+    assert "quarantineStore.observe" in background
 
 
 def test_manifest_frame_and_webrequest_detection_contract():

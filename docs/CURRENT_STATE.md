@@ -1,13 +1,15 @@
 # Current State
 
-- Phase: 2A.7D — canonical page routing and player-local browser selection complete on 2026-07-13.
-- Branch: `phase-2a7d-browser-routing`; baseline `a9818c0644bf88354eaa8b32993949c0daf85900` preserved.
-- Commit: `Phase 2A.7D: Finalize clean player-local labels` (latest phase correction; use `git rev-parse HEAD` for its immutable hash).
-- Ownership: every media element receives an extension-generated player ID. Candidate observation, listing, removal and download authorization are bound to tab, frame, canonical page and player; navigation, DOM reuse, frame blocking and tab closure clear stale ownership.
-- Routing: public Dailymotion, Facebook, Instagram, TikTok and X post URLs normalize to canonical yt-dlp page routes. Operational Facebook identifiers and full signed media URLs are preserved; customer-visible labels and errors do not expose tokens or transport details.
-- Selection: simple mode prefers a complete top-level file, safe master manifest or canonical page and suppresses audio-only, video-only, renditions, fragments and stale candidates. Duplicate clean labels retain only the ranked preferred candidate; visible text and tooltips never expose source numbering or transport metadata. A single remaining choice is sent directly.
-- Isolation: sibling players do not share candidates. Network evidence is player-bound only for a sole owner and is purged if ownership becomes ambiguous; NLM/YouTube iframe isolation remains frame-local.
-- Storage: candidate and player-owner stores are TTL/size bounded, and background requests reject mismatched tab, frame, page, player or candidate IDs.
-- Regression: 36 deterministic offline JS tests, 27 focused Python extension/security contracts and the one-time full suite of 269 tests pass. Syntax and diff validation pass.
-- Scope: desktop filename logic, history persistence, dependencies, yt-dlp pins, gallery-dl, Poppler, Phase 2B, extension manifests and packaging were not changed; packaging was not rerun.
-- Manual retests: live Dailymotion/Facebook/Instagram/TikTok/X downloads, multi-player feeds, SPA navigation/DOM reuse, signed master refresh and NLM iframe behavior remain required before release.
+- Phase: 2A.7D — resilient player-local browser routing and desktop handoff complete on 2026-07-13.
+- Branch: `phase-2a7d-browser-routing`; baseline `a9818c0644bf88354eaa8b32993949c0daf85900` remains in the branch ancestry.
+- Commit: `Phase 2A.7D: Build resilient player-local media capture` (use `git rev-parse HEAD` for its immutable hash).
+- Ownership: `PlayerRegistry` assigns extension-owned player IDs and binds short activity leases, candidates and authorization to tab, frame, document generation and player. DOM reuse, navigation, removal, frame/tab closure, TTL and size bounds clear stale state; ambiguous evidence is quarantined instead of shared.
+- Correlation: element/source URLs, nearest post permalink, canonical/OG/JSON-LD metadata, request frame/document URL, initiator, timing, visibility and active lease contribute provenance. Sibling players never inherit candidates; NLM/YouTube iframe isolation remains frame-local.
+- Routing: player-specific public Dailymotion, Facebook, Instagram, TikTok and X post URLs normalize to canonical yt-dlp routes. Complete top-level files and safe signed master manifests remain eligible and retain their full operational URLs internally.
+- Compatibility: Brightcove/Al Jazeera, Shaka, DASH-IF, CNBC, ordinary signed-master, direct MP4 and single-visible-player article fallback paths are preserved; ABC CMAF fragments, ads, renditions, components and init requests remain suppressed.
+- Handoff: the background revalidates tab/frame/document/player/candidate ownership and sends structured operational URL, canonical source page, content type and allowlisted Referer/Origin/User-Agent context. Customer errors and logs redact credentials and query secrets.
+- Desktop: request context is used by yt-dlp/manifest handling; Windows output names remove query-derived extensions, control/reserved names and overlong paths while preserving real media extensions and deterministic collision suffixes. Final FFprobe verification is unchanged.
+- UI: simple mode exposes one preferred combined page/master/file candidate when possible, with only title and trustworthy Best quality/resolution labels; component formats are never described as complete video.
+- Regression: 41 deterministic offline JS tests and the one-time full pytest collection of 287 tests pass. Modified JS/Python syntax checks and `git diff --check` pass.
+- Scope: history persistence, dependencies, yt-dlp pins, gallery-dl, Poppler, Phase 2B, extension manifests and packaging were not changed; packaging was not rerun.
+- Manual retests: live social-feed downloads, multi-player SPA navigation/DOM reuse, embedded players, signed-master refresh and NLM iframe behavior remain required before release.

@@ -19,6 +19,8 @@
   const MAX_TITLE_LENGTH = 160;
   const MAX_URL_LENGTH = 8192;
   const PLAYER_ID_PATTERN = /^player-[a-z0-9_-]{6,96}$/i;
+  const ADVERTISEMENT_PATH = /(?:^|[\/_-])(?:ads?|advert|preroll|midroll|postroll|promo)(?:[\/_?&=-]|$)/i;
+  const PLAYER_LEASE_MS = 15 * 1000;
   const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata"]);
   const TRANSIENT_QUERY_KEYS = /^(?:token|access_token|auth|authorization|signature|sig|expires?|expiry|exp|e|policy|key-pair-id|hdnts|hdntl|hdnea|hmac|jwt|session|sessionid|acl|ip|ipbits|st|__gda__|x-amz-.+|x-goog-.+|range|rn|rbuf|sq)$/i;
 
@@ -129,6 +131,17 @@
     return Boolean(youtubeVideoId(parsed)) || Boolean(canonicalSocialPage(parsed, host.replace(/^www\./, ""))) || /(^|\.)vimeo\.com$/.test(host) || (/(^|\.)cnbc\.com$/.test(host) && /^\/video\//.test(parsed.pathname));
   }
 
+  function extractorFamily(value) {
+    const parsed = safeUrl(value || "");
+    if (!parsed) return "";
+    const host = parsed.hostname.toLowerCase().replace(/^www\.|^m\./, "");
+    if (youtubeVideoId(parsed)) return "youtube";
+    for (const domain of ["facebook.com", "instagram.com", "tiktok.com", "dailymotion.com", "x.com", "twitter.com", "vimeo.com", "cnbc.com"]) {
+      if (host === domain || host.endsWith(`.${domain}`)) return domain === "twitter.com" ? "x.com" : domain;
+    }
+    return "";
+  }
+
   function isSegmentUrl(value) {
     const parsed = safeUrl(value);
     if (!parsed) {
@@ -136,6 +149,37 @@
     }
     const host = parsed.hostname.toLowerCase();
     return host === "googlevideo.com" || host.endsWith(".googlevideo.com") || SEGMENT_PATH.test(`${parsed.pathname}${parsed.search}`) || parsed.searchParams.has("range");
+  }
+
+  function isAdvertisementUrl(value) {
+    const parsed = safeUrl(value);
+    return Boolean(parsed && ADVERTISEMENT_PATH.test(`${parsed.hostname}${parsed.pathname}${parsed.search}`));
+  }
+
+  function validatedSourcePage(raw, pageUrl) {
+    const page = safeUrl(pageUrl || "");
+    const values = [raw.nearestPermalink, raw.canonicalUrl, raw.ogUrl, raw.jsonLdUrl, raw.sourcePage, pageUrl];
+    for (const value of values) {
+      const candidate = safeUrl(value || "", page ? page.href : undefined);
+      if (!candidate) continue;
+      const stable = stablePageUrl(candidate.href);
+      if (!stable) continue;
+      const normalized = safeUrl(stable);
+      if (isExtractorPage(stable) && extractorFamily(stable) && extractorFamily(stable) === extractorFamily(pageUrl)) return stable;
+      if (page && normalized.origin === page.origin) return stable;
+    }
+    return page ? stablePageUrl(page.href) : null;
+  }
+
+  function sanitizeRequestContext(rawContext, sourcePage) {
+    const raw = rawContext && typeof rawContext === "object" ? rawContext : {};
+    const source = safeUrl(sourcePage || "");
+    const userAgent = typeof raw.userAgent === "string" && raw.userAgent.length <= 512 && !/[\r\n\0]/.test(raw.userAgent) ? raw.userAgent : "";
+    return {
+      referer: source ? source.href : "",
+      origin: source ? source.origin : "",
+      userAgent
+    };
   }
 
   function isNetworkFragment(raw, parsed, evidence, completeAttachment) {
@@ -176,8 +220,13 @@
     const disposition = String(raw.contentDisposition || "");
     const evidence = Array.isArray(raw.evidence) ? raw.evidence : [raw.evidence || "unknown"];
 
-    if (raw.blobOnly) return pageUrl && isExtractorPage(pageUrl) ? finish(pageUrl, "page", raw.mediaKind || "video", raw, evidence.concat("extractor-page"), pageUrl) : null;
-    if (!parsed || isSegmentUrl(parsed.href)) {
+    const sourcePage = validatedSourcePage(raw, pageUrl);
+    if (raw.blobOnly) {
+      if (sourcePage && isExtractorPage(sourcePage)) return finish(sourcePage, "page", raw.mediaKind || "video", raw, evidence.concat("extractor-page"), pageUrl);
+      if (raw.articleFallback && raw.visiblePlayer && sourcePage) return finish(sourcePage, "article_page", "video", raw, evidence.concat("article-fallback"), pageUrl);
+      return null;
+    }
+    if (!parsed || isSegmentUrl(parsed.href) || isAdvertisementUrl(parsed.href)) {
       return null;
     }
 
@@ -212,11 +261,13 @@
     const kindConfidence = raw.strongMediaKind || raw.mediaKind === "audio" || raw.mediaKind === "video" || /^(?:audio|video)\//i.test(String(raw.contentType || "")) ? 3 : 1;
     const metadata = candidateMetadata(url, type, mediaKind, raw, contentFormat(raw, url, type, mediaKind));
     return {
-      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${raw.playerId || ""}|${type}|${canonicalUrl}`),
+      id: stableId(`${raw.tabId ?? -1}|${raw.frameId ?? 0}|${raw.documentGeneration ?? 0}|${raw.playerId || ""}|${type}|${canonicalUrl}`),
       tabId: Number.isInteger(raw.tabId) ? raw.tabId : -1,
       frameId: Number.isInteger(raw.frameId) ? raw.frameId : 0,
+      documentGeneration: Number.isInteger(raw.documentGeneration) ? raw.documentGeneration : 0,
       playerId: validPlayerId(raw.playerId) ? raw.playerId : "",
       pageUrl: pageUrl || url,
+      sourcePage: validatedSourcePage(raw, pageUrl || url) || pageUrl || url,
       url,
       canonicalUrl,
       type,
@@ -230,6 +281,8 @@
       manifestFamily: metadata.manifestFamily,
       manifestRank: metadata.manifestRank,
       componentOnly: mediaKind === "audio" || raw.hasAudio === false || raw.componentOnly === true || metadata.manifestRole === "audio_variant" || metadata.manifestRole === "video_variant" || metadata.manifestRole === "variant",
+      contentType: String(raw.contentType || "").slice(0, 120),
+      requestContext: sanitizeRequestContext(raw.requestContext, validatedSourcePage(raw, pageUrl || url) || pageUrl || url),
       label: buildLabel(type, mediaKind, title, metadata),
       priority,
       kindConfidence,
@@ -253,10 +306,11 @@
 
   function candidatePriority(type, url, evidence, raw) {
     if (type === "direct_media" && (raw.topLevelDocument || evidence.includes("top-level-media-document") || evidence.includes("webRequest-main-frame"))) return 0;
+    if (type === "page" && isExtractorPage(url)) return 0;
     const parsed = safeUrl(url);
     const filename = parsed ? parsed.pathname.split("/").pop() || "" : "";
-    if ((type === "hls" || type === "dash") && describeManifest(parsed, type, raw.mediaKind || "video", filename).role === "master") return 0;
-    if (type === "page" && isExtractorPage(url)) return 1;
+    if ((type === "hls" || type === "dash") && describeManifest(parsed, type, raw.mediaKind || "video", filename).role === "master") return isExtractorPage(raw.pageUrl || "") ? 2 : 1;
+    if (type === "article_page") return 4;
     if (type === "hls" || type === "dash") return 2;
     if (type === "direct_media" && evidence.some((item) => DOM_EVIDENCE.has(item))) return 3;
     if (type === "direct_media" && (raw.topLevelDocument || evidence.includes("top-level-media-document") || evidence.includes("webRequest-main-frame"))) return 4;
@@ -367,6 +421,7 @@
       const now = this.clock();
       const candidate = classifyCandidate({ ...raw, firstObserved: now, lastObserved: now });
       if (!candidate) return null;
+      if (Array.from(this.items.values()).some((item) => this.sameOwner(item, candidate) && item.priority < candidate.priority)) return null;
       if ((candidate.priority === 5 || candidate.priority === 6) && this.hasDominantCandidate(candidate)) return null;
       const existing = this.items.get(candidate.id);
       if (existing) {
@@ -418,30 +473,24 @@
       let candidates = Array.from(this.items.values())
         .filter((item) => filter.tabId === undefined || item.tabId === filter.tabId)
         .filter((item) => filter.frameId === undefined || item.frameId === filter.frameId)
+        .filter((item) => filter.documentGeneration === undefined || item.documentGeneration === filter.documentGeneration)
         .filter((item) => filter.playerId === undefined || item.playerId === filter.playerId)
         .filter((item) => !filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl))
         .filter((item) => filter.simpleMode === false || !item.componentOnly);
-      const completeDirectOrMaster = candidates.filter((item) => item.priority === 0);
-      if (completeDirectOrMaster.length) candidates = completeDirectOrMaster;
-      else {
-        const extractorPages = candidates.filter((item) => item.priority === 1);
-        if (extractorPages.length) candidates = extractorPages;
-      }
-      const manifests = candidates.filter((item) => item.priority === 2);
-      if (manifests.length) candidates = candidates.filter((item) => item.priority !== 5 && item.priority !== 6);
-      if (candidates.some((item) => item.priority < 6)) candidates = candidates.filter((item) => item.priority < 6);
+      const bestPriority = candidates.reduce((best, item) => Math.min(best, item.priority), 99);
+      if (bestPriority < 99) candidates = candidates.filter((item) => item.priority === bestPriority);
       candidates.sort((left, right) => left.priority - right.priority || left.manifestRank - right.manifestRank || right.lastObserved - left.lastObserved || left.id.localeCompare(right.id));
       return deduplicateLabels(candidates).map((item) => ({ ...item, evidence: [...item.evidence] }));
     }
 
     sameOwner(left, right) {
-      return left.tabId === right.tabId && left.frameId === right.frameId && left.pageUrl === right.pageUrl && left.playerId === right.playerId;
+      return left.tabId === right.tabId && left.frameId === right.frameId && left.documentGeneration === right.documentGeneration && left.pageUrl === right.pageUrl && left.playerId === right.playerId;
     }
 
     hasDominantCandidate(candidate) {
       for (const item of this.items.values()) {
         if (!this.sameOwner(item, candidate)) continue;
-        if (item.priority === 1 || item.priority === 2) return true;
+        if (item.priority <= 2) return true;
         if (candidate.priority === 6 && item.priority < 6) return true;
       }
       return false;
@@ -450,7 +499,7 @@
     removeDominatedCandidates(candidate) {
       for (const [id, item] of this.items) {
         if (id === candidate.id || !this.sameOwner(item, candidate)) continue;
-        if ((candidate.priority === 1 && item.priority > 1) || item.priority === 5 || item.priority === 6) this.items.delete(id);
+        if ((candidate.type === "page" && item.priority > candidate.priority) || (candidate.priority === 1 && item.priority > 1) || item.priority === 5 || item.priority === 6) this.items.delete(id);
       }
     }
 
@@ -463,6 +512,12 @@
     removeFrame(tabId, frameId) {
       for (const [id, item] of this.items) {
         if (item.tabId === tabId && item.frameId === frameId) this.items.delete(id);
+      }
+    }
+
+    removePlayer(tabId, frameId, documentGeneration, playerId) {
+      for (const [id, item] of this.items) {
+        if (item.tabId === tabId && item.frameId === frameId && item.documentGeneration === documentGeneration && item.playerId === playerId) this.items.delete(id);
       }
     }
 
@@ -487,6 +542,7 @@
         if (!item) continue;
         if (filter.tabId !== undefined && item.tabId !== filter.tabId) continue;
         if (filter.frameId !== undefined && item.frameId !== filter.frameId) continue;
+        if (filter.documentGeneration !== undefined && item.documentGeneration !== filter.documentGeneration) continue;
         if (filter.playerId !== undefined && item.playerId !== filter.playerId) continue;
         this.items.delete(id);
       }
@@ -504,38 +560,88 @@
     }
   }
 
-  class PlayerOwnershipStore {
-    constructor(maxOwners = 400) {
-      this.maxOwners = Math.max(1, Number(maxOwners) || 400);
+  class PlayerRegistry {
+    constructor(options = {}) {
+      this.maxOwners = Math.max(1, Number(options.maxOwners || options) || 400);
+      this.ttlMs = Math.max(PLAYER_LEASE_MS, Number(options.ttlMs) || 2 * 60 * 1000);
+      this.leaseMs = Math.max(1000, Number(options.leaseMs) || PLAYER_LEASE_MS);
+      this.clock = typeof options.clock === "function" ? options.clock : Date.now;
       this.items = new Map();
     }
 
-    key(tabId, frameId, playerId) {
-      return `${tabId}:${frameId}:${playerId}`;
+    key(tabId, frameId, documentGeneration, playerId) {
+      return `${tabId}:${frameId}:${documentGeneration}:${playerId}`;
     }
 
-    bind(tabId, frameId, playerId, pageUrl) {
-      const stable = stablePageUrl(pageUrl || "");
-      if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || !validPlayerId(playerId) || !stable) return false;
-      const key = this.key(tabId, frameId, playerId);
+    register(raw) {
+      const tabId = raw && raw.tabId;
+      const frameId = raw && raw.frameId;
+      const documentGeneration = raw && raw.documentGeneration;
+      const playerId = raw && raw.playerId;
+      const now = this.clock();
+      const pageUrl = raw && raw.pageUrl;
+      const stable = stablePageUrl(raw && raw.pageUrl || "");
+      if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || !Number.isInteger(documentGeneration) || !validPlayerId(playerId) || !stable) return false;
+      const key = this.key(tabId, frameId, documentGeneration, playerId);
       const existing = this.items.get(key);
-      if (existing && existing !== stable) return false;
+      if (existing && existing.pageUrl !== stable) return false;
+      for (const [otherKey, item] of this.items) {
+        if (item.tabId === tabId && item.frameId === frameId && item.playerId === playerId && item.documentGeneration !== documentGeneration) this.items.delete(otherKey);
+      }
+      const activeProvided = raw.active !== undefined;
+      const active = activeProvided ? Boolean(raw.active) : existing ? existing.active : false;
+      const item = {
+        tabId, frameId, documentGeneration, playerId, pageUrl: stable,
+        visible: raw.visible !== false,
+        active,
+        lastActivity: activeProvided && active ? now : existing ? existing.lastActivity : 0,
+        leaseUntil: activeProvided && active ? now + this.leaseMs : existing ? existing.leaseUntil : 0,
+        lastSeen: now
+      };
       this.items.delete(key);
-      this.items.set(key, stable);
+      this.items.set(key, item);
+      this.prune(now);
+      return true;
+    }
+
+    touch(raw) {
+      if (!this.register(raw)) return false;
+      const item = this.items.get(this.key(raw.tabId, raw.frameId, raw.documentGeneration, raw.playerId));
+      if (raw.visible !== undefined) item.visible = Boolean(raw.visible);
+      if (raw.active) {
+        item.active = true;
+        item.lastActivity = this.clock();
+        item.leaseUntil = item.lastActivity + this.leaseMs;
+      }
       while (this.items.size > this.maxOwners) this.items.delete(this.items.keys().next().value);
       return true;
     }
 
-    owns(tabId, frameId, playerId, pageUrl) {
-      return validPlayerId(playerId) && this.items.get(this.key(tabId, frameId, playerId)) === stablePageUrl(pageUrl || "");
+    owns(tabId, frameId, documentGeneration, playerId, pageUrl) {
+      const item = this.items.get(this.key(tabId, frameId, documentGeneration, playerId));
+      return Boolean(item && item.pageUrl === stablePageUrl(pageUrl || ""));
     }
 
-    playerIds(tabId, frameId, pageUrl) {
-      const stable = stablePageUrl(pageUrl || "");
-      const prefix = `${tabId}:${frameId}:`;
-      return Array.from(this.items.entries())
-        .filter(([key, value]) => key.startsWith(prefix) && value === stable)
-        .map(([key]) => key.slice(prefix.length));
+    correlate(raw) {
+      const now = Number(raw && raw.observedAt) || this.clock();
+      const stable = stablePageUrl(raw && raw.pageUrl || "");
+      const documentUrl = stablePageUrl(raw && raw.documentUrl || "");
+      const initiator = safeUrl(raw && raw.initiator || "");
+      const ranked = Array.from(this.items.values())
+        .filter((item) => item.tabId === raw.tabId && item.frameId === raw.frameId && item.documentGeneration === raw.documentGeneration)
+        .filter((item) => item.pageUrl === stable && item.visible && item.leaseUntil >= now)
+        .map((item) => {
+          let score = 10;
+          if (item.active) score += 3;
+          if (documentUrl && documentUrl === item.pageUrl) score += 2;
+          if (initiator && safeUrl(item.pageUrl).origin === initiator.origin) score += 1;
+          score += Math.max(0, 1 - (now - item.lastActivity) / this.leaseMs);
+          return { item, score };
+        })
+        .sort((left, right) => right.score - left.score || right.item.lastActivity - left.item.lastActivity || left.item.playerId.localeCompare(right.item.playerId));
+      if (!ranked.length) return null;
+      if (ranked.length > 1 && Math.abs(ranked[0].score - ranked[1].score) < 0.5) return null;
+      return ranked[0].item.playerId;
     }
 
     removeFrame(tabId, frameId) {
@@ -543,10 +649,45 @@
       for (const key of this.items.keys()) if (key.startsWith(prefix)) this.items.delete(key);
     }
 
+    removePlayer(tabId, frameId, documentGeneration, playerId) {
+      this.items.delete(this.key(tabId, frameId, documentGeneration, playerId));
+    }
+
     removeTab(tabId) {
       const prefix = `${tabId}:`;
       for (const key of this.items.keys()) if (key.startsWith(prefix)) this.items.delete(key);
     }
+
+
+    prune(now = this.clock()) {
+      for (const [key, item] of this.items) if (now - item.lastSeen > this.ttlMs) this.items.delete(key);
+      while (this.items.size > this.maxOwners) this.items.delete(this.items.keys().next().value);
+    }
+  }
+
+  class PlayerOwnershipStore extends PlayerRegistry {
+    constructor(maxOwners = 400) { super({ maxOwners }); }
+    bind(tabId, frameId, playerId, pageUrl) { return this.register({ tabId, frameId, documentGeneration: 0, playerId, pageUrl, visible: true }); }
+    owns(tabId, frameId, playerId, pageUrl) { return super.owns(tabId, frameId, 0, playerId, pageUrl); }
+  }
+
+  class QuarantineStore {
+    constructor(options = {}) {
+      this.maxItems = Math.max(1, Number(options.maxItems) || 100);
+      this.ttlMs = Math.max(1000, Number(options.ttlMs) || 30 * 1000);
+      this.clock = typeof options.clock === "function" ? options.clock : Date.now;
+      this.items = [];
+    }
+    observe(raw) {
+      const now = this.clock();
+      this.items.push({ tabId: raw.tabId, frameId: raw.frameId, documentGeneration: raw.documentGeneration, observedAt: now });
+      this.prune(now);
+    }
+    prune(now = this.clock()) {
+      this.items = this.items.filter((item) => now - item.observedAt <= this.ttlMs).slice(-this.maxItems);
+    }
+    removeFrame(tabId, frameId) { this.items = this.items.filter((item) => item.tabId !== tabId || item.frameId !== frameId); }
+    removeTab(tabId) { this.items = this.items.filter((item) => item.tabId !== tabId); }
   }
 
   function isChildManifest(candidate) {
@@ -555,7 +696,7 @@
 
   function manifestsRelated(left, right) {
     if (left.type !== "hls" || right.type !== "hls") return false;
-    if (left.tabId !== right.tabId || left.frameId !== right.frameId || left.pageUrl !== right.pageUrl || left.playerId !== right.playerId) return false;
+    if (left.tabId !== right.tabId || left.frameId !== right.frameId || left.documentGeneration !== right.documentGeneration || left.pageUrl !== right.pageUrl || left.playerId !== right.playerId) return false;
     if (!left.manifestFamily || !right.manifestFamily) return false;
     const [leftPath, leftIdentity = ""] = left.manifestFamily.split("::", 2);
     const [rightPath, rightIdentity = ""] = right.manifestFamily.split("::", 2);
@@ -566,7 +707,7 @@
   function deduplicateLabels(candidates) {
     const seen = new Set();
     return candidates.filter((item) => {
-      const key = `${item.tabId}|${item.frameId}|${item.pageUrl}|${item.playerId}|${item.label}`;
+      const key = `${item.tabId}|${item.frameId}|${item.documentGeneration}|${item.pageUrl}|${item.playerId}|${item.label}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -577,11 +718,12 @@
     return typeof value === "string" && PLAYER_ID_PATTERN.test(value);
   }
 
-  function applyTrustedOwner(raw, tabId, frameId, playerId) {
+  function applyTrustedOwner(raw, tabId, frameId, playerId, documentGeneration = 0) {
     return {
       ...(raw && typeof raw === "object" ? raw : {}),
       tabId: Number.isInteger(tabId) ? tabId : -1,
       frameId: Number.isInteger(frameId) ? frameId : 0,
+      documentGeneration: Number.isInteger(documentGeneration) ? documentGeneration : 0,
       playerId: validPlayerId(playerId) ? playerId : ""
     };
   }
@@ -595,5 +737,5 @@
     return tagName === "VIDEO" || tagName === "AUDIO";
   }
 
-  return { CandidateStore, PlayerOwnershipStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, stableId, stablePageUrl, validPlayerId };
+  return { CandidateStore, PlayerRegistry, PlayerOwnershipStore, QuarantineStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isAdvertisementUrl, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, sanitizeRequestContext, stableId, stablePageUrl, validPlayerId, validatedSourcePage };
 });

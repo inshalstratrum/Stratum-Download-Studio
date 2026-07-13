@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CandidateStore,
+  PlayerRegistry,
+  QuarantineStore,
   PlayerOwnershipStore,
   applyTrustedOwner,
   canonicalCandidateUrl,
@@ -42,10 +44,10 @@ test("classifies one HLS or DASH manifest", () => {
   const hls = classify("https://cdn.test/master.m3u8");
   const dash = classify("https://cdn.test/manifest.mpd", { contentType: "application/dash+xml" });
   assert.equal(hls.type, "hls");
-  assert.equal(hls.priority, 0);
+  assert.equal(hls.priority, 1);
   assert.equal(hls.label, "Video • Best quality");
   assert.equal(dash.type, "dash");
-  assert.equal(dash.priority, 0);
+  assert.equal(dash.priority, 1);
   assert.equal(dash.label, "Video • Best quality");
   assert.equal(classify("https://cdn.test/live", { contentType: "application/vnd.apple.mpegurl" }).type, "hls");
   assert.equal(classify("https://cdn.test/initialization/manifest.mpd").type, "dash");
@@ -340,7 +342,7 @@ test("master preference never crosses player identity or trusted frame", () => {
   const variantB = store.observe({ tabId: 22, frameId: 1, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=B&token=secret", evidence: "webRequest-response" });
   const variantOtherFrame = store.observe({ tabId: 22, frameId: 2, pageUrl, url: "https://cdn.test/shared/playlist_a-eng-128k.m3u8?videoId=A&token=secret", evidence: "webRequest-response" });
   assert.deepEqual(store.list({ tabId: 22, frameId: 1 }).map((item) => item.id), [masterA.id]);
-  assert.equal(store.items.has(variantB.id), true);
+  assert.equal(variantB, null);
   assert.deepEqual(store.list({ tabId: 22, frameId: 2 }).map((item) => item.id), []);
   assert.equal(store.items.has(variantOtherFrame.id), true);
 });
@@ -393,10 +395,10 @@ test("canonical page beats components while complete master and direct top-level
 
   const masterStore = new CandidateStore();
   const master = masterStore.observe({ ...social, url: "https://cdn.test/master.m3u8?token=signed-secret", evidence: "webRequest-response" });
-  masterStore.observe({ ...social, url: social.pageUrl, title: "Reel", evidence: "dom-media" });
-  assert.deepEqual(masterStore.list(social).map((item) => item.id), [master.id]);
-  assert.match(masterStore.list(social)[0].url, /token=signed-secret/);
-  assert.doesNotMatch(masterStore.list(social)[0].label, /m3u8|HLS|signed|secret|CDN/i);
+  const canonical = masterStore.observe({ ...social, url: social.pageUrl, title: "Reel", evidence: "dom-media" });
+  assert.deepEqual(masterStore.list(social).map((item) => item.id), [canonical.id]);
+  assert.match(master.url, /token=signed-secret/);
+  assert.doesNotMatch(master.label, /m3u8|HLS|signed|secret|CDN/i);
 
   const direct = classifyCandidate({ ...social, url: "https://files.test/movie.mp4?signature=live", contentType: "video/mp4", topLevelDocument: true, evidence: "top-level-media-document" });
   assert.equal(direct.priority, 0);
@@ -438,4 +440,73 @@ test("ownership storage is bounded and rejects cross-tab frame player requests",
   assert.equal(owners.owns(40, 1, "player-owner003", "https://example.test/a"), false);
   assert.equal(owners.owns(40, 0, "player-owner003", "https://example.test/b"), false);
   assert.equal(owners.owns(40, 0, "player-owner003", "https://example.test/a"), true);
+});
+
+test("player registry correlates the active leased player and quarantines ambiguity", () => {
+  let now = 1000;
+  const registry = new PlayerRegistry({ clock: () => now, leaseMs: 5000, ttlMs: 10000, maxOwners: 4 });
+  const base = { tabId: 50, frameId: 0, documentGeneration: 3, pageUrl: "https://news.test/article", visible: true };
+  registry.touch({ ...base, playerId: "player-feed0001", active: true });
+  registry.touch({ ...base, playerId: "player-feed0001", active: undefined });
+  now += 100;
+  registry.touch({ ...base, playerId: "player-feed0002", active: false });
+  assert.equal(registry.correlate({ ...base, observedAt: now, documentUrl: base.pageUrl, initiator: "https://news.test" }), "player-feed0001");
+  registry.touch({ ...base, playerId: "player-feed0002", active: true });
+  assert.equal(registry.correlate({ ...base, observedAt: now, documentUrl: base.pageUrl, initiator: "https://news.test" }), null);
+  const quarantine = new QuarantineStore({ clock: () => now, maxItems: 2, ttlMs: 1000 });
+  quarantine.observe(base); quarantine.observe(base); quarantine.observe(base);
+  assert.equal(quarantine.items.length, 2);
+  now += 1001; quarantine.prune();
+  assert.equal(quarantine.items.length, 0);
+});
+
+test("document generations and removal prevent SPA player reuse leakage", () => {
+  const registry = new PlayerRegistry();
+  const first = { tabId: 51, frameId: 0, documentGeneration: 1, playerId: "player-spa00001", pageUrl: "https://x.com/home", visible: true, active: true };
+  assert.equal(registry.touch(first), true);
+  assert.equal(registry.owns(51, 0, 1, first.playerId, first.pageUrl), true);
+  assert.equal(registry.touch({ ...first, documentGeneration: 2, pageUrl: "https://x.com/creator/status/123" }), true);
+  assert.equal(registry.owns(51, 0, 1, first.playerId, first.pageUrl), false);
+  registry.removePlayer(51, 0, 2, first.playerId);
+  assert.equal(registry.owns(51, 0, 2, first.playerId, "https://x.com/creator/status/123"), false);
+});
+
+test("feed provenance resolves each social player canonical route", () => {
+  const fixtures = [
+    ["https://x.com/home", "https://x.com/a/status/101?ref=x", "https://x.com/a/status/101"],
+    ["https://www.facebook.com/", "https://www.facebook.com/reel/202?tracking=x", "https://www.facebook.com/reel/202/"],
+    ["https://www.instagram.com/", "https://www.instagram.com/reel/ABC/?igsh=x", "https://www.instagram.com/reel/ABC/"],
+    ["https://www.tiktok.com/foryou", "https://www.tiktok.com/@a/video/303?x=1", "https://www.tiktok.com/@a/video/303"],
+    ["https://www.dailymotion.com/", "https://www.dailymotion.com/video/x404?playlist=x", "https://www.dailymotion.com/video/x404"]
+  ];
+  for (const [page, permalink, expected] of fixtures) {
+    const item = classifyCandidate({ pageUrl: page, nearestPermalink: permalink, url: "blob:https://cdn.test/id", blobOnly: true, visiblePlayer: true, evidence: "dom-media", playerId: "player-feedroute" });
+    assert.equal(item.url, expected);
+    assert.equal(item.type, "page");
+  }
+  assert.equal(classifyCandidate({
+    pageUrl: "https://x.com/home", nearestPermalink: "https://www.instagram.com/reel/WRONG/",
+    url: "blob:https://x.com/id", blobOnly: true, visiblePlayer: true, evidence: "dom-media", playerId: "player-feedroute"
+  }), null);
+});
+
+test("single visible article player falls back to validated canonical article", () => {
+  const item = classifyCandidate({
+    pageUrl: "https://www.nytimes.com/2026/07/13/world/example.html?smid=x",
+    canonicalUrl: "https://www.nytimes.com/2026/07/13/world/example.html",
+    url: "blob:https://www.nytimes.com/id", blobOnly: true, articleFallback: true,
+    visiblePlayer: true, mediaKind: "video", evidence: "dom-media", playerId: "player-article01"
+  });
+  assert.equal(item.type, "article_page");
+  assert.equal(item.url, "https://www.nytimes.com/2026/07/13/world/example.html");
+  assert.equal(item.label, "Video • Best quality");
+});
+
+test("hidden ads and component URLs never enter the preferred list", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 52, frameId: 0, documentGeneration: 0, playerId: "player-bright01", pageUrl: "https://www.aljazeera.com/news/story" };
+  assert.equal(store.observe({ ...owner, url: "https://cdn.test/ads/preroll/master.m3u8", evidence: "webRequest-response" }), null);
+  store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/asset/playlist_a-eng.m3u8", evidence: "webRequest-response" });
+  const master = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/asset/master.m3u8?token=signed", evidence: "webRequest-response" });
+  assert.deepEqual(store.list(owner).map((item) => item.id), [master.id]);
 });

@@ -37,6 +37,72 @@ function playerIdFor(element) {
   return id;
 }
 
+function visiblePlayer(element) {
+  if (!element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  const style = globalThis.getComputedStyle ? getComputedStyle(element) : null;
+  return rect.width >= 160 && rect.height >= (element.tagName === "AUDIO" ? 28 : 80) && (!style || (style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0));
+}
+
+function jsonLdVideoUrl() {
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return "";
+    const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+    if (types.includes("VideoObject")) {
+      const main = value.mainEntityOfPage;
+      return value.url || (typeof main === "string" ? main : main && main["@id"]) || "";
+    }
+    for (const child of Object.values(value)) {
+      if (Array.isArray(child)) {
+        for (const item of child) { const found = visit(item); if (found) return found; }
+      } else if (child && typeof child === "object") {
+        const found = visit(child); if (found) return found;
+      }
+    }
+    return "";
+  };
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try { const found = visit(JSON.parse(script.textContent || "null")); if (found) return found; } catch (error) { /* Ignore malformed page metadata. */ }
+  }
+  return "";
+}
+
+function pageProvenance(element) {
+  const canonical = document.querySelector('link[rel="canonical"]');
+  const og = document.querySelector('meta[property="og:url"], meta[name="og:url"]');
+  let nearestPermalink = "";
+  const container = element.closest('article, [role="article"], [data-testid*="post" i], [data-e2e*="feed" i], li') || element.parentElement;
+  if (container) {
+    const links = Array.from(container.querySelectorAll("a[href]"));
+    nearestPermalink = (links.find((link) => candidateApi.isExtractorPage(link.href)) || {}).href || "";
+  }
+  return {
+    nearestPermalink,
+    canonicalUrl: canonical ? canonical.href : "",
+    ogUrl: og ? og.content : "",
+    jsonLdUrl: jsonLdVideoUrl()
+  };
+}
+
+function playerContext(element) {
+  return {
+    playerId: playerIdFor(element),
+    documentGeneration: pageGeneration,
+    visiblePlayer: visiblePlayer(element),
+    requestContext: { userAgent: String(navigator.userAgent || "").slice(0, 512) },
+    ...pageProvenance(element)
+  };
+}
+
+function reportPlayerState(element, activity, active = true) {
+  const context = playerContext(element);
+  return extensionApi.runtime.sendMessage({
+    type: "stratrum-player-state", pageUrl: window.location.href,
+    playerId: context.playerId, documentGeneration: pageGeneration,
+    visible: context.visiblePlayer, active, activity
+  }).catch(() => {});
+}
+
 function rawCandidate(url, mediaKind, evidence, extra = {}) {
   return {
     pageUrl: window.location.href,
@@ -65,7 +131,8 @@ function elementCandidates(element, evidence = "dom-media") {
   if (drmMedia.has(element) || element.mediaKeys) return [];
 
   const kind = mediaKindFor(element);
-  const playerId = playerIdFor(element);
+  const context = playerContext(element);
+  const playerId = context.playerId;
   const candidates = [];
   const sources = [
     { url: element.currentSrc, type: element.getAttribute("type") || "", source: evidence },
@@ -83,18 +150,20 @@ function elementCandidates(element, evidence = "dom-media") {
       title: element.getAttribute("aria-label") || element.title || pageTitle(),
       width: Number(element.videoWidth) || 0,
       height: Number(element.videoHeight) || 0,
-      playerId
+      ...context
     }));
   }
-  if (candidateApi.isExtractorPage(window.location.href)) {
-    candidates.push(rawCandidate(window.location.href, kind, evidence, { title: pageTitle(), playerId }));
+  const sourcePage = candidateApi.validatedSourcePage(context, window.location.href);
+  if (sourcePage && candidateApi.isExtractorPage(sourcePage)) {
+    candidates.push(rawCandidate(sourcePage, kind, evidence, { title: pageTitle(), ...context }));
   } else if (element.srcObject || candidates.length === 0) {
-    candidates.push(rawCandidate(window.location.href, kind, evidence, { blobOnly: true, title: pageTitle(), playerId }));
+    candidates.push(rawCandidate(window.location.href, kind, evidence, { blobOnly: true, articleFallback: true, title: pageTitle(), ...context }));
   }
   return candidates;
 }
 
 async function observeElement(element, evidence) {
+  await reportPlayerState(element, evidence, evidence === "control-click" || !element.paused);
   const observed = [];
   for (const candidate of elementCandidates(element, evidence)) {
     const result = await reportCandidate(candidate);
@@ -108,7 +177,13 @@ function removeElementCandidates(element) {
   const ids = Array.from(elementCandidateIds.get(element) || []);
   elementCandidateIds.delete(element);
   const playerId = elementPlayerIds.get(element) || "";
-  if (ids.length) extensionApi.runtime.sendMessage({ type: "stratrum-remove-candidates", ids, playerId }).catch(() => {});
+  if (ids.length) extensionApi.runtime.sendMessage({ type: "stratrum-remove-candidates", ids, playerId, documentGeneration: pageGeneration }).catch(() => {});
+}
+
+function retirePlayer(element) {
+  const playerId = elementPlayerIds.get(element) || "";
+  if (playerId) extensionApi.runtime.sendMessage({ type: "stratrum-player-removed", playerId, documentGeneration: pageGeneration }).catch(() => {});
+  elementPlayerIds.delete(element);
 }
 
 function showStatus(message, success = false) {
@@ -132,7 +207,7 @@ async function requestDownload(candidate, button) {
   button.textContent = "Sending…";
   button.disabled = true;
   try {
-    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-download-request", candidateId: candidate.id, playerId: candidate.playerId });
+    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-download-request", candidateId: candidate.id, playerId: candidate.playerId, documentGeneration: pageGeneration });
     showStatus(result && result.message ? result.message : "The extension did not receive a response.", Boolean(result && result.success));
     button.textContent = result && result.success ? "Sent ✓" : originalText;
   } catch (error) {
@@ -185,10 +260,11 @@ function showPicker(candidates, button) {
 }
 
 async function handleControlClick(element, button) {
+  await reportPlayerState(element, "control-click", true);
   await observeElement(element, "control-click");
   let candidates = [];
   try {
-    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-get-candidates", pageUrl: window.location.href, playerId: playerIdFor(element) });
+    const result = await extensionApi.runtime.sendMessage({ type: "stratrum-get-candidates", pageUrl: window.location.href, playerId: playerIdFor(element), documentGeneration: pageGeneration });
     candidates = result && Array.isArray(result.candidates) ? result.candidates : [];
   } catch (error) {
     showStatus("Stratum could not load detected media choices.");
@@ -207,7 +283,7 @@ function positionControls() {
   positionFrame = null;
   for (const [element, button] of mediaControls) {
     if (!element.isConnected) {
-      button.remove(); mediaControls.delete(element); removeElementCandidates(element);
+      button.remove(); mediaControls.delete(element); removeElementCandidates(element); retirePlayer(element);
       if (mediaResizeObserver) mediaResizeObserver.unobserve(element);
       continue;
     }
@@ -244,17 +320,13 @@ function attachControl(element) {
   document.documentElement.appendChild(button);
   mediaControls.set(element, button);
   elementEvidence.set(element, "dom-media");
+  reportPlayerState(element, "attached", false);
   if (mediaResizeObserver) mediaResizeObserver.observe(element);
   schedulePositionUpdate();
 }
 
 function isOverlayTarget(element) {
   return candidateApi.isOverlayTargetDescriptor({ tagName: element.tagName, href: element.href || "" });
-}
-
-function soleConnectedPlayerId() {
-  const elements = Array.from(mediaControls.keys()).filter((element) => element.isConnected && !drmMedia.has(element));
-  return elements.length === 1 ? playerIdFor(elements[0]) : "";
 }
 
 function scanNode(node) {
@@ -271,6 +343,7 @@ function removeAllControls() {
   for (const [element, button] of mediaControls) {
     button.remove();
     removeElementCandidates(element);
+    retirePlayer(element);
     if (mediaResizeObserver) mediaResizeObserver.unobserve(element);
   }
   mediaControls.clear();
@@ -297,7 +370,7 @@ function handleNavigation() {
     elementPlayerIds.set(element, newPlayerId());
     elementEvidence.set(element, "dom-media");
   }
-  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href }).catch(() => {});
+  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href, documentGeneration: pageGeneration }).catch(() => {});
   observeDirectPage();
   scanNode(document.documentElement);
 }
@@ -316,7 +389,7 @@ function installNavigationHooks() {
 }
 
 if (supportedPageUrl()) {
-  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href }).catch(() => {});
+  extensionApi.runtime.sendMessage({ type: "stratrum-frame-page", pageUrl: window.location.href, documentGeneration: pageGeneration }).catch(() => {});
   extensionApi.storage.local.get(["showMediaButtons"]).then((stored) => {
     showMediaButtons = stored.showMediaButtons !== false;
     observeDirectPage();
@@ -332,6 +405,7 @@ if (supportedPageUrl()) {
         if (target && mediaControls.has(target)) {
           removeElementCandidates(target);
           elementEvidence.set(target, "source-change");
+          reportPlayerState(target, "source-change", true);
           schedulePositionUpdate();
         }
         if (mutation.target.tagName === "IFRAME") scanNode(mutation.target);
@@ -345,18 +419,28 @@ if (supportedPageUrl()) {
     if (event.target instanceof HTMLMediaElement && mediaControls.has(event.target)) {
       removeElementCandidates(event.target);
       elementEvidence.set(event.target, "currentSrc-change");
+      reportPlayerState(event.target, "loadstart", true);
       schedulePositionUpdate();
     }
   }, true);
   document.addEventListener("loadedmetadata", (event) => {
-    if (event.target instanceof HTMLMediaElement && mediaControls.has(event.target)) schedulePositionUpdate();
+    if (event.target instanceof HTMLMediaElement && mediaControls.has(event.target)) {
+      reportPlayerState(event.target, "loadedmetadata", true);
+      schedulePositionUpdate();
+    }
   }, true);
+  for (const activity of ["play", "playing"]) {
+    document.addEventListener(activity, (event) => {
+      if (event.target instanceof HTMLMediaElement && mediaControls.has(event.target)) reportPlayerState(event.target, activity, true);
+    }, true);
+  }
   document.addEventListener("encrypted", (event) => {
     if (!(event.target instanceof HTMLMediaElement)) return;
     drmMedia.add(event.target);
     extensionApi.runtime.sendMessage({ type: "stratrum-frame-blocked" }).catch(() => {});
     showStatus("DRM or access-controlled media is not supported.");
     removeElementCandidates(event.target);
+    retirePlayer(event.target);
     const button = mediaControls.get(event.target);
     if (button) button.remove();
     if (mediaResizeObserver) mediaResizeObserver.unobserve(event.target);
@@ -367,8 +451,12 @@ if (supportedPageUrl()) {
     try {
       const performanceObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          const playerId = soleConnectedPlayerId();
-          if (playerId) reportCandidate(rawCandidate(entry.name, null, "performance-resource", { playerId }));
+          extensionApi.runtime.sendMessage({
+            type: "stratrum-network-evidence", candidate: rawCandidate(entry.name, null, "performance-resource", {
+              documentGeneration: pageGeneration, observedAt: Date.now(), documentUrl: window.location.href,
+              initiator: window.location.origin, requestContext: { userAgent: String(navigator.userAgent || "").slice(0, 512) }
+            })
+          }).catch(() => {});
         }
       });
       performanceObserver.observe({ type: "resource", buffered: true });

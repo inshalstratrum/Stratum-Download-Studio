@@ -27,6 +27,7 @@ APP_NAME = "Stratum Download Studio"
 EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
 DESKTOP_BROWSER_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
+MAX_OPERATIONAL_URL = 8192
 CONVERSION_TIMEOUT_SECONDS = 30 * 60
 MAX_PAIRED_ORIGINS = 6
 MAX_RECENT_FOLDERS = 10
@@ -35,30 +36,51 @@ MAX_RETRY_ATTEMPTS = 3
 _conversion_name_lock = threading.Lock()
 
 
-def generate_safe_filename(save_dir, title, ext):
-    reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
-                'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
+WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+MEDIA_EXTENSIONS = {'mp4', 'mkv', 'webm', 'avi', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'}
+WINDOWS_SAFE_PATH_LIMIT = 240
 
-    title = re.sub(r'[\x00-\\/:*?"<>|]', '_', title)
-    title = title.strip('. ')
-    if not title:
-        title = "download"
-    elif title.upper() in reserved:
-        title = title + "_file"
 
-    if len(title) > 200:
-        title = title[:200]
+def normalize_media_extension(ext):
+    value = str(ext or '').split('?', 1)[0].split('#', 1)[0].strip().lower().lstrip('.')
+    if not re.fullmatch(r'[a-z0-9]{2,10}', value) or value not in MEDIA_EXTENSIONS:
+        raise ValueError('Unsupported media extension')
+    return value
 
-    filename = f"{title}.{ext}"
-    out_path = os.path.join(save_dir, filename)
 
-    counter = 1
-    while os.path.exists(out_path):
-        filename = f"{title}_{counter}.{ext}"
-        out_path = os.path.join(save_dir, filename)
-        counter += 1
+def sanitize_windows_filename_component(value):
+    cleaned = re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]', '_', str(value or '')).strip('. ')
+    cleaned = re.sub(r'\s+', ' ', cleaned) or 'download'
+    if cleaned.split('.', 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        cleaned += '_file'
+    return cleaned
 
-    return out_path
+
+def generate_safe_filename(save_dir, title, ext, path_limit=WINDOWS_SAFE_PATH_LIMIT):
+    extension = normalize_media_extension(ext)
+    root = os.path.abspath(os.fspath(save_dir))
+    if len(root) + len(extension) + 4 >= int(path_limit):
+        raise ValueError('Save folder path is too long for a safe media filename')
+    base = sanitize_windows_filename_component(title)
+    with _conversion_name_lock:
+        counter = 0
+        while True:
+            collision = '' if counter == 0 else f'_{counter}'
+            available = max(1, int(path_limit) - len(root) - 1 - len(extension) - 1 - len(collision))
+            stem = base[:min(200, available)].rstrip('. ') or 'download'
+            out_path = os.path.join(root, f'{stem}{collision}.{extension}')
+            if not os.path.exists(out_path):
+                return out_path
+            counter += 1
+
+
+def build_safe_output_template(save_dir, job_id, path_limit=WINDOWS_SAFE_PATH_LIMIT):
+    root = Path(save_dir).resolve()
+    suffix = f' [%(id).40B]-{str(job_id)[:8]}.%(ext)s'
+    if len(str(root)) + len(suffix) + 33 >= int(path_limit):
+        raise ValueError('Save folder path is too long for a safe media output')
+    title_bytes = max(32, min(160, int(path_limit) - len(str(root)) - len(suffix) - 12))
+    return str(root / f'%(title).{title_bytes}B{suffix}')
 
 
 from PyQt6.QtWidgets import (
@@ -408,7 +430,7 @@ def validate_extension_origin(origin):
     return False
 
 def validate_url(url):
-    if not url or len(url) > 2048:
+    if not isinstance(url, str) or not url or len(url) > MAX_OPERATIONAL_URL:
         return False, "URL missing or too long"
     try:
         parsed = urllib.parse.urlparse(url)
@@ -421,6 +443,48 @@ def validate_url(url):
         return True, ""
     except Exception:
         return False, "Malformed URL"
+
+
+def validate_browser_handoff(data, operational_url):
+    source_page = data.get('sourcePage', '')
+    content_type = data.get('contentType', '')
+    raw_context = data.get('requestContext', {})
+    if source_page:
+        valid, _ = validate_url(source_page)
+        if not valid:
+            raise ValueError('Invalid source page')
+    if not isinstance(content_type, str) or len(content_type) > 120 or re.search(r'[\r\n\0]', content_type):
+        raise ValueError('Invalid content type')
+    if not isinstance(raw_context, dict) or set(raw_context) - {'referer', 'origin', 'userAgent'}:
+        raise ValueError('Invalid request context')
+    headers = {}
+    if source_page:
+        source = urllib.parse.urlsplit(source_page)
+        referer = raw_context.get('referer', '')
+        origin = raw_context.get('origin', '')
+        if referer:
+            valid, _ = validate_url(referer)
+            if not valid or urllib.parse.urlsplit(referer).netloc.lower() != source.netloc.lower():
+                raise ValueError('Invalid Referer provenance')
+            headers['Referer'] = referer
+        if origin:
+            expected_origin = f'{source.scheme}://{source.netloc}'
+            if origin != expected_origin:
+                raise ValueError('Invalid Origin provenance')
+            headers['Origin'] = origin
+    elif raw_context.get('referer') or raw_context.get('origin'):
+        raise ValueError('Request context requires a source page')
+    user_agent = raw_context.get('userAgent', '')
+    if user_agent:
+        if not isinstance(user_agent, str) or len(user_agent) > 512 or re.search(r'[\r\n\0]', user_agent):
+            raise ValueError('Invalid User-Agent')
+        headers['User-Agent'] = user_agent
+    return {
+        'source_page': source_page,
+        'content_type': content_type,
+        'http_headers': headers,
+        'operational_url': operational_url,
+    }
 
 def validate_request(headers, rfile, runtime):
     auth_header = headers.get('X-Stratrum-Auth', '')
@@ -472,6 +536,10 @@ def validate_request(headers, rfile, runtime):
     is_valid, err_msg = validate_url(url)
     if not is_valid:
         return 400, json.dumps({"error": err_msg}).encode('utf-8')
+    try:
+        handoff = validate_browser_handoff(data, url)
+    except ValueError:
+        return 400, b'{"error": "Invalid browser media context"}'
 
     if not runtime.rate_limiter.allow():
         return 429, b'{"error": "Too many requests"}'
@@ -485,7 +553,7 @@ def validate_request(headers, rfile, runtime):
     except OSError:
         return 500, b'{"error": "Unable to persist browser pairing"}'
 
-    return 200, {'url': url, 'action': action}
+    return 200, {'url': url, 'action': action, 'context': handoff}
 
 
 def recorded_save_directory(download_record):
@@ -671,7 +739,8 @@ def build_format_selector(profile_name, height=None):
 
 
 def build_download_options(profile_name, outtmpl, height=None, metadata=None,
-                           progress_hooks=None, postprocessor_hooks=None, speed_limit_bps=0):
+                           progress_hooks=None, postprocessor_hooks=None, speed_limit_bps=0,
+                           request_context=None):
     profile = output_profile(profile_name)
     options = {
         **controlled_yt_dlp_options(),
@@ -690,6 +759,9 @@ def build_download_options(profile_name, outtmpl, height=None, metadata=None,
     }
     if speed_limit_bps:
         options['ratelimit'] = int(speed_limit_bps)
+    headers = dict((request_context or {}).get('http_headers') or {})
+    if headers:
+        options['http_headers'] = headers
     if profile.media_kind == 'audio':
         options['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -850,6 +922,7 @@ def clean_error_summary(value, limit=400):
     text = value.decode('utf-8', errors='replace') if isinstance(value, bytes) else str(value or '')
     text = ANSI_ESCAPE_RE.sub('', text) if 'ANSI_ESCAPE_RE' in globals() else re.sub(r'\x1b\[[0-9;]*m', '', text)
     text = re.sub(r'https?://\S+', '[URL omitted]', text)
+    text = re.sub(r'(?i)\b(?:referer|origin|user-agent|cookie|authorization)\s*:\s*[^\r\n]+', '[header omitted]', text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return (lines[-1] if lines else 'No diagnostic details available')[:limit]
 
@@ -1230,7 +1303,7 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
-            self.server.url_signal.emit(result['url'], result['action'])
+            self.server.url_signal.emit(result['url'], result['action'], result['context'])
         else:
             self.wfile.write(result)
 
@@ -1238,7 +1311,7 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 class ServerThread(QThread):
-    download_requested = pyqtSignal(str, str)
+    download_requested = pyqtSignal(str, str, dict)
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
@@ -1258,11 +1331,14 @@ class ServerThread(QThread):
 class FormatFetcherThread(QThread):
     formats_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
-    def __init__(self, url):
-        super().__init__(); self.url = url
+    def __init__(self, url, request_context=None):
+        super().__init__(); self.url = url; self.request_context = request_context or {}
     def run(self):
         try:
-            with yt_dlp.YoutubeDL({**controlled_yt_dlp_options(), 'quiet': True, 'noplaylist': True}) as ydl:
+            options = {**controlled_yt_dlp_options(), 'quiet': True, 'noplaylist': True}
+            if self.request_context.get('http_headers'):
+                options['http_headers'] = dict(self.request_context['http_headers'])
+            with yt_dlp.YoutubeDL(options) as ydl:
                 self.formats_ready.emit(ydl.extract_info(self.url, download=False))
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -1608,7 +1684,7 @@ class DownloadThread(QThread):
     metrics = pyqtSignal(str, int, int, float, object)
 
     def __init__(self, id, url, outtmpl, format_str, target_ext, requested_height=None,
-                 metadata=None, save_dir=None, speed_limit_bps=0):
+                 metadata=None, save_dir=None, speed_limit_bps=0, request_context=None):
         super().__init__()
         self.id = id; self.url = url; self.outtmpl = outtmpl
         self.profile_name = str(target_ext).upper()
@@ -1618,6 +1694,7 @@ class DownloadThread(QThread):
         self.save_dir = str(Path(save_dir or os.path.dirname(outtmpl)).resolve())
         self.format_str = format_str or build_format_selector(self.profile_name, requested_height)
         self.speed_limit_bps = int(speed_limit_bps or 0)
+        self.request_context = request_context or {}
         self.paused = False
         self.cancelled = False
         self.final_filename = ""
@@ -1703,6 +1780,7 @@ class DownloadThread(QThread):
             ydl_opts = build_download_options(
                 self.profile_name, self.outtmpl, self.requested_height, self.metadata,
                 [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                self.request_context,
             )
             self.format_str = ydl_opts['format']
             self.status.emit(self.id, 'Connecting')
@@ -1747,9 +1825,10 @@ class DownloadThread(QThread):
 # 4. STRATRUM DOWNLOAD STUDIO UI
 # ==========================================
 class DownloadFileInfoDialog(QDialog):
-    def __init__(self, parent=None, prefill_url="", app_config=None):
+    def __init__(self, parent=None, prefill_url="", app_config=None, request_context=None):
         super().__init__(parent)
         self.app_config = app_config
+        self.request_context = request_context or {}
         self.format_info = {}
         self.resolution_options = []
         self.fallback_from = None
@@ -1840,12 +1919,15 @@ class DownloadFileInfoDialog(QDialog):
         generation = self.fetch_generation
         self.info_lbl.setText("Resolving formats...")
         self.start_btn.setEnabled(False)
-        fetcher = FormatFetcherThread(url)
+        fetcher = FormatFetcherThread(url, self.request_context_for(url))
         self.fetchers.append(fetcher)
         fetcher.formats_ready.connect(lambda info, gen=generation: self.on_formats_ready(gen, info))
         fetcher.error_occurred.connect(lambda error, gen=generation: self.on_fetch_error(gen, error))
         fetcher.finished.connect(lambda worker=fetcher: self.fetchers.remove(worker) if worker in self.fetchers else None)
         fetcher.start()
+
+    def request_context_for(self, url):
+        return self.request_context if self.request_context.get('operational_url') == url else {}
 
     def on_formats_ready(self, generation, info):
         if generation != self.fetch_generation:
@@ -3163,7 +3245,7 @@ class StratrumDownloadStudio(QMainWindow):
         self.server_thread.download_requested.connect(self.handle_browser_request)
         self.server_thread.start()
 
-    def handle_browser_request(self, url, action):
+    def handle_browser_request(self, url, action, request_context=None):
         if action not in EXTENSION_ACTIONS:
             return False
         resolved_action = {
@@ -3178,9 +3260,9 @@ class StratrumDownloadStudio(QMainWindow):
             except ValueError as exc:
                 QMessageBox.warning(self, "Quick Download Unavailable", str(exc))
                 return False
-            self.start_new_download(url, save_dir, requested_resolution, target_format)
+            self.start_new_download(url, save_dir, requested_resolution, target_format, None, request_context)
             return True
-        self.open_add_dialog(url, request_foreground=True)
+        self.open_add_dialog(url, request_foreground=True, request_context=request_context)
         return True
 
     def quick_download_defaults(self, home_directory=None):
@@ -3208,17 +3290,17 @@ class StratrumDownloadStudio(QMainWindow):
         except ValueError:
             return False
 
-    def open_add_dialog(self, url="", request_foreground=False):
+    def open_add_dialog(self, url="", request_foreground=False, request_context=None):
         if isinstance(url, bool): url = ""
         self.show_normal(request_foreground=request_foreground)
-        dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config)
+        dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config, request_context=request_context)
         if request_foreground:
             QTimer.singleShot(0, lambda: self.request_foreground(dialog))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
-            if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata)
+            if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata, dialog.request_context_for(final_url))
 
-    def start_new_download(self, url, save_dir, requested_height, target_ext, metadata=None):
+    def start_new_download(self, url, save_dir, requested_height, target_ext, metadata=None, request_context=None):
         download_id = uuid.uuid4().hex
         save_path = Path(save_dir).expanduser().resolve()
         if not save_path.is_dir():
@@ -3226,7 +3308,7 @@ class StratrumDownloadStudio(QMainWindow):
             return
         profile = output_profile(target_ext)
         format_str = build_format_selector(target_ext, requested_height)
-        outtmpl = str(save_path / f'%(title)s [%(id)s]-{download_id[:8]}.%(ext)s')
+        outtmpl = build_safe_output_template(save_path, download_id)
         job = DownloadJob(
             job_id=download_id, package_id=download_id, source_url=url, save_dir=str(save_path),
             requested_format=str(target_ext).upper(), requested_resolution=requested_height,
@@ -3254,7 +3336,7 @@ class StratrumDownloadStudio(QMainWindow):
             'id': download_id, 'url': url, 'outtmpl': outtmpl, 'save_dir': str(save_path),
             'format': format_str, 'ext': target_ext, 'thread': None, 'row': row,
             'final_path': '', 'converted_output_path': '', 'requested_resolution': requested_height,
-            'metadata': metadata or {}, 'job': job,
+            'metadata': metadata or {}, 'request_context': request_context or {}, 'job': job,
         }
         self.downloads.append(record)
 
@@ -3273,6 +3355,7 @@ class StratrumDownloadStudio(QMainWindow):
             record['id'], record['url'], record['outtmpl'], record['format'], record['ext'],
             record.get('requested_resolution'), record.get('metadata'), record['save_dir'],
             self.app_config.speed_limit_bps,
+            record.get('request_context'),
         )
         thread.progress.connect(self.update_progress)
         thread.status.connect(self.update_status)

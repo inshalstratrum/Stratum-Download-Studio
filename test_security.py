@@ -2,6 +2,7 @@ import io
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -92,8 +93,8 @@ def server(runtime):
         def __init__(self):
             self.urls = []
 
-        def emit(self, url, action):
-            self.urls.append((url, action))
+        def emit(self, url, action, context):
+            self.urls.append((url, action, context))
 
     httpd.url_signal = SignalSpy()
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -130,7 +131,10 @@ def http_request(server, body=VALID_BODY, headers=None, path='/add_download'):
 def test_http_valid_request(server):
     status, _ = http_request(server)
     assert status == 200
-    assert server.url_signal.urls == [('https://example.com/video.mp4', 'quick_download')]
+    assert server.url_signal.urls == [('https://example.com/video.mp4', 'quick_download', {
+        'source_page': '', 'content_type': '', 'http_headers': {},
+        'operational_url': 'https://example.com/video.mp4',
+    })]
 
 
 def test_http_missing_token(runtime):
@@ -168,7 +172,11 @@ def test_http_malformed_origin(runtime, origin):
 
 def test_http_first_valid_origin_pairing(unpaired_runtime):
     status, result = validate(unpaired_runtime)
-    assert (status, result) == (200, {'url': 'https://example.com/video.mp4', 'action': 'quick_download'})
+    assert status == 200
+    assert result == {
+        'url': 'https://example.com/video.mp4', 'action': 'quick_download',
+        'context': {'source_page': '', 'content_type': '', 'http_headers': {}, 'operational_url': 'https://example.com/video.mp4'},
+    }
     assert unpaired_runtime.allowed_origin == ORIGIN
     persisted = json.loads(unpaired_runtime.config_path.read_text(encoding='utf-8'))
     assert persisted['allowed_origins'] == [ORIGIN]
@@ -231,7 +239,7 @@ def test_http_invalid_json(runtime):
     'file:///C:/Windows/System32/calc.exe',
     'https:///missing-host',
     'https://user:password@example.com/file',
-    'https://example.com/' + ('x' * 2048),
+    'https://example.com/' + ('x' * stratrum_download_studio.MAX_OPERATIONAL_URL),
 ], ids=['empty', 'file-scheme', 'missing-hostname', 'embedded-credentials', 'excessive-length'])
 def test_http_invalid_urls(runtime, url):
     body = json.dumps({'url': url}).encode('utf-8')
@@ -1007,7 +1015,8 @@ def test_download_engine_never_changes_media_format_by_extension_rename():
 
 def test_download_template_uses_stable_job_suffix_for_no_overwrite():
     source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.start_new_download)
-    assert 'download_id[:8]' in source
+    assert 'build_safe_output_template(save_path, download_id)' in source
+    assert stratrum_download_studio.build_safe_output_template('.', '1234567890').endswith('-12345678.%(ext)s')
     assert "'overwrites': False" in inspect.getsource(stratrum_download_studio.build_download_options)
 
 
@@ -1508,7 +1517,7 @@ def test_popup_closes_only_after_verified_completion(tmp_path):
     assert closed == []
     popup.set_job_state('completed')
     popup.schedule_verified_close(lambda: closed.append(True), 10)
-    wait_qt(20)
+    wait_qt(50)
     assert closed == [True]
     popup.close()
 
@@ -1571,7 +1580,7 @@ def test_download_with_options_waits_for_start_and_quick_uses_safe_defaults(tmp_
 def test_browser_requests_route_via_qt_signal_and_intentional_foreground_only():
     server_source = inspect.getsource(stratrum_download_studio.ServerThread)
     handler_source = inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.handle_browser_request)
-    assert 'pyqtSignal(str, str)' in server_source and '.connect(self.handle_browser_request)' in inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_server)
+    assert 'pyqtSignal(str, str, dict)' in server_source and '.connect(self.handle_browser_request)' in inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.init_server)
     assert 'request_foreground=True' in handler_source
     assert 'request_foreground=True' not in inspect.getsource(stratrum_download_studio.StratrumDownloadStudio.start_queued_jobs)
 
@@ -1622,8 +1631,80 @@ def test_one_shared_authentication_token_accepts_both_explicit_actions(runtime):
 def test_extension_normal_button_sends_neutral_default_action():
     background = Path('browser_extension/background.js').read_text(encoding='utf-8')
     normal_handler = background.split('runtime.onMessage.addListener', 1)[1]
-    assert 'sendToDesktopApp(selected.url, "default")' in normal_handler
+    assert 'sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl))' in normal_handler
     assert 'primaryAction' not in background
+
+
+def test_structured_browser_handoff_validates_allowlisted_context(runtime):
+    payload = {
+        'url': 'https://manifest.cdn.test/master.m3u8?token=signed',
+        'action': 'default',
+        'sourcePage': 'https://news.test/article',
+        'contentType': 'application/vnd.apple.mpegurl',
+        'requestContext': {
+            'referer': 'https://news.test/article',
+            'origin': 'https://news.test',
+            'userAgent': 'Mozilla/5.0 Fixture',
+        },
+    }
+    body = json.dumps(payload).encode()
+    status, result = validate(runtime, body=body)
+    assert status == 200
+    assert result['url'] == payload['url']
+    assert result['context']['source_page'] == payload['sourcePage']
+    assert result['context']['http_headers'] == {
+        'Referer': payload['sourcePage'], 'Origin': 'https://news.test', 'User-Agent': 'Mozilla/5.0 Fixture'
+    }
+    options = stratrum_download_studio.build_download_options('MP4', 'out', request_context=result['context'])
+    assert options['http_headers'] == result['context']['http_headers']
+
+
+@pytest.mark.parametrize('request_context', [
+    {'referer': 'https://evil.test/', 'origin': 'https://news.test', 'userAgent': 'ok'},
+    {'referer': 'https://news.test/article', 'origin': 'https://evil.test', 'userAgent': 'ok'},
+    {'referer': 'https://news.test/article', 'origin': 'https://news.test', 'userAgent': 'bad\r\nHeader: x'},
+    {'cookie': 'session=secret'},
+])
+def test_structured_browser_handoff_rejects_cross_origin_or_nonallowlisted_context(runtime, request_context):
+    body = json.dumps({
+        'url': 'https://cdn.test/master.m3u8', 'action': 'default',
+        'sourcePage': 'https://news.test/article', 'contentType': 'application/dash+xml',
+        'requestContext': request_context,
+    }).encode()
+    status, result = validate(runtime, body=body)
+    assert status == 400
+    assert b'Invalid browser media context' in result
+
+
+def test_browser_errors_redact_operational_urls_and_header_values():
+    error = 'failed https://cdn.test/master.m3u8?token=secret\nReferer: https://news.test/private\nUser-Agent: secret-agent'
+    cleaned = stratrum_download_studio.clean_error_summary(error)
+    assert 'cdn.test' not in cleaned and 'news.test' not in cleaned and 'secret-agent' not in cleaned
+    assert cleaned == '[header omitted]'
+
+
+def test_windows_media_output_planning_strips_query_and_bounds_paths(tmp_path):
+    assert stratrum_download_studio.normalize_media_extension('.MP4?token=secret#fragment') == 'mp4'
+    first = Path(stratrum_download_studio.generate_safe_filename(tmp_path, 'CON:<bad>\x00 title', 'mp4?token=secret'))
+    first.touch()
+    second = Path(stratrum_download_studio.generate_safe_filename(tmp_path, 'CON:<bad>\x00 title', 'mp4?token=other'))
+    assert first.suffix == second.suffix == '.mp4'
+    assert second.stem.endswith('_1')
+    assert not re.search(r'[<>:"/\\|?*\x00-\x1f]', second.name)
+    assert len(str(second)) <= stratrum_download_studio.WINDOWS_SAFE_PATH_LIMIT
+    template = stratrum_download_studio.build_safe_output_template(tmp_path, '1234567890abcdef')
+    assert template.endswith('-12345678.%(ext)s')
+    assert '?' not in template and '#fragment' not in template
+    with pytest.raises(ValueError, match='too long'):
+        stratrum_download_studio.build_safe_output_template(tmp_path / ('x' * 220), 'job')
+
+
+def test_browser_context_is_dropped_if_options_url_changes():
+    context = {'operational_url': 'https://cdn.test/master.m3u8', 'http_headers': {'Referer': 'https://news.test/article'}}
+    fake = type('Dialog', (), {'request_context': context})()
+    method = stratrum_download_studio.DownloadFileInfoDialog.request_context_for
+    assert method(fake, context['operational_url']) == context
+    assert method(fake, 'https://other.test/video') == {}
 
 
 @pytest.mark.parametrize('desktop_mode, expected', [
