@@ -33,6 +33,12 @@ MAX_PAIRED_ORIGINS = 6
 MAX_RECENT_FOLDERS = 10
 DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS = 2
 MAX_RETRY_ATTEMPTS = 3
+AUTHENTICATED_BROWSERS = {'chrome', 'edge', 'firefox'}
+AUTHENTICATED_SITE_DOMAINS = {'facebook.com', 'instagram.com', 'tiktok.com'}
+AUTHENTICATION_ERROR_RE = re.compile(
+    r'(?i)(?:login|required to log in|sign[ -]?in|authentication|authenticated|cookies?|empty (?:media|response)|'
+    r'no (?:video )?formats?|no media|content is not available|requested content is not available|private (?:post|video))'
+)
 _conversion_name_lock = threading.Lock()
 
 
@@ -194,6 +200,9 @@ class AppConfig:
     completion_action: str = 'keep_open'
     keep_completed_window_open: bool = False
     primary_browser_action: str = 'quick_download'
+    authenticated_retry_enabled: bool = False
+    authenticated_retry_browser: str = 'chrome'
+    authenticated_retry_profile: str = ''
     stop_after_current: bool = False
     window_size: list[int] = field(default_factory=lambda: [1150, 680])
     splitter_sizes: list[int] = field(default_factory=lambda: [200, 950])
@@ -221,6 +230,9 @@ class AppConfig:
             'completion_action': self.completion_action,
             'keep_completed_window_open': self.keep_completed_window_open,
             'primary_browser_action': self.primary_browser_action,
+            'authenticated_retry_enabled': self.authenticated_retry_enabled,
+            'authenticated_retry_browser': self.authenticated_retry_browser,
+            'authenticated_retry_profile': self.authenticated_retry_profile,
             'stop_after_current': self.stop_after_current,
             'window_size': list(self.window_size),
             'splitter_sizes': list(self.splitter_sizes),
@@ -334,6 +346,17 @@ def bounded_int(value, default, minimum, maximum):
     return max(minimum, min(maximum, parsed))
 
 
+def normalize_browser_profile(value):
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    return value if len(value) <= 1024 and not re.search(r'[\r\n\0]', value) else ''
+
+
+def normalize_authenticated_browser(value):
+    return value if isinstance(value, str) and value in AUTHENTICATED_BROWSERS else 'chrome'
+
+
 def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
                        history_path=None, rate_limiter=None, allowed_origins=None):
     root = Path(app_data_root) if app_data_root is not None else default_app_data_root()
@@ -379,6 +402,9 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         completion_action=stored.get('completion_action', 'keep_open'),
         keep_completed_window_open=bool(stored.get('keep_completed_window_open', False)),
         primary_browser_action=stored.get('primary_browser_action', 'quick_download') if stored.get('primary_browser_action', 'quick_download') in DESKTOP_BROWSER_ACTIONS else 'quick_download',
+        authenticated_retry_enabled=bool(stored.get('authenticated_retry_enabled', False)),
+        authenticated_retry_browser=normalize_authenticated_browser(stored.get('authenticated_retry_browser', 'chrome')),
+        authenticated_retry_profile=normalize_browser_profile(stored.get('authenticated_retry_profile', '')),
         stop_after_current=bool(stored.get('stop_after_current', False)),
         window_size=stored.get('window_size', [1150, 680]) if isinstance(stored.get('window_size', [1150, 680]), list) else [1150, 680],
         splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
@@ -443,6 +469,48 @@ def validate_url(url):
         return True, ""
     except Exception:
         return False, "Malformed URL"
+
+
+def site_domain(url):
+    valid, _ = validate_url(url)
+    if not valid:
+        return ''
+    host = (urllib.parse.urlsplit(url).hostname or '').lower().removeprefix('www.').removeprefix('m.')
+    return next((domain for domain in AUTHENTICATED_SITE_DOMAINS if host == domain or host.endswith('.' + domain)), '')
+
+
+def site_extractor_options(url):
+    if site_domain(url) == 'instagram.com':
+        return {'extractor_args': {'instagram': {'app_id': ['web']}}}
+    return {}
+
+
+def extraction_options_for_url(base_options, url):
+    options = dict(base_options)
+    site_options = site_extractor_options(url)
+    if site_options:
+        merged_args = dict(options.get('extractor_args') or {})
+        merged_args.update(site_options['extractor_args'])
+        options['extractor_args'] = merged_args
+    return options
+
+
+def is_authentication_extraction_error(error):
+    return bool(AUTHENTICATION_ERROR_RE.search(str(error or '')))
+
+
+def authenticated_retry_options(base_options, url, app_config):
+    if not app_config or not app_config.authenticated_retry_enabled or not site_domain(url):
+        return None
+    browser = normalize_authenticated_browser(app_config.authenticated_retry_browser)
+    profile = normalize_browser_profile(app_config.authenticated_retry_profile)
+    options = extraction_options_for_url(base_options, url)
+    options['cookiesfrombrowser'] = (browser, profile or None, None, None)
+    return options
+
+
+def should_retry_authenticated_extraction(error, url, app_config):
+    return is_authentication_extraction_error(error) and authenticated_retry_options({}, url, app_config) is not None
 
 
 def validate_browser_handoff(data, operational_url):
@@ -723,6 +791,21 @@ def mp4_compatible_streams_available(info, height=None):
     return video and audio
 
 
+def webm_compatible_streams_available(info, height=None):
+    formats = info.get('formats', []) if isinstance(info, dict) else []
+    video = any(
+        fmt.get('ext') == 'webm'
+        and str(fmt.get('vcodec', '')).lower().startswith(('vp8', 'vp9', 'av01', 'av1'))
+        and (height is None or not fmt.get('height') or fmt.get('height') <= height)
+        for fmt in formats
+    )
+    audio = any(
+        fmt.get('ext') == 'webm' and str(fmt.get('acodec', '')).lower().startswith(('opus', 'vorbis'))
+        for fmt in formats
+    )
+    return video and audio
+
+
 def build_format_selector(profile_name, height=None):
     profile = output_profile(profile_name)
     if profile.media_kind == 'audio':
@@ -730,11 +813,21 @@ def build_format_selector(profile_name, height=None):
     height_filter = f'[height<={int(height)}]' if height else ''
     if profile.extension == 'mp4':
         return (
-            f'bestvideo{height_filter}[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/'
+            f'best{height_filter}[ext=mp4][vcodec^=avc][acodec^=mp4a]/'
+            f'best{height_filter}[ext=mp4][vcodec^=h264][acodec^=aac]/'
+            f'bestvideo{height_filter}[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a][acodec^=mp4a]/'
+            f'bestvideo{height_filter}[ext=mp4][vcodec^=h264]+bestaudio[ext=m4a][acodec^=aac]/'
             f'bestvideo{height_filter}+bestaudio/best{height_filter}/best'
         )
     if profile.extension == 'webm':
-        return f'bestvideo{height_filter}[ext=webm]+bestaudio[ext=webm]/bestvideo{height_filter}+bestaudio/best'
+        return (
+            f'best{height_filter}[ext=webm][vcodec^=vp9][acodec^=opus]/'
+            f'best{height_filter}[ext=webm][vcodec^=vp8][acodec^=vorbis]/'
+            f'bestvideo{height_filter}[ext=webm][vcodec^=vp9]+bestaudio[ext=webm][acodec^=opus]/'
+            f'bestvideo{height_filter}[ext=webm][vcodec^=vp8]+bestaudio[ext=webm][acodec^=vorbis]/'
+            f'bestvideo{height_filter}[ext=webm][vcodec^=av01]+bestaudio[ext=webm][acodec^=opus]/'
+            f'bestvideo{height_filter}+bestaudio/best{height_filter}/best'
+        )
     return f'bestvideo{height_filter}+bestaudio/best{height_filter}/best'
 
 
@@ -774,6 +867,10 @@ def build_download_options(profile_name, outtmpl, height=None, metadata=None,
         options['merge_output_format'] = 'mp4'
         if not mp4_compatible_streams_available(metadata or {}, height):
             options['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
+    elif profile.extension == 'webm':
+        options['merge_output_format'] = 'webm'
+        if not webm_compatible_streams_available(metadata or {}, height):
+            options['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'webm'}]
     else:
         options['merge_output_format'] = profile.extension
         options['postprocessors'] = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': profile.extension}]
@@ -883,6 +980,26 @@ def validate_final_media(path, save_dir, profile_name, probe_runner=None, requir
     return candidate, probe
 
 
+def profile_codecs_compatible(probe, profile_name):
+    profile = output_profile(profile_name)
+    if profile.extension not in {'mp4', 'webm'}:
+        return True
+    streams = [stream for stream in probe.get('streams', []) if isinstance(stream, dict)] if isinstance(probe, dict) else []
+    video_codecs = {str(stream.get('codec_name') or '').lower() for stream in streams if stream.get('codec_type') == 'video'}
+    audio_codecs = {str(stream.get('codec_name') or '').lower() for stream in streams if stream.get('codec_type') == 'audio'}
+    known_video = {codec for codec in video_codecs if codec}
+    known_audio = {codec for codec in audio_codecs if codec}
+    if not known_video:
+        return True
+    if profile.extension == 'mp4':
+        video_ok = known_video <= {'h264', 'avc', 'avc1'}
+        audio_ok = not known_audio or known_audio <= {'aac', 'mp4a'}
+        return video_ok and audio_ok
+    video_ok = known_video <= {'vp8', 'vp9', 'av1', 'av01'}
+    audio_ok = not known_audio or known_audio <= {'opus', 'vorbis'}
+    return video_ok and audio_ok
+
+
 def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None):
     profile = output_profile(profile_name)
     candidates = collect_output_candidates(info, postprocessed_paths, save_dir, profile.extension, preexisting)
@@ -923,8 +1040,19 @@ def clean_error_summary(value, limit=400):
     text = ANSI_ESCAPE_RE.sub('', text) if 'ANSI_ESCAPE_RE' in globals() else re.sub(r'\x1b\[[0-9;]*m', '', text)
     text = re.sub(r'https?://\S+', '[URL omitted]', text)
     text = re.sub(r'(?i)\b(?:referer|origin|user-agent|cookie|authorization)\s*:\s*[^\r\n]+', '[header omitted]', text)
+    text = re.sub(r'(?i)(?:--cookies-from-browser|cookiesfrombrowser|browser profile|profile path)\s*[:=]?\s*[^\r\n,;]+', '[authentication details omitted]', text)
+    text = re.sub(r'(?i)(?:(?:copy|read|load|decrypt)[^\r\n]{0,40}(?:cookie|profile)[^\r\n]{0,20})(?:[A-Z]:\\|/Users/|/home/)[^\r\n]+', '[authentication path omitted]', text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return (lines[-1] if lines else 'No diagnostic details available')[:limit]
+
+
+def customer_extraction_error(error):
+    if is_authentication_extraction_error(error):
+        return (
+            'This media requires sign-in or returned no public formats. '
+            'You can enable the isolated browser-profile retry in Browser Integration.'
+        )
+    return clean_error_summary(error)
 
 
 class JobState(str, Enum):
@@ -1249,6 +1377,38 @@ def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, d
     return ConversionPlan(source, final_path, temporary, target_name, required_stream, float(actual_probe.get('duration') or 0), command)
 
 
+def convert_incompatible_profile_output(input_path, profile_name, save_dir, probe=None, runner=None):
+    source = Path(input_path).resolve(strict=True)
+    actual_probe = probe if probe is not None else probe_media_file(source)
+    if profile_codecs_compatible(actual_probe, profile_name):
+        return source, actual_probe
+    plan = build_conversion_plan(source, profile_name, save_dir, actual_probe)
+    runner = runner or subprocess.run
+    kwargs = {
+        'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
+        'timeout': CONVERSION_TIMEOUT_SECONDS,
+    }
+    creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    if creation_flags:
+        kwargs['creationflags'] = creation_flags
+    try:
+        result = runner(list(plan.command), **kwargs)
+        if result.returncode != 0:
+            raise ValueError(f"FFmpeg compatibility conversion failed: {clean_error_summary(result.stderr)}")
+        validate_final_media(plan.temporary_output, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
+        os.replace(plan.temporary_output, plan.destination)
+        final_path, final_probe = validate_final_media(plan.destination, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
+        if not profile_codecs_compatible(final_probe, plan.target_name):
+            raise ValueError(f"FFprobe found incompatible codecs in the final {plan.target_name} output")
+        source.unlink()
+        return final_path, final_probe
+    finally:
+        try:
+            plan.temporary_output.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def parse_ffmpeg_progress(values, duration, started_at, now=None):
     now = time.monotonic() if now is None else now
     elapsed = max(0.0, now - started_at)
@@ -1331,17 +1491,26 @@ class ServerThread(QThread):
 class FormatFetcherThread(QThread):
     formats_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
-    def __init__(self, url, request_context=None):
-        super().__init__(); self.url = url; self.request_context = request_context or {}
+    def __init__(self, url, request_context=None, app_config=None):
+        super().__init__(); self.url = url; self.request_context = request_context or {}; self.app_config = app_config
     def run(self):
         try:
             options = {**controlled_yt_dlp_options(), 'quiet': True, 'noplaylist': True}
             if self.request_context.get('http_headers'):
                 options['http_headers'] = dict(self.request_context['http_headers'])
-            with yt_dlp.YoutubeDL(options) as ydl:
-                self.formats_ready.emit(ydl.extract_info(self.url, download=False))
+            anonymous_options = extraction_options_for_url(options, self.url)
+            try:
+                with yt_dlp.YoutubeDL(anonymous_options) as ydl:
+                    info = ydl.extract_info(self.url, download=False)
+            except Exception as first_error:
+                if not should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                    raise
+                retry_options = authenticated_retry_options(options, self.url, self.app_config)
+                with yt_dlp.YoutubeDL(retry_options) as ydl:
+                    info = ydl.extract_info(self.url, download=False)
+            self.formats_ready.emit(info)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            self.error_occurred.emit(customer_extraction_error(e))
 
 class ConvertThread(QThread):
     finished = pyqtSignal(str, bool, str, str)
@@ -1684,7 +1853,7 @@ class DownloadThread(QThread):
     metrics = pyqtSignal(str, int, int, float, object)
 
     def __init__(self, id, url, outtmpl, format_str, target_ext, requested_height=None,
-                 metadata=None, save_dir=None, speed_limit_bps=0, request_context=None):
+                 metadata=None, save_dir=None, speed_limit_bps=0, request_context=None, app_config=None):
         super().__init__()
         self.id = id; self.url = url; self.outtmpl = outtmpl
         self.profile_name = str(target_ext).upper()
@@ -1695,6 +1864,7 @@ class DownloadThread(QThread):
         self.format_str = format_str or build_format_selector(self.profile_name, requested_height)
         self.speed_limit_bps = int(speed_limit_bps or 0)
         self.request_context = request_context or {}
+        self.app_config = app_config
         self.paused = False
         self.cancelled = False
         self.final_filename = ""
@@ -1720,6 +1890,8 @@ class DownloadThread(QThread):
             profile = output_profile(self.profile_name)
             needs_conversion = profile.media_kind == 'audio' or profile.explicit_conversion or (
                 profile.extension == 'mp4' and not mp4_compatible_streams_available(self.metadata, self.requested_height)
+            ) or (
+                profile.extension == 'webm' and not webm_compatible_streams_available(self.metadata, self.requested_height)
             )
             state = 'Converting' if needs_conversion else 'Merging streams'
             self.current_stage = 'conversion' if needs_conversion else 'merge'
@@ -1777,16 +1949,31 @@ class DownloadThread(QThread):
         try:
             profile = output_profile(self.profile_name)
             preexisting = {str(path.resolve()) for path in Path(self.save_dir).glob(f'*.{profile.extension}')}
-            ydl_opts = build_download_options(
+            base_ydl_opts = build_download_options(
                 self.profile_name, self.outtmpl, self.requested_height, self.metadata,
                 [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
                 self.request_context,
             )
+            ydl_opts = extraction_options_for_url(base_ydl_opts, self.url)
             self.format_str = ydl_opts['format']
             self.status.emit(self.id, 'Connecting')
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.ydl = ydl
-                info = ydl.extract_info(self.url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    self.ydl = ydl
+                    info = ydl.extract_info(self.url, download=True)
+            except Exception as first_error:
+                if not should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                    raise
+                self.status.emit(self.id, 'Authentication required; retrying once')
+                retry_base = build_download_options(
+                    self.profile_name, self.outtmpl, self.requested_height, self.metadata,
+                    [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                    self.request_context,
+                )
+                retry_options = authenticated_retry_options(retry_base, self.url, self.app_config)
+                with yt_dlp.YoutubeDL(retry_options) as ydl:
+                    self.ydl = ydl
+                    info = ydl.extract_info(self.url, download=True)
             if isinstance(info, dict) and isinstance(info.get('url'), str):
                 self.resolved_media_url = info['url']
             if self.cancelled or self.isInterruptionRequested():
@@ -1796,6 +1983,11 @@ class DownloadThread(QThread):
             final_path, probe = resolve_final_media(
                 info, self.postprocessed_paths, self.save_dir, self.profile_name, preexisting,
             )
+            if not profile_codecs_compatible(probe, self.profile_name):
+                self.current_stage = 'conversion'
+                self.status.emit(self.id, f'Converting to compatible {profile.extension.upper()}')
+                final_path, probe = convert_incompatible_profile_output(final_path, self.profile_name, self.save_dir, probe)
+                final_path, probe = validate_final_media(final_path, self.save_dir, self.profile_name)
             self.final_filename = str(final_path)
             self.final_probe = probe
             cleanup_verified_intermediates(self.temporary_paths, final_path, self.save_dir)
@@ -1815,7 +2007,7 @@ class DownloadThread(QThread):
             self.status.emit(self.id, 'Cancelled')
             self.finished.emit(self.id, False, 'Cancelled', "")
         except Exception as e:
-            summary = f"{self.current_stage.capitalize()} failure: {clean_error_summary(e)}"
+            summary = f"{self.current_stage.capitalize()} failure: {customer_extraction_error(e)}"
             self.status.emit(self.id, 'Failed')
             self.finished.emit(self.id, False, summary, "")
         finally:
@@ -1919,7 +2111,7 @@ class DownloadFileInfoDialog(QDialog):
         generation = self.fetch_generation
         self.info_lbl.setText("Resolving formats...")
         self.start_btn.setEnabled(False)
-        fetcher = FormatFetcherThread(url, self.request_context_for(url))
+        fetcher = FormatFetcherThread(url, self.request_context_for(url), self.app_config)
         self.fetchers.append(fetcher)
         fetcher.formats_ready.connect(lambda info, gen=generation: self.on_formats_ready(gen, info))
         fetcher.error_occurred.connect(lambda error, gen=generation: self.on_fetch_error(gen, error))
@@ -2538,7 +2730,23 @@ class BrowserIntegrationDialog(QDialog):
         self.default_action_combo.currentIndexChanged.connect(self.persist_default_action)
         action_row = QFormLayout()
         action_row.addRow("Default browser action", self.default_action_combo)
+        self.auth_retry_check = QCheckBox("Retry supported sites with a browser profile after an anonymous authentication failure")
+        self.auth_retry_check.setChecked(app_config.authenticated_retry_enabled)
+        action_row.addRow("Authenticated retry", self.auth_retry_check)
+        self.auth_browser_combo = QComboBox()
+        for browser in ("chrome", "edge", "firefox"):
+            self.auth_browser_combo.addItem(browser.title(), browser)
+        self.auth_browser_combo.setCurrentIndex(max(0, self.auth_browser_combo.findData(app_config.authenticated_retry_browser)))
+        action_row.addRow("Browser", self.auth_browser_combo)
+        self.auth_profile_edit = QLineEdit(app_config.authenticated_retry_profile)
+        self.auth_profile_edit.setPlaceholderText("Default profile, profile name, or local profile path")
+        action_row.addRow("Profile", self.auth_profile_edit)
         layout.addLayout(action_row)
+        self.auth_retry_check.toggled.connect(self.persist_authenticated_retry)
+        self.auth_browser_combo.currentIndexChanged.connect(self.persist_authenticated_retry)
+        self.auth_profile_edit.editingFinished.connect(self.persist_authenticated_retry)
+        self.auth_retry_check.toggled.connect(self.update_authenticated_controls)
+        self.update_authenticated_controls()
 
         actions = QHBoxLayout()
         copy_button = QPushButton("Copy Token")
@@ -2575,6 +2783,21 @@ class BrowserIntegrationDialog(QDialog):
         if selected in DESKTOP_BROWSER_ACTIONS and selected != self.app_config.primary_browser_action:
             self.app_config.primary_browser_action = selected
             self.app_config.persist()
+
+    def update_authenticated_controls(self):
+        enabled = self.auth_retry_check.isChecked()
+        self.auth_browser_combo.setEnabled(enabled)
+        self.auth_profile_edit.setEnabled(enabled)
+
+    def persist_authenticated_retry(self):
+        browser = self.auth_browser_combo.currentData()
+        profile = normalize_browser_profile(self.auth_profile_edit.text())
+        if browser not in AUTHENTICATED_BROWSERS:
+            browser = 'chrome'
+        self.app_config.authenticated_retry_enabled = self.auth_retry_check.isChecked()
+        self.app_config.authenticated_retry_browser = browser
+        self.app_config.authenticated_retry_profile = profile
+        self.app_config.persist()
 
     def refresh_origins(self):
         self.origin_combo.clear()
@@ -3356,6 +3579,7 @@ class StratrumDownloadStudio(QMainWindow):
             record.get('requested_resolution'), record.get('metadata'), record['save_dir'],
             self.app_config.speed_limit_bps,
             record.get('request_context'),
+            self.app_config,
         )
         thread.progress.connect(self.update_progress)
         thread.status.connect(self.update_status)

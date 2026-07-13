@@ -121,7 +121,13 @@ function observeFromMessage(message, sender) {
   const documentGeneration = Number.isInteger(message.candidate && message.candidate.documentGeneration) ? message.candidate.documentGeneration : -1;
   if (!candidateApi.validPlayerId(playerId)) return null;
   const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.candidate && message.candidate.pageUrl, sender), documentGeneration);
-  if (!playerRegistry.touch({ tabId, frameId, documentGeneration, playerId, pageUrl, visible: message.candidate.visiblePlayer, active: message.candidate.evidence === "control-click" ? true : undefined })) return null;
+  if (!playerRegistry.touch({
+    tabId, frameId, documentGeneration, playerId, pageUrl,
+    visible: message.candidate.visiblePlayer,
+    active: message.candidate.evidence === "control-click" ? true : undefined,
+    sourceHints: message.candidate.sourceHints,
+    permalink: message.candidate.nearestPermalink
+  })) return null;
   return candidateStore.observe(candidateApi.applyTrustedOwner({ ...message.candidate, pageUrl }, tabId, frameId, playerId, documentGeneration));
 }
 
@@ -191,10 +197,24 @@ function observeNetworkEvidence(raw, tabId, frameId) {
     documentUrl: raw.documentUrl, initiator: raw.initiator, observedAt: raw.observedAt
   });
   if (!playerId) {
-    quarantineStore.observe({ tabId, frameId, documentGeneration });
+    quarantineStore.observe({ ...raw, tabId, frameId, documentGeneration, pageUrl });
     return null;
   }
   return candidateStore.observe(candidateApi.applyTrustedOwner({ ...raw, pageUrl }, tabId, frameId, playerId, documentGeneration));
+}
+
+function promoteQuarantinedEvidence(tabId, frameId, documentGeneration, playerId, pageUrl) {
+  const promoted = [];
+  const matches = quarantineStore.takeMatching(
+    { tabId, frameId, documentGeneration, pageUrl },
+    (item) => playerRegistry.evidenceMatches(tabId, frameId, documentGeneration, playerId, item)
+  );
+  for (const item of matches) {
+    const evidence = Array.isArray(item.evidence) ? item.evidence.concat("quarantine-promoted") : [item.evidence, "quarantine-promoted"];
+    const candidate = candidateStore.observe(candidateApi.applyTrustedOwner({ ...item, pageUrl, evidence }, tabId, frameId, playerId, documentGeneration));
+    if (candidate) promoted.push(candidate);
+  }
+  return promoted;
 }
 
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -206,11 +226,11 @@ extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   const targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
-    const result = await sendToDesktopApp(targetUrl, actions[info.menuItemId], {
-      sourcePage: candidateApi.stablePageUrl(info.pageUrl || targetUrl) || "",
-      contentType: "",
-      requestContext: candidateApi.sanitizeRequestContext({}, info.pageUrl || targetUrl)
-    });
+  const result = await sendToDesktopApp(targetUrl, actions[info.menuItemId], {
+    sourcePage: candidateApi.stablePageUrl(info.pageUrl || targetUrl) || "",
+    contentType: "",
+    requestContext: candidateApi.sanitizeRequestContext({}, info.pageUrl || targetUrl)
+  });
   await showResultInTab(tab && tab.id, result);
 });
 
@@ -233,9 +253,11 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const pageUrl = bindFramePage(tabId, frameId, trustedSenderPage(message.pageUrl, sender), message.documentGeneration);
     const success = playerRegistry.touch({
       tabId, frameId, documentGeneration: message.documentGeneration, playerId: message.playerId,
-      pageUrl, visible: message.visible, active: message.active, activity: message.activity
+      pageUrl, visible: message.visible, active: message.active, activity: message.activity,
+      sourceHints: message.sourceHints, permalink: message.permalink
     });
-    sendResponse({ success });
+    const promoted = success && message.active ? promoteQuarantinedEvidence(tabId, frameId, message.documentGeneration, message.playerId, pageUrl) : [];
+    sendResponse({ success, promoted: promoted.length });
     return false;
   }
   if (message.type === "stratrum-player-removed") {

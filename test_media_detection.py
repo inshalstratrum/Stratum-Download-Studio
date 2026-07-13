@@ -30,7 +30,7 @@ def test_event_driven_dom_detection_and_picker_contract():
         'video, audio',
         'querySelectorAll("source")',
         "MutationObserver",
-        'attributeFilter: ["src", "poster"]',
+        'attributeFilter: ["src", "poster", "class", "style", "open", "aria-hidden"]',
         '"currentSrc-change"',
         'addEventListener("encrypted"',
         "PerformanceObserver",
@@ -99,14 +99,30 @@ def test_complete_source_policy_and_fragment_evidence_contract():
     assert 'raw.articleFallback && raw.visiblePlayer && sourcePage' in model
 
 
-def test_overlay_targets_are_frame_local_and_exclude_iframes():
+def test_overlay_targets_are_frame_local_and_proxy_iframes_are_capability_gated():
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     model = (EXTENSION / "media_candidates.js").read_text(encoding="utf-8")
     assert "isOverlayTargetDescriptor" in content
     assert 'tagName === "VIDEO" || tagName === "AUDIO"' in model
-    assert 'return tagName === "VIDEO" || tagName === "AUDIO"' in model
+    assert 'tagName === "IFRAME" && descriptor && descriptor.frameProxy === true' in model
     assert 'querySelectorAll("video, audio")' in content
     assert 'querySelectorAll("video, audio, iframe' not in content
+    assert 'event.data.type !== "stratrum-frame-capability"' in content
+    assert 'event.data.hasNativeMedia === true || event.data.hasCustomPlayer !== true' in content
+    assert 'frame.contentWindow === source' in content
+
+
+def test_overlay_layering_shadow_roots_and_delayed_detection_contract():
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+    model = (EXTENSION / "media_candidates.js").read_text(encoding="utf-8")
+    assert 'position: "fixed"' in content
+    assert 'visibleModal()' in content
+    assert 'composedContains(activeModal, element)' in content
+    assert 'shouldShowPlayerOverlay' in model
+    assert 'element.shadowRoot' in content and 'observeRoot(root)' in content
+    assert '"Detecting video…"' in content
+    assert 'DETECTION_WAIT_MS = 1600' in content
+    assert 'Date.now() < deadline' in content
 
 
 def test_background_routes_only_stored_complete_candidates():
@@ -136,6 +152,18 @@ def test_player_registry_provenance_and_lease_contracts_replace_sole_player_gate
     assert "soleConnectedPlayerId" not in content
     assert "players.length !== 1" not in background
     assert "quarantineStore.observe" in background
+    assert "promoteQuarantinedEvidence" in background
+    assert "takeMatching" in model and "evidenceMatches" in model
+
+
+def test_direct_audio_and_spa_reuse_rotate_player_ownership_without_replacing_button():
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+    assert 'contentType.startsWith("audio/") ? "audio" : "video"' in content
+    assert 'reportPlayerState(element, "direct-media-document", false)' in content
+    assert 'function refreshPlayerOwnership(element)' in content
+    refresh = content.split('function refreshPlayerOwnership(element)', 1)[1].split('function elementCandidates', 1)[0]
+    assert 'retirePlayer(element)' in refresh and 'playerIdFor(element)' in refresh
+    assert 'button.remove()' not in refresh
 
 
 def test_manifest_frame_and_webrequest_detection_contract():

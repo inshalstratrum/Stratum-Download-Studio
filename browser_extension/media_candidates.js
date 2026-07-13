@@ -21,7 +21,10 @@
   const PLAYER_ID_PATTERN = /^player-[a-z0-9_-]{6,96}$/i;
   const ADVERTISEMENT_PATH = /(?:^|[\/_-])(?:ads?|advert|preroll|midroll|postroll|promo)(?:[\/_?&=-]|$)/i;
   const PLAYER_LEASE_MS = 15 * 1000;
-  const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loaded-metadata"]);
+  const SOCIAL_IDENTIFIER = /^\d{3,30}$/;
+  const SOCIAL_TOKEN = /^[A-Za-z0-9_-]{3,80}$/;
+  const FACEBOOK_RESERVED_PATHS = new Set(["about", "channels", "groups", "hashtag", "home", "marketplace", "pages", "people", "profile.php", "reel", "reels", "search", "stories", "videos", "watch"]);
+  const DOM_EVIDENCE = new Set(["dom-media", "nested-source", "source-change", "currentSrc-change", "control-click", "loadedmetadata", "loaded-metadata", "play", "playing", "frame-capability"]);
   const TRANSIENT_QUERY_KEYS = /^(?:token|access_token|auth|authorization|signature|sig|expires?|expiry|exp|e|policy|key-pair-id|hdnts|hdntl|hdnea|hmac|jwt|session|sessionid|acl|ip|ipbits|st|__gda__|x-amz-.+|x-goog-.+|range|rn|rbuf|sq)$/i;
 
   function safeUrl(value, baseUrl) {
@@ -84,22 +87,31 @@
       return match ? `https://www.dailymotion.com/video/${match[1]}` : null;
     }
     if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch") {
-      if (host === "fb.watch") return `https://fb.watch${parsed.pathname.replace(/\/$/, "")}/`;
+      if (host === "fb.watch") {
+        const token = parsed.pathname.split("/").filter(Boolean)[0] || "";
+        return SOCIAL_TOKEN.test(token) ? `https://fb.watch/${token}/` : null;
+      }
       const watchId = parsed.searchParams.get("v");
-      if (/^\/watch\/?$/.test(parsed.pathname) && watchId) return `https://www.facebook.com/watch/?v=${encodeURIComponent(watchId)}`;
+      if (/^\/watch\/?$/.test(parsed.pathname) && SOCIAL_IDENTIFIER.test(watchId || "")) return `https://www.facebook.com/watch/?v=${encodeURIComponent(watchId)}`;
       const storyId = parsed.searchParams.get("story_fbid");
       const ownerId = parsed.searchParams.get("id");
-      if (/^\/permalink\.php$/.test(parsed.pathname) && storyId && ownerId) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(storyId)}&id=${encodeURIComponent(ownerId)}`;
-      const match = parsed.pathname.match(/^\/(?:reel\/[^/?#]+|[^/?#]+\/videos\/[^/?#]+|share\/v\/[^/?#]+)/);
-      return match ? `https://www.facebook.com${match[0].replace(/\/$/, "")}/` : null;
+      if (/^\/permalink\.php$/.test(parsed.pathname) && SOCIAL_IDENTIFIER.test(storyId || "") && SOCIAL_IDENTIFIER.test(ownerId || "")) {
+        return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(storyId)}&id=${encodeURIComponent(ownerId)}`;
+      }
+      const reel = parsed.pathname.match(/^\/reel\/(\d{3,30})\/?$/);
+      if (reel) return `https://www.facebook.com/reel/${reel[1]}/`;
+      const video = parsed.pathname.match(/^\/([^/?#]+)\/videos\/(\d{3,30})\/?$/);
+      if (video && !FACEBOOK_RESERVED_PATHS.has(video[1].toLowerCase())) return `https://www.facebook.com/${video[1]}/videos/${video[2]}/`;
+      const shared = parsed.pathname.match(/^\/share\/v\/([A-Za-z0-9_-]{3,80})\/?$/);
+      return shared ? `https://www.facebook.com/share/v/${shared[1]}/` : null;
     }
     if (host === "instagram.com" || host.endsWith(".instagram.com")) {
-      const match = parsed.pathname.match(/^\/(?:p|reel|tv)\/[^/?#]+/);
+      const match = parsed.pathname.match(/^\/(?:p|reel|tv)\/[A-Za-z0-9_-]{3,64}\/?$/);
       return match ? `https://www.instagram.com${match[0].replace(/\/$/, "")}/` : null;
     }
     if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
-      const match = parsed.pathname.match(/^\/@[^/?#]+\/video\/\d+/);
-      return match ? `https://www.tiktok.com${match[0]}` : null;
+      const match = parsed.pathname.match(/^\/@[A-Za-z0-9._-]{1,64}\/video\/\d{3,30}\/?$/);
+      return match ? `https://www.tiktok.com${match[0].replace(/\/$/, "")}` : null;
     }
     if (host === "x.com" || host === "twitter.com" || host.endsWith(".twitter.com")) {
       const match = parsed.pathname.match(/^\/([^/?#]+)\/status\/(\d+)/);
@@ -142,6 +154,35 @@
     return "";
   }
 
+  function resolvePlayerPermalink(raw, pageUrl) {
+    raw = raw && typeof raw === "object" ? raw : {};
+    const page = safeUrl(pageUrl || raw.pageUrl || "");
+    const pageFamily = extractorFamily(page ? page.href : "");
+    const ranked = [];
+    const add = (value, source, score, distance = 0) => {
+      const parsed = safeUrl(value || "", page ? page.href : undefined);
+      if (!parsed) return;
+      const stable = stablePageUrl(parsed.href);
+      if (!stable || !isExtractorPage(stable)) return;
+      const family = extractorFamily(stable);
+      if (pageFamily && family !== pageFamily) return;
+      ranked.push({ url: stable, source, score: score - Math.max(0, Number(distance) || 0) * 10 });
+    };
+    for (const anchor of Array.isArray(raw.anchorCandidates) ? raw.anchorCandidates : []) {
+      if (typeof anchor === "string") add(anchor, "container-anchor", 1000, 0);
+      else if (anchor && typeof anchor === "object") add(anchor.url || anchor.href, "container-anchor", 1000, anchor.distance);
+    }
+    add(raw.nearestPermalink, "nearest-permalink", 950);
+    for (const value of Array.isArray(raw.networkPermalinks) ? raw.networkPermalinks : []) add(value, "network", raw.activePlayer ? 925 : 725);
+    for (const value of Array.isArray(raw.jsonLdUrls) ? raw.jsonLdUrls : [raw.jsonLdUrl]) add(value, "json-ld", 700);
+    add(raw.ogUrl, "open-graph", 650);
+    add(raw.canonicalUrl, "canonical", 600);
+    add(raw.sourcePage, "source-page", 500);
+    add(page ? page.href : "", "current-page", 100);
+    ranked.sort((left, right) => right.score - left.score || left.url.localeCompare(right.url));
+    return ranked.length ? ranked[0].url : null;
+  }
+
   function isSegmentUrl(value) {
     const parsed = safeUrl(value);
     if (!parsed) {
@@ -158,7 +199,8 @@
 
   function validatedSourcePage(raw, pageUrl) {
     const page = safeUrl(pageUrl || "");
-    const values = [raw.nearestPermalink, raw.canonicalUrl, raw.ogUrl, raw.jsonLdUrl, raw.sourcePage, pageUrl];
+    const rankedPermalink = resolvePlayerPermalink(raw, pageUrl);
+    const values = [rankedPermalink, raw.nearestPermalink, raw.canonicalUrl, raw.ogUrl, raw.jsonLdUrl, raw.sourcePage, pageUrl];
     for (const value of values) {
       const candidate = safeUrl(value || "", page ? page.href : undefined);
       if (!candidate) continue;
@@ -590,10 +632,25 @@
       }
       const activeProvided = raw.active !== undefined;
       const active = activeProvided ? Boolean(raw.active) : existing ? existing.active : false;
+      if (activeProvided && active) {
+        for (const item of this.items.values()) {
+          if (item.tabId === tabId && item.frameId === frameId && item.documentGeneration === documentGeneration && item.playerId !== playerId) {
+            item.active = false;
+            item.leaseUntil = 0;
+          }
+        }
+      }
+      const sourceHints = Array.from(new Set((Array.isArray(raw.sourceHints) ? raw.sourceHints : existing && existing.sourceHints || [])
+        .map((value) => safeUrl(value || "", stable))
+        .filter(Boolean)
+        .map((value) => value.href)))
+        .slice(0, 12);
       const item = {
         tabId, frameId, documentGeneration, playerId, pageUrl: stable,
         visible: raw.visible !== false,
         active,
+        sourceHints,
+        permalink: stablePageUrl(raw.permalink || existing && existing.permalink || "") || "",
         lastActivity: activeProvided && active ? now : existing ? existing.lastActivity : 0,
         leaseUntil: activeProvided && active ? now + this.leaseMs : existing ? existing.leaseUntil : 0,
         lastSeen: now
@@ -644,6 +701,23 @@
       return ranked[0].item.playerId;
     }
 
+    evidenceMatches(tabId, frameId, documentGeneration, playerId, raw) {
+      const item = this.items.get(this.key(tabId, frameId, documentGeneration, playerId));
+      if (!item || !item.active || item.leaseUntil < this.clock()) return false;
+      const operational = safeUrl(raw && raw.url || "");
+      const permalink = resolvePlayerPermalink(raw || {}, item.pageUrl);
+      if (permalink && item.permalink && permalink === item.permalink) return true;
+      if (!operational) return false;
+      return item.sourceHints.some((hint) => {
+        const parsed = safeUrl(hint);
+        if (!parsed) return false;
+        if (parsed.href === operational.href) return true;
+        const hintFamily = manifestFamily(parsed, parsed.pathname.slice(0, Math.max(1, parsed.pathname.lastIndexOf("/"))) || "/");
+        const operationalFamily = manifestFamily(operational, operational.pathname.slice(0, Math.max(1, operational.pathname.lastIndexOf("/"))) || "/");
+        return /\.(?:m3u8|mpd)(?:$|[?#])/i.test(parsed.href) && hintFamily === operationalFamily;
+      });
+    }
+
     removeFrame(tabId, frameId) {
       const prefix = `${tabId}:${frameId}:`;
       for (const key of this.items.keys()) if (key.startsWith(prefix)) this.items.delete(key);
@@ -680,14 +754,57 @@
     }
     observe(raw) {
       const now = this.clock();
-      this.items.push({ tabId: raw.tabId, frameId: raw.frameId, documentGeneration: raw.documentGeneration, observedAt: now });
+      const sanitized = sanitizeQuarantinedEvidence(raw, now);
+      if (!sanitized) return null;
+      this.items.push(sanitized);
       this.prune(now);
+      return { ...sanitized };
     }
     prune(now = this.clock()) {
       this.items = this.items.filter((item) => now - item.observedAt <= this.ttlMs).slice(-this.maxItems);
     }
     removeFrame(tabId, frameId) { this.items = this.items.filter((item) => item.tabId !== tabId || item.frameId !== frameId); }
     removeTab(tabId) { this.items = this.items.filter((item) => item.tabId !== tabId); }
+    takeMatching(filter, predicate) {
+      this.prune(this.clock());
+      const matches = [];
+      const retained = [];
+      for (const item of this.items) {
+        const ownerMatch = item.tabId === filter.tabId && item.frameId === filter.frameId
+          && item.documentGeneration === filter.documentGeneration
+          && (!filter.pageUrl || item.pageUrl === stablePageUrl(filter.pageUrl));
+        if (ownerMatch && (!predicate || predicate(item))) matches.push({ ...item });
+        else retained.push(item);
+      }
+      this.items = retained;
+      return matches;
+    }
+  }
+
+  function sanitizeQuarantinedEvidence(raw, observedAt) {
+    raw = raw && typeof raw === "object" ? raw : {};
+    const operational = safeUrl(raw.url || "");
+    const pageUrl = stablePageUrl(raw.pageUrl || raw.documentUrl || raw.initiator || "");
+    if (!operational || !pageUrl) return null;
+    const clean = {
+      tabId: Number.isInteger(raw.tabId) ? raw.tabId : -1,
+      frameId: Number.isInteger(raw.frameId) ? raw.frameId : 0,
+      documentGeneration: Number.isInteger(raw.documentGeneration) ? raw.documentGeneration : 0,
+      observedAt: Number(raw.observedAt) || observedAt,
+      pageUrl,
+      url: operational.href,
+      contentType: String(raw.contentType || "").slice(0, 120),
+      contentDisposition: String(raw.contentDisposition || "").replace(/[\r\n\0]/g, "").slice(0, 240),
+      contentRange: String(raw.contentRange || "").replace(/[\r\n\0]/g, "").slice(0, 120),
+      statusCode: Number(raw.statusCode) || 0,
+      requestType: String(raw.requestType || "").slice(0, 40),
+      documentUrl: safeUrl(raw.documentUrl || "")?.href || "",
+      initiator: safeUrl(raw.initiator || "")?.origin || "",
+      evidence: Array.isArray(raw.evidence) ? raw.evidence.slice(0, 4) : String(raw.evidence || "").slice(0, 80),
+      mediaKind: raw.mediaKind === "audio" ? "audio" : raw.mediaKind === "video" ? "video" : null,
+      nearestPermalink: resolvePlayerPermalink(raw, pageUrl) || ""
+    };
+    return clean;
   }
 
   function isChildManifest(candidate) {
@@ -734,8 +851,14 @@
 
   function isOverlayTargetDescriptor(descriptor) {
     const tagName = String(descriptor && descriptor.tagName || "").toUpperCase();
-    return tagName === "VIDEO" || tagName === "AUDIO";
+    return tagName === "VIDEO" || tagName === "AUDIO" || (tagName === "IFRAME" && descriptor && descriptor.frameProxy === true);
   }
 
-  return { CandidateStore, PlayerRegistry, PlayerOwnershipStore, QuarantineStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isAdvertisementUrl, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, safeUrl, sanitizeRequestContext, stableId, stablePageUrl, validPlayerId, validatedSourcePage };
+  function shouldShowPlayerOverlay(descriptor) {
+    if (!descriptor || !descriptor.playerVisible) return false;
+    if (!descriptor.modalOpen) return true;
+    return descriptor.playerInModal === true;
+  }
+
+  return { CandidateStore, PlayerRegistry, PlayerOwnershipStore, QuarantineStore, applyTrustedOwner, canonicalCandidateUrl, classifyCandidate, isAdvertisementUrl, isExtractorPage, isOverlayTargetDescriptor, isSegmentUrl, isUsefulResponseEvidence, resolvePlayerPermalink, safeUrl, sanitizeRequestContext, shouldShowPlayerOverlay, stableId, stablePageUrl, validPlayerId, validatedSourcePage };
 });

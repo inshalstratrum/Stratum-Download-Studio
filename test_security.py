@@ -990,7 +990,10 @@ def test_mocked_extractor_pipeline_returns_requested_actual_output(tmp_path, pro
     monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda path, runner=None: {
         'format_name': format_name,
         'major_brand': {'MP4': 'isom', 'MOV': 'qt  ', 'M4A': 'M4A '}.get(profile_name, ''),
-        'streams': [{'codec_type': stream_type, 'codec_name': 'mock', 'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
+        'streams': [{'codec_type': stream_type,
+                     'codec_name': ({('MP4', 'video'): 'h264', ('MP4', 'audio'): 'aac', ('WEBM', 'video'): 'vp9', ('WEBM', 'audio'): 'opus'}
+                                    .get((profile_name, stream_type), 'mock')),
+                     'height': 1080 if stream_type == 'video' else None} for stream_type in stream_types],
     })
     thread = stratrum_download_studio.DownloadThread(
         'id', 'https://example.com/media', str(tmp_path / '%(title)s.%(ext)s'),
@@ -1030,6 +1033,79 @@ def test_profile_options_use_real_postprocessors(tmp_path):
     assert stratrum_download_studio.build_download_options('MOV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoConvertor'
     assert stratrum_download_studio.build_download_options('MKV', 'out')['postprocessors'][0]['key'] == 'FFmpegVideoRemuxer'
     assert stratrum_download_studio.build_download_options('WEBM', 'out')['merge_output_format'] == 'webm'
+
+
+def test_mp4_prefers_complete_h264_aac_and_converts_when_only_hevc_exists():
+    selector = stratrum_download_studio.build_format_selector('MP4', 1080)
+    alternatives = selector.split('/')
+    assert 'best[height<=1080][ext=mp4][vcodec^=avc][acodec^=mp4a]' == alternatives[0]
+    assert '[vcodec^=avc]' in selector and '[acodec^=mp4a]' in selector
+    assert 'hev' not in selector.lower() and 'h265' not in selector.lower()
+    compatible = {'formats': [
+        {'ext': 'mp4', 'vcodec': 'hevc', 'height': 1080, 'acodec': 'none'},
+        {'ext': 'mp4', 'vcodec': 'avc1.640028', 'height': 1080, 'acodec': 'none'},
+        {'ext': 'm4a', 'vcodec': 'none', 'acodec': 'mp4a.40.2'},
+    ]}
+    hevc_only = {'formats': [
+        {'ext': 'mp4', 'vcodec': 'hevc', 'height': 1080, 'acodec': 'none'},
+        {'ext': 'm4a', 'vcodec': 'none', 'acodec': 'mp4a.40.2'},
+    ]}
+    assert 'postprocessors' not in stratrum_download_studio.build_download_options('MP4', 'out', 1080, compatible)
+    assert stratrum_download_studio.build_download_options('MP4', 'out', 1080, hevc_only)['postprocessors'][0]['key'] == 'FFmpegVideoConvertor'
+    assert stratrum_download_studio.profile_codecs_compatible({'streams': [{'codec_type': 'video', 'codec_name': 'h264'}, {'codec_type': 'audio', 'codec_name': 'aac'}]}, 'MP4')
+    assert not stratrum_download_studio.profile_codecs_compatible({'streams': [{'codec_type': 'video', 'codec_name': 'hevc'}, {'codec_type': 'audio', 'codec_name': 'aac'}]}, 'MP4')
+
+
+def test_webm_selector_uses_valid_codecs_and_incompatible_sources_convert():
+    selector = stratrum_download_studio.build_format_selector('WEBM', 720)
+    assert selector.split('/')[0] == 'best[height<=720][ext=webm][vcodec^=vp9][acodec^=opus]'
+    assert '[vcodec^=vp9]' in selector and '[acodec^=opus]' in selector
+    compatible = {'formats': [
+        {'ext': 'webm', 'vcodec': 'vp9', 'height': 720, 'acodec': 'none'},
+        {'ext': 'webm', 'vcodec': 'none', 'acodec': 'opus'},
+    ]}
+    incompatible = {'formats': [
+        {'ext': 'mp4', 'vcodec': 'h264', 'height': 720, 'acodec': 'none'},
+        {'ext': 'm4a', 'vcodec': 'none', 'acodec': 'aac'},
+    ]}
+    native = stratrum_download_studio.build_download_options('WEBM', 'out', 720, compatible)
+    fallback = stratrum_download_studio.build_download_options('WEBM', 'out', 720, incompatible)
+    assert native['merge_output_format'] == 'webm' and 'postprocessors' not in native
+    assert fallback['postprocessors'][0] == {'key': 'FFmpegVideoConvertor', 'preferedformat': 'webm'}
+    assert stratrum_download_studio.profile_codecs_compatible({'streams': [{'codec_type': 'video', 'codec_name': 'vp9'}, {'codec_type': 'audio', 'codec_name': 'opus'}]}, 'WEBM')
+    assert not stratrum_download_studio.profile_codecs_compatible({'streams': [{'codec_type': 'video', 'codec_name': 'h264'}, {'codec_type': 'audio', 'codec_name': 'aac'}]}, 'WEBM')
+
+
+@pytest.mark.parametrize(('profile_name', 'source_codecs', 'final_codecs', 'format_name', 'major_brand'), [
+    ('MP4', ('hevc', 'aac'), ('h264', 'aac'), 'mov,mp4,m4a,3gp,3g2,mj2', 'isom'),
+    ('WEBM', ('h264', 'aac'), ('vp9', 'opus'), 'matroska,webm', ''),
+])
+def test_incompatible_native_output_uses_controlled_conversion_and_final_probe(
+        tmp_path, monkeypatch, profile_name, source_codecs, final_codecs, format_name, major_brand):
+    extension = stratrum_download_studio.output_profile(profile_name).extension
+    source = tmp_path / f'captured.{extension}'
+    source.write_bytes(b'incompatible')
+    initial_probe = {'format_name': format_name, 'major_brand': major_brand, 'duration': 1.0, 'streams': [
+        {'codec_type': 'video', 'codec_name': source_codecs[0]},
+        {'codec_type': 'audio', 'codec_name': source_codecs[1]},
+    ]}
+    final_probe = {'format_name': format_name, 'major_brand': major_brand, 'duration': 1.0, 'streams': [
+        {'codec_type': 'video', 'codec_name': final_codecs[0]},
+        {'codec_type': 'audio', 'codec_name': final_codecs[1]},
+    ]}
+    probe_calls = []
+    monkeypatch.setattr(stratrum_download_studio, 'probe_media_file', lambda path, runner=None: probe_calls.append(Path(path)) or final_probe)
+
+    def runner(command, **kwargs):
+        Path(command[-1]).write_bytes(b'converted')
+        return type('Result', (), {'returncode': 0, 'stderr': b''})()
+
+    final_path, probe = stratrum_download_studio.convert_incompatible_profile_output(
+        source, profile_name, tmp_path, initial_probe, runner=runner
+    )
+    assert final_path.is_file() and final_path != source and not source.exists()
+    assert probe == final_probe and len(probe_calls) >= 2
+    assert stratrum_download_studio.profile_codecs_compatible(probe, profile_name)
     for audio in ('MP3', 'M4A', 'AAC', 'WAV', 'FLAC', 'OGG', 'OPUS'):
         options = stratrum_download_studio.build_download_options(audio, 'out')
         expected_codec = {'OGG': 'vorbis'}.get(audio, audio.lower())
@@ -1681,6 +1757,85 @@ def test_browser_errors_redact_operational_urls_and_header_values():
     cleaned = stratrum_download_studio.clean_error_summary(error)
     assert 'cdn.test' not in cleaned and 'news.test' not in cleaned and 'secret-agent' not in cleaned
     assert cleaned == '[header omitted]'
+
+
+def test_authenticated_retry_is_opt_in_domain_isolated_and_redacted(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    assert config.authenticated_retry_enabled is False
+    assert stratrum_download_studio.authenticated_retry_options({}, 'https://www.instagram.com/p/DaspGO1OMJ6/', config) is None
+    config.authenticated_retry_enabled = True
+    config.authenticated_retry_browser = 'edge'
+    config.authenticated_retry_profile = r'C:\Users\Fixture\Profile 2'
+    config.persist()
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    options = stratrum_download_studio.authenticated_retry_options({}, 'https://www.instagram.com/p/DaspGO1OMJ6/', restored)
+    assert options['cookiesfrombrowser'] == ('edge', r'C:\Users\Fixture\Profile 2', None, None)
+    assert options['extractor_args'] == {'instagram': {'app_id': ['web']}}
+    assert stratrum_download_studio.authenticated_retry_options({}, 'https://example.com/video', restored) is None
+    assert stratrum_download_studio.authenticated_retry_options({}, 'https://www.instagram.com.evil.test/p/x', restored) is None
+    cleaned = stratrum_download_studio.clean_error_summary(
+        r'failed --cookies-from-browser edge:C:\Users\Fixture\Profile 2 while reading cookie profile'
+    )
+    assert 'Fixture' not in cleaned and 'Profile 2' not in cleaned and 'cookies-from-browser' not in cleaned
+    customer = stratrum_download_studio.customer_extraction_error('Empty response; login required for https://www.instagram.com/p/secret/')
+    assert 'instagram.com' not in customer and 'profile retry' in customer
+
+
+def test_instagram_empty_response_retries_anonymous_then_fresh_browser_session(tmp_path, monkeypatch):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    config.authenticated_retry_enabled = True
+    config.authenticated_retry_browser = 'firefox'
+    config.authenticated_retry_profile = 'release-profile'
+    attempts = []
+
+    class MockYDL:
+        def __init__(self, options): self.options = options
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def extract_info(self, url, download=False):
+            attempts.append(dict(self.options))
+            if 'cookiesfrombrowser' not in self.options:
+                raise RuntimeError('Empty response; login required')
+            return {'id': 'DaspGO1OMJ6', 'formats': []}
+
+    monkeypatch.setattr(stratrum_download_studio.yt_dlp, 'YoutubeDL', MockYDL)
+    ready = []; errors = []
+    worker = stratrum_download_studio.FormatFetcherThread(
+        'https://www.instagram.com/p/DaspGO1OMJ6/', app_config=config
+    )
+    worker.formats_ready.connect(ready.append); worker.error_occurred.connect(errors.append)
+    worker.run()
+    assert len(attempts) == 2 and ready[0]['id'] == 'DaspGO1OMJ6' and errors == []
+    assert 'cookiesfrombrowser' not in attempts[0]
+    assert attempts[0]['extractor_args'] == attempts[1]['extractor_args'] == {'instagram': {'app_id': ['web']}}
+    assert attempts[1]['cookiesfrombrowser'] == ('firefox', 'release-profile', None, None)
+    assert all('Cookie' not in (attempt.get('http_headers') or {}) for attempt in attempts)
+
+
+def test_browser_profile_setting_persists_only_explicit_selection(tmp_path):
+    config = stratrum_download_studio.initialize_runtime(tmp_path, TOKEN, ORIGIN)
+    dialog = stratrum_download_studio.BrowserIntegrationDialog(config)
+    dialog.auth_retry_check.setChecked(True)
+    dialog.auth_browser_combo.setCurrentIndex(dialog.auth_browser_combo.findData('firefox'))
+    dialog.auth_profile_edit.setText('Profile-A')
+    dialog.persist_authenticated_retry()
+    restored = stratrum_download_studio.initialize_runtime(tmp_path)
+    assert (restored.authenticated_retry_enabled, restored.authenticated_retry_browser, restored.authenticated_retry_profile) == (True, 'firefox', 'Profile-A')
+    assert 'cookie' not in json.loads(restored.config_path.read_text(encoding='utf-8'))
+    dialog.close()
+
+
+def test_stratum_user_faq_is_next_numbered_original_and_covers_acceptance_topics():
+    faq = Path('docs/19_USER_FAQ.md')
+    assert faq.is_file()
+    text = faq.read_text(encoding='utf-8')
+    for required in (
+        'browser integration', 'Detecting video…', 'play a stream', 'login-required',
+        'resolution information unavailable', 'compatible MP4 and WebM', 'public media',
+        'verification errors', 'safe troubleshooting',
+    ):
+        assert required.lower() in text.lower()
+    assert 'IDM' not in text
 
 
 def test_windows_media_output_planning_strips_query_and_bounds_paths(tmp_path):

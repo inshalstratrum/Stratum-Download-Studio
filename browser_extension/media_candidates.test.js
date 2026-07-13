@@ -11,6 +11,8 @@ const {
   isOverlayTargetDescriptor,
   isSegmentUrl,
   isUsefulResponseEvidence,
+  resolvePlayerPermalink,
+  shouldShowPlayerOverlay,
   stablePageUrl
 } = require("./media_candidates.js");
 
@@ -452,9 +454,10 @@ test("player registry correlates the active leased player and quarantines ambigu
   registry.touch({ ...base, playerId: "player-feed0002", active: false });
   assert.equal(registry.correlate({ ...base, observedAt: now, documentUrl: base.pageUrl, initiator: "https://news.test" }), "player-feed0001");
   registry.touch({ ...base, playerId: "player-feed0002", active: true });
-  assert.equal(registry.correlate({ ...base, observedAt: now, documentUrl: base.pageUrl, initiator: "https://news.test" }), null);
+  assert.equal(registry.correlate({ ...base, observedAt: now, documentUrl: base.pageUrl, initiator: "https://news.test" }), "player-feed0002");
   const quarantine = new QuarantineStore({ clock: () => now, maxItems: 2, ttlMs: 1000 });
-  quarantine.observe(base); quarantine.observe(base); quarantine.observe(base);
+  const evidence = { ...base, url: "https://cdn.test/master.m3u8", documentUrl: base.pageUrl, evidence: "webRequest-response" };
+  quarantine.observe(evidence); quarantine.observe(evidence); quarantine.observe(evidence);
   assert.equal(quarantine.items.length, 2);
   now += 1001; quarantine.prune();
   assert.equal(quarantine.items.length, 0);
@@ -509,4 +512,92 @@ test("hidden ads and component URLs never enter the preferred list", () => {
   store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/asset/playlist_a-eng.m3u8", evidence: "webRequest-response" });
   const master = store.observe({ ...owner, url: "https://manifest.prod.boltdns.net/asset/master.m3u8?token=signed", evidence: "webRequest-response" });
   assert.deepEqual(store.list(owner).map((item) => item.id), [master.id]);
+});
+
+test("Facebook resolver rejects hashtag, roots, profiles, and text slugs", () => {
+  for (const url of [
+    "https://www.facebook.com/",
+    "https://www.facebook.com/creator",
+    "https://www.facebook.com/reel/hashtag/",
+    "https://www.facebook.com/creator/videos/descriptive-title/",
+    "https://www.facebook.com/watch/?v=not-a-video-id",
+    "https://www.facebook.com/reel/funny-cats/"
+  ]) {
+    assert.equal(stablePageUrl(url), url);
+    assert.equal(classifyCandidate({ pageUrl: "https://www.facebook.com/", url, blobOnly: true, visiblePlayer: true, evidence: "dom-media" }), null);
+  }
+  assert.equal(stablePageUrl("https://www.facebook.com/creator/videos/123456/"), "https://www.facebook.com/creator/videos/123456/");
+  assert.equal(stablePageUrl("https://www.facebook.com/reel/987654/"), "https://www.facebook.com/reel/987654/");
+});
+
+test("ranked feed resolver selects the exact nearest Facebook Instagram and TikTok player", () => {
+  const fixtures = [
+    ["https://www.facebook.com/", "https://www.facebook.com/reel/111111/", "https://www.facebook.com/reel/222222/"],
+    ["https://www.instagram.com/explore/", "https://www.instagram.com/reel/AAAA11/", "https://www.instagram.com/p/BBBB22/"],
+    ["https://www.tiktok.com/foryou", "https://www.tiktok.com/@alpha/video/111111", "https://www.tiktok.com/@beta/video/222222"]
+  ];
+  for (const [page, exact, sibling] of fixtures) {
+    const resolved = resolvePlayerPermalink({
+      pageUrl: page,
+      anchorCandidates: [{ url: sibling, distance: 12 }, { url: exact, distance: 2 }],
+      canonicalUrl: page,
+      activePlayer: true
+    }, page);
+    assert.equal(resolved, stablePageUrl(exact));
+    const player = classifyCandidate({
+      pageUrl: page, anchorCandidates: [{ url: exact, distance: 1 }, { url: sibling, distance: 9 }],
+      url: "blob:https://cdn.test/player", blobOnly: true, visiblePlayer: true,
+      playerId: "player-exactfeed", evidence: "control-click"
+    });
+    assert.equal(player.url, stablePageUrl(exact));
+    assert.notEqual(player.url, stablePageUrl(sibling));
+  }
+});
+
+test("modal overlay policy hides background grid players", () => {
+  assert.equal(shouldShowPlayerOverlay({ playerVisible: true, modalOpen: false, playerInModal: false }), true);
+  assert.equal(shouldShowPlayerOverlay({ playerVisible: true, modalOpen: true, playerInModal: false }), false);
+  assert.equal(shouldShowPlayerOverlay({ playerVisible: true, modalOpen: true, playerInModal: true }), true);
+  assert.equal(shouldShowPlayerOverlay({ playerVisible: false, modalOpen: false, playerInModal: false }), false);
+});
+
+test("quarantine promotes only evidence matching the newly active player", () => {
+  let now = 5000;
+  const registry = new PlayerRegistry({ clock: () => now, leaseMs: 2000, ttlMs: 5000 });
+  const quarantine = new QuarantineStore({ clock: () => now, ttlMs: 2000 });
+  const owner = { tabId: 60, frameId: 0, documentGeneration: 4, pageUrl: "https://player.test/demo" };
+  quarantine.observe({ ...owner, url: "https://cdn.test/asset/master.m3u8?token=signed", documentUrl: owner.pageUrl, evidence: "webRequest-response" });
+  quarantine.observe({ ...owner, url: "https://other.test/sibling/master.m3u8?token=other", documentUrl: owner.pageUrl, evidence: "webRequest-response" });
+  registry.touch({ ...owner, playerId: "player-promote01", active: true, visible: true, sourceHints: ["https://cdn.test/asset/master.m3u8"] });
+  const matches = quarantine.takeMatching(owner, (item) => registry.evidenceMatches(owner.tabId, owner.frameId, owner.documentGeneration, "player-promote01", item));
+  assert.equal(matches.length, 1);
+  assert.match(matches[0].url, /token=signed/);
+  assert.equal(quarantine.items.length, 1);
+});
+
+test("Dailymotion repeated observations keep one stable player button candidate", () => {
+  const store = new CandidateStore();
+  const owner = { tabId: 61, frameId: 0, documentGeneration: 1, playerId: "player-daily001", pageUrl: "https://www.dailymotion.com/video/x9stable" };
+  const first = store.observe({ ...owner, url: owner.pageUrl, evidence: "dom-media" });
+  const second = store.observe({ ...owner, url: `${owner.pageUrl}?playlist=x`, evidence: "source-change" });
+  assert.equal(first.id, second.id);
+  assert.equal(store.list(owner).length, 1);
+});
+
+test("NYTimes frame proxy fallback and NLM direct HTML audio remain eligible", () => {
+  assert.equal(isOverlayTargetDescriptor({ tagName: "IFRAME", frameProxy: true }), true);
+  assert.equal(isOverlayTargetDescriptor({ tagName: "IFRAME", frameProxy: false }), false);
+  const article = classifyCandidate({
+    pageUrl: "https://www.nytimes.com/2026/07/13/world/story.html",
+    url: "https://www.nytimes.com/2026/07/13/world/story.html", blobOnly: true,
+    articleFallback: true, visiblePlayer: true, playerId: "player-nytframe1", evidence: "frame-capability"
+  });
+  assert.equal(article.type, "article_page");
+  const audio = classifyCandidate({
+    pageUrl: "https://www.nlm.nih.gov/media/lesson.mp3", url: "https://www.nlm.nih.gov/media/lesson.mp3",
+    contentType: "audio/mpeg", mediaKind: "audio", topLevelDocument: true,
+    playerId: "player-nlmaudio1", evidence: "top-level-media-document"
+  });
+  assert.equal(audio.type, "direct_media");
+  assert.equal(audio.mediaKind, "audio");
 });
