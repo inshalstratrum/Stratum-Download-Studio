@@ -1,18 +1,36 @@
+# Vendor Binaries & Large Executables (Exceeds GitHub 100MB limit)
+ffmpeg.exe
+ffprobe.exe
+*.exe
+
+# Python Cache & Virtual Environments
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
+.venv/
+venv/
+env/
+
+# Build and Distribution Directories
 build/
 dist/
 extension_packages/
 downloads/
-.venv/
-venv/
 .deps/
 .deps-staging/
 .deps-rollback/
 .tools/
 .tools-staging/
 .tools-rollback/
+
+# Runtime Logs & Temporary Files
 *.log
 *.tmp
 *.bak
+*.lnk
+Desktop.ini
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
