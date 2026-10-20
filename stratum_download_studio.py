@@ -884,7 +884,13 @@ def postprocessor_output_path(event):
     return event.get('filepath') or event.get('filename') or info.get('filepath') or info.get('_filename')
 
 
-def collect_output_candidates(info, postprocessed_paths, save_dir, extension, preexisting=None):
+def collect_output_candidates(info, postprocessed_paths, save_dir, extension, preexisting=None, *,
+                              output_tag=None):
+    """Collect yt-dlp output hints; glob only using a proven per-job filename tag.
+
+    Extractor IDs are not ownership: concurrent jobs can share them. Missing
+    hints must fail closed instead of scanning another worker's output.
+    """
     candidates = []
     candidates.extend(path for path in postprocessed_paths if path)
     if isinstance(info, dict):
@@ -896,21 +902,26 @@ def collect_output_candidates(info, postprocessed_paths, save_dir, extension, pr
             if isinstance(item, dict):
                 candidates.extend(item.get(key) for key in ('filepath', '_filename') if item.get(key))
     before = {str(Path(path).resolve()) for path in (preexisting or set())}
-    for path in Path(save_dir).glob(f'*.{extension}'):
-        if str(path.resolve()) not in before:
-            candidates.append(str(path))
+    if output_tag:
+        # The job-specific template puts the tag at the END of the output stem.
+        candidates.extend(str(path) for path in Path(save_dir).glob(f'*{output_tag}.{extension}'))
     unique = []
+    seen = set()
     for candidate in candidates:
         if not candidate:
             continue
         try:
-            resolved = str(Path(candidate).resolve())
-        except OSError:
-            resolved = str(candidate)
-        if resolved in before:
+            path = Path(candidate)
+            resolved = str(path.resolve())
+        except (OSError, TypeError, ValueError):
             continue
-        if str(candidate) not in unique:
-            unique.append(str(candidate))
+        if resolved in before or resolved in seen:
+            continue
+        if output_tag and (path.suffix.lower() != f'.{extension}'.lower()
+                           or not path.stem.endswith(output_tag)):
+            continue
+        seen.add(resolved)
+        unique.append(str(candidate))
     return unique
 
 
@@ -1000,9 +1011,12 @@ def profile_codecs_compatible(probe, profile_name):
     return video_ok and audio_ok
 
 
-def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None):
+def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None, *,
+                        output_tag=None):
     profile = output_profile(profile_name)
-    candidates = collect_output_candidates(info, postprocessed_paths, save_dir, profile.extension, preexisting)
+    candidates = collect_output_candidates(
+        info, postprocessed_paths, save_dir, profile.extension, preexisting, output_tag=output_tag,
+    )
     valid = []
     errors = []
     for candidate in candidates:
@@ -1377,13 +1391,13 @@ def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, d
     return ConversionPlan(source, final_path, temporary, target_name, required_stream, float(actual_probe.get('duration') or 0), command)
 
 
-def convert_incompatible_profile_output(input_path, profile_name, save_dir, probe=None, runner=None):
+def convert_incompatible_profile_output(input_path, profile_name, save_dir, probe=None, runner=None,
+                                        cancel_check=None):
     source = Path(input_path).resolve(strict=True)
     actual_probe = probe if probe is not None else probe_media_file(source)
     if profile_codecs_compatible(actual_probe, profile_name):
         return source, actual_probe
     plan = build_conversion_plan(source, profile_name, save_dir, actual_probe)
-    runner = runner or subprocess.run
     kwargs = {
         'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
         'timeout': CONVERSION_TIMEOUT_SECONDS,
@@ -1391,22 +1405,63 @@ def convert_incompatible_profile_output(input_path, profile_name, save_dir, prob
     creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if creation_flags:
         kwargs['creationflags'] = creation_flags
+
+    def check_cancellation():
+        if cancel_check is not None and cancel_check():
+            raise CancelException("Cancelled")
+
     try:
-        result = runner(list(plan.command), **kwargs)
+        check_cancellation()
+        if cancel_check is not None and runner is None:
+            # The download worker must be able to interrupt FFmpeg mid-conversion.
+            popen_options = {key: value for key, value in kwargs.items() if key != 'timeout'}
+            process = subprocess.Popen(list(plan.command), **popen_options)
+            try:
+                deadline = time.monotonic() + CONVERSION_TIMEOUT_SECONDS
+                while True:
+                    check_cancellation()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValueError("FFmpeg compatibility conversion timed out")
+                    try:
+                        stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                        result = subprocess.CompletedProcess(plan.command, process.returncode, stdout, stderr)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
+        else:
+            result = (runner or subprocess.run)(list(plan.command), **kwargs)
+        check_cancellation()
         if result.returncode != 0:
             raise ValueError(f"FFmpeg compatibility conversion failed: {clean_error_summary(result.stderr)}")
         validate_final_media(plan.temporary_output, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
+        check_cancellation()
         os.replace(plan.temporary_output, plan.destination)
-        final_path, final_probe = validate_final_media(plan.destination, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
-        if not profile_codecs_compatible(final_probe, plan.target_name):
-            raise ValueError(f"FFprobe found incompatible codecs in the final {plan.target_name} output")
-        source.unlink()
+        try:
+            final_path, final_probe = validate_final_media(
+                plan.destination, plan.destination.parent, plan.target_name,
+                required_stream=plan.required_stream,
+            )
+            if not profile_codecs_compatible(final_probe, plan.target_name):
+                raise ValueError(f"FFprobe found incompatible codecs in the final {plan.target_name} output")
+            check_cancellation()
+            # Source deletion is irreversible: only after successful validation and
+            # a final cancellation check should we discard the original media.
+            source.unlink()
+        except CancelException:
+            plan.destination.unlink(missing_ok=True)
+            raise
         return final_path, final_probe
     finally:
-        try:
-            plan.temporary_output.unlink()
-        except FileNotFoundError:
-            pass
+        plan.temporary_output.unlink(missing_ok=True)
 
 
 def parse_ffmpeg_progress(values, duration, started_at, now=None):
@@ -1599,8 +1654,9 @@ class ConvertThread(QThread):
             with _conversion_name_lock:
                 plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination)
                 output_path = plan.destination
-                claim_path = output_path.with_name(output_path.name + '.claim')
-                claim_fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                potential_claim_path = output_path.with_name(output_path.name + '.claim')
+                claim_fd = os.open(potential_claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                claim_path = potential_claim_path
                 os.close(claim_fd)
             temporary_path = plan.temporary_output
             self.progress.emit(self.row_id, {'source': str(plan.source), 'destination': str(output_path), 'target': plan.target_name, 'state': 'starting', 'percent': 0.0, 'elapsed': 0.0, 'eta': None})
@@ -1980,20 +2036,38 @@ class DownloadThread(QThread):
                 raise CancelException("Cancelled")
             self.current_stage = 'verification'
             self.status.emit(self.id, 'Verifying output')
+            # Derive ownership from the actual per-download output template,
+            # NEVER from the source video's extractor ID.
+            suffix = f'-{str(self.id)[:8]}'
+            output_tag = suffix if (self.id and self.outtmpl.endswith(f'{suffix}.%(ext)s')) else None
             final_path, probe = resolve_final_media(
-                info, self.postprocessed_paths, self.save_dir, self.profile_name, preexisting,
+                info, self.postprocessed_paths, self.save_dir, self.profile_name,
+                preexisting, output_tag=output_tag,
             )
             if not profile_codecs_compatible(probe, self.profile_name):
+                if self.cancelled or self.isInterruptionRequested():
+                    raise CancelException("Cancelled")
                 self.current_stage = 'conversion'
                 self.status.emit(self.id, f'Converting to compatible {profile.extension.upper()}')
-                final_path, probe = convert_incompatible_profile_output(final_path, self.profile_name, self.save_dir, probe)
+                final_path, probe = convert_incompatible_profile_output(
+                    final_path, self.profile_name, self.save_dir, probe,
+                    cancel_check=lambda: self.cancelled or self.isInterruptionRequested(),
+                )
+                if self.cancelled or self.isInterruptionRequested():
+                    raise CancelException("Cancelled")
                 final_path, probe = validate_final_media(final_path, self.save_dir, self.profile_name)
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.final_filename = str(final_path)
             self.final_probe = probe
             cleanup_verified_intermediates(self.temporary_paths, final_path, self.save_dir)
             size = final_path.stat().st_size
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.metrics.emit(self.id, size, size, 0.0, 0)
             self.size_updated.emit(self.id, final_path.name, self.format_size(size))
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.progress.emit(
                 self.id, final_path.name, 100.0, format_bytes(size), format_bytes(size),
                 '0 B/s', '00:00:00', 'Completed'
@@ -3219,8 +3293,9 @@ class StratrumDownloadStudio(QMainWindow):
         payload = {
             'application': APP_NAME,
             'jobs': [{
-                **job.to_dict(),
+                **{k: v for k, v in job.to_dict().items() if k != 'original_source_url'},
                 'source_url': sanitize_source_url(job.source_url),
+                'original_source_url': sanitize_source_url(job.original_source_url),
                 'error_summary': clean_error_summary(job.error_summary),
             } for job in self.download_manager.jobs.values()],
         }

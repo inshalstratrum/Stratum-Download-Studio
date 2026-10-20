@@ -1,4 +1,16 @@
-# Current State
+# Current State — Repair review branch (2026-10-20)
+
+- **Branch:** `repair/output-ownership-cancellation` (forked from `main@e2274df`, preserving the previous uncommitted Antigravity repair edits).
+- **Scope:** Fix only the two previously *partially addressed* high-priority defects: cross-job output selection and cancellation during compatibility conversion. Do not claim the other 11 audit findings resolved.
+- **Output ownership:** The production `DownloadThread.run` derives an exact, unique suffix from the saved yt-dlp output template and its job ID. `collect_output_candidates` and `resolve_final_media` only glob files matching that suffix. If no verified suffix exists, output discovery uses explicit yt-dlp output hints only, never a directory-wide glob based on a shared extractor video ID. The preexisting snapshot keeps its original positional API.
+- **Cancellation:** The download worker supplies a cancellation callback to compatibility conversion; FFmpeg uses an interruptible Popen/communicate loop, with termination and escalation where needed. Cancelled conversion cleans temporary/promoted output without destroying the original source, and final download success is guarded against late cancellation.
+- **Additional preserved prior edits:** The preexisting Antigravity work sanitized `original_source_url` in diagnostics and fixed conversion reservation cleanup. These preexisting uncommitted edits remain in this branch; they were not reimplemented in this pass.
+- **Reproduced before fixes:** Four failing regressions (cross-job, empty extractor ID, mid-conversion cancellation, old preexisting-file test). Each was tested against existing production functions, including `DownloadThread.run`.
+- **Offline verification:** **7/7** focused repair/security tests passed and the final **294/294 full Python pytest suite passed** on 2026-10-20. Python syntax and `git diff --check` also passed. Output format/packaging/browser extensions were not touched.
+- **Not manually verified:** Live downloads, actual long-running FFmpeg cancellation, GUI cancellation, real playback, system shutdown during conversion, and packaged EXE. Do **not** claim they passed.
+- **Independent gate:** Codex (or an independent reviewer) must inspect actual code diff and production tests before merging. Keep scope limited and no Phase 2B.
+
+## Earlier recorded project state (historical reference)
 
 - Phase: 2A.7D.1 — browser media acceptance finalized on 2026-07-13.
 - Branch: `phase-2a7d-browser-routing`; repair baseline `24272e9aa32e8c8d67902739e28b4dcc1e9d11ce` remains in the branch ancestry.
