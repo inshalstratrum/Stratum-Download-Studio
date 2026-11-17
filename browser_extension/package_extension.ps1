@@ -9,6 +9,7 @@ New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 
 $sharedFiles = @(
     (Join-Path $extensionRoot 'media_candidates.js'),
+    (Join-Path $extensionRoot 'file_interception.js'),
     (Join-Path $extensionRoot 'background.js'),
     (Join-Path $extensionRoot 'content.js'),
     (Join-Path $extensionRoot 'options.html'),

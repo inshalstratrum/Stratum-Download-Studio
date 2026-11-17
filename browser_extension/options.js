@@ -1,11 +1,12 @@
 const extensionApi = globalThis.browser || globalThis.chrome;
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const result = await extensionApi.storage.local.get(["authToken", "showMediaButtons"]);
+  const result = await extensionApi.storage.local.get(["authToken", "showMediaButtons", "interceptGeneralDownloads"]);
   if (result.authToken) {
     document.getElementById("token").placeholder = "A token is currently saved";
   }
   document.getElementById("show-media-buttons").checked = result.showMediaButtons !== false;
+  document.getElementById("intercept-general-files").checked = result.interceptGeneralDownloads === true;
 });
 
 document.getElementById("toggle-visibility").addEventListener("click", () => {
@@ -46,4 +47,12 @@ document.getElementById("clear").addEventListener("click", async () => {
 
 document.getElementById("show-media-buttons").addEventListener("change", async (event) => {
   await extensionApi.storage.local.set({ showMediaButtons: event.target.checked });
+});
+
+// Explicit opt-in: the browser keeps its native downloader until this is enabled.
+document.getElementById("intercept-general-files").addEventListener("change", async (event) => {
+  await extensionApi.storage.local.set({ interceptGeneralDownloads: event.target.checked });
+  const status = document.getElementById("status");
+  status.style.color = "#16635a";
+  status.textContent = event.target.checked ? "Automatic file handoff enabled." : "Chrome will handle ordinary files normally.";
 });

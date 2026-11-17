@@ -2,7 +2,7 @@
 
 **Tool by InShaLIve.os**
 
-This is the unpacked Manifest V3 extension source for I-DS. It offers **right-click media/link handoff**, **supported video/audio detection**, and an **in-player download button**. It does **not** automatically intercept ordinary Chrome downloads such as PDFs, ZIP files, installers, and photos.
+This is the unpacked Manifest V3 extension source for I-DS. It offers **right-click media/link handoff**, **supported video/audio detection**, and an **in-player download button**. Phase 2B beta adds a **default-off opt-in** for ordinary browser downloads (PDF, ZIP, installers, images and other known file types). The desktop must acknowledge queued file ownership before the extension cancels Chrome's paused copy.
 
 ## Install for development
 
@@ -17,6 +17,8 @@ If the token is missing, Settings opens automatically. For connection issues, re
 ## Usage
 
 - Right-click a page link, video, or audio source and choose **Quick Download with I-DS** or **Download with Options in I-DS**.
+- Right-click **Download file with I-DS** for a direct general HTTP(S) file.
+- Enable **Automatically use I-DS for supported browser files** in extension settings only if you want ordinary Chrome downloads handed to the desktop. Handoff failures resume the original browser download. Once the desktop has accepted a job, later server failures still require retry in I-DS.
 - The **I-DS** button appears on detectable playable media. You can disable it under the extension settings.
 - The toolbar icon opens settings; it does not trigger a download by itself.
 
@@ -26,14 +28,14 @@ The extension inspects permitted HTTP/HTTPS pages, frames, and response metadata
 
 - HTTP/HTTPS site access: detect supported media elements and response candidates.
 - Context menus: show explicit right-click download actions.
-- Local storage: remember the masked pairing token and media-button preference.
+- Local storage: remember the masked pairing token, media-button preference and opt-in interception setting. Also retains paused native download IDs for startup recovery (no URLs or files).
 - Loopback HTTP on 127.0.0.1:18765: communicate with the desktop application.
 
-**No `downloads` permission is requested yet** because ordinary browser-file interception has not been implemented. Automatic takeover must be opt-in, tested with signed URLs and authentication, and must never discard a Chrome download before a verified desktop handoff.
+The `downloads` permission enables opt-in file interception. The extension first pauses the native Chrome file, waits for an authenticated desktop job acceptance, then cancels the native copy; if acceptance fails, it resumes Chrome. It never accesses browser cookies or credential headers, so private/session-dependent files may fail after desktop acceptance. Interception remains **off by default** and is not yet signed or store-published.
 
 ## Tests
 
-Run `node --test media_candidates.test.js` from this directory, or the equivalent command from the repository root.
+Run `node --test *.test.js` from this directory, or `node --test browser_extension/*.test.js` from the repository root.
 
 ## Packaging and limitations
 

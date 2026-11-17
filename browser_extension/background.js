@@ -1,9 +1,10 @@
 if (!globalThis.StratumMediaCandidates && typeof importScripts === "function") {
-  importScripts("media_candidates.js");
+  importScripts("media_candidates.js", "file_interception.js");
 }
 
 const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
+const fileInterceptApi = globalThis.IDSFileInterception;
 const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
 const framePageUrls = new Map();
 const frameGenerations = new Map();
@@ -18,6 +19,11 @@ extensionApi.runtime.onInstalled.addListener(async () => {
     id: "quick-download-stratum",
     title: "Quick Download with I-DS",
     contexts: ["link", "video", "audio"]
+  });
+  extensionApi.contextMenus.create({
+    id: "download-file-i-ds",
+    title: "Download file with I-DS",
+    contexts: ["link"]
   });
   extensionApi.contextMenus.create({
     id: "download-options-stratum",
@@ -51,7 +57,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  const timeoutId = setTimeout(() => controller.abort(), 9000);
   try {
     const response = await fetch(DESKTOP_ENDPOINT, {
       method: "POST",
@@ -61,6 +67,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
       },
       body: JSON.stringify({
         url: safeUrl.href, action,
+        fileName: handoff.fileName || "",
         sourcePage: handoff.sourcePage || "",
         contentType: handoff.contentType || "",
         requestContext: handoff.requestContext || {}
@@ -235,7 +242,8 @@ function promoteQuarantinedEvidence(tabId, frameId, documentGeneration, playerId
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
   const actions = {
     "quick-download-stratum": "quick_download",
-    "download-options-stratum": "download_with_options"
+    "download-options-stratum": "download_with_options",
+    "download-file-i-ds": "http_download"
   };
   if (!actions[info.menuItemId]) {
     return;
@@ -374,4 +382,73 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
       evidence: details.type === "main_frame" ? "webRequest-main-frame" : "webRequest-response"
     }, details.tabId, frameId);
   }, { urls: ["http://*/*", "https://*/*"] }, ["responseHeaders"]);
+}
+
+
+// Phase 2B: opt-in native browser handoff. On any failure Chrome keeps its job.
+if (extensionApi.downloads && extensionApi.downloads.onCreated && fileInterceptApi) {
+  const PENDING_IDS = "iDsPausedNativeDownloadIds";
+  let pendingWrite = Promise.resolve();
+
+  function rememberPaused(id, add) {
+    pendingWrite = pendingWrite.catch(() => {}).then(async () => {
+      const state = await readLocalStorage([PENDING_IDS]);
+      const list = Array.isArray(state[PENDING_IDS]) ? state[PENDING_IDS].filter(Number.isInteger) : [];
+      const next = add ? Array.from(new Set([...list, id])).slice(-100) : list.filter((value) => value !== id);
+      await extensionApi.storage.local.set({ [PENDING_IDS]: next });
+    });
+    return pendingWrite;
+  }
+
+  async function findNativeDownload(id) {
+    const records = await extensionApi.downloads.search({ id });
+    return Array.isArray(records) ? records[0] : null;
+  }
+
+  async function recoverPausedNativeDownloads() {
+    const values = await readLocalStorage([PENDING_IDS]);
+    const ids = Array.isArray(values[PENDING_IDS]) ? values[PENDING_IDS] : [];
+    for (const id of ids) {
+      try {
+        const item = await findNativeDownload(id);
+        if (item && item.state === "in_progress" && item.paused) {
+          await extensionApi.downloads.resume(id);
+        }
+      } catch (error) {
+        // A removed or interrupted native job cannot be resumed.
+      } finally {
+        await rememberPaused(id, false);
+      }
+    }
+  }
+
+  if (extensionApi.runtime.onStartup) {
+    extensionApi.runtime.onStartup.addListener(() => { recoverPausedNativeDownloads().catch(() => {}); });
+  }
+
+  extensionApi.downloads.onCreated.addListener(async (item) => {
+    if (!fileInterceptApi.eligible(item)) return;
+    try {
+      const options = await readLocalStorage(["interceptGeneralDownloads"]);
+      if (options.interceptGeneralDownloads !== true) return;
+      const result = await fileInterceptApi.transfer(item, {
+        pause: (id) => extensionApi.downloads.pause(id),
+        resume: (id) => extensionApi.downloads.resume(id),
+        cancel: (id) => extensionApi.downloads.cancel(id),
+        isPaused: async (id) => {
+          const current = await findNativeDownload(id);
+          return Boolean(current && current.state === "in_progress" && current.paused);
+        },
+        remember: rememberPaused,
+        send: (url, fileName) => sendToDesktopApp(url, "http_download", { fileName }),
+      });
+      if (result.status === "desktop") {
+        await showResultInTab(item.tabId, { success: true, message: "File transferred to I-DS." });
+      } else if (result.status === "native") {
+        await showResultInTab(item.tabId, { success: false, message: "I-DS handoff unavailable. Chrome download resumed." });
+      }
+    } catch (error) {
+      // The native browser job was never cancelled on this path.
+    }
+  });
 }

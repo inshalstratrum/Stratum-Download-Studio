@@ -20,12 +20,15 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from stratum_dependency_policy import controlled_yt_dlp_options, load_controlled_yt_dlp
+from ids_http_qt import FileDownloadThread
+from ids_http_engine import check_public_url, FileTransferError, safe_file_name
+from ids_handoff import HandoffReceipt
 
 yt_dlp = load_controlled_yt_dlp()
 
 APP_NAME = "I-DS | I.os Download Support"
 BROWSER_BRIDGE_PORT = 18765
-EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
+EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options', 'http_download'}
 DESKTOP_BROWSER_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
 MAX_OPERATIONAL_URL = 8192
@@ -96,7 +99,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSystemTrayIcon, QMenu, QStyle, QSpinBox, QVBoxLayout,
     QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem,
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
-    QWidget, QGridLayout, QCheckBox, QTextEdit
+    QWidget, QGridLayout, QCheckBox, QTextEdit, QInputDialog
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices, QCursor
@@ -648,7 +651,14 @@ def validate_request(headers, rfile, runtime):
     except OSError:
         return 500, b'{"error": "Unable to persist browser pairing"}'
 
-    return 200, {'url': url, 'action': action, 'context': handoff}
+    file_name_hint = data.get('fileName', '')
+    if not isinstance(file_name_hint, str) or len(file_name_hint) > 240:
+        return 400, b'{"error": "Invalid file name hint"}'
+    result = {'url': url, 'action': action, 'context': handoff}
+    # Keep historical response contracts byte-for-byte compatible for media.
+    if action == 'http_download':
+        result['file_name_hint'] = safe_file_name(file_name_hint) if file_name_hint else ''
+    return 200, result
 
 
 def recorded_save_directory(download_record):
@@ -1137,6 +1147,7 @@ class DownloadJob:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec='seconds'))
     started_at: str = ''
     completed_at: str = ''
+    file_name_hint: str = ''
 
     def to_dict(self):
         payload = asdict(self)
@@ -1541,6 +1552,21 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
         status_code, result = validate_request(self.headers, self.rfile, self.server.app_config)
 
+        if status_code == 200 and result['action'] == 'http_download':
+            receipt = HandoffReceipt()
+            self.server.file_signal.emit(
+                result['url'], result['context'], result['file_name_hint'], receipt
+            )
+            # Do not acknowledge until Qt has actually accepted the local job.
+            accepted = receipt.wait(5)
+            self.send_response(200 if accepted else 503)
+            self.send_cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"success"}' if accepted else
+                             b'{"error":"Desktop did not accept file handoff"}')
+            return
+
         self.send_response(status_code); self.send_cors_headers()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -1556,6 +1582,7 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
 class ServerThread(QThread):
     download_requested = pyqtSignal(str, str, dict)
+    file_requested = pyqtSignal(str, dict, str, object)
     failed = pyqtSignal(str)
     def __init__(self, app_config):
         super().__init__()
@@ -1568,6 +1595,7 @@ class ServerThread(QThread):
             return
         self.httpd.app_config = self.app_config
         self.httpd.url_signal = self.download_requested
+        self.httpd.file_signal = self.file_requested
         self.httpd.serve_forever()
     def stop(self):
         if hasattr(self, 'httpd'):
@@ -3034,6 +3062,15 @@ class StratrumDownloadStudio(QMainWindow):
         event.ignore(); self.hide()
 
     def force_quit(self):
+        # Keep resumable HTTP partials intact instead of destroying a live QThread.
+        for record in self.downloads:
+            worker = record.get('thread')
+            if isinstance(worker, FileDownloadThread) and worker.isRunning():
+                worker.paused = True
+                worker.wait(2500)
+                if worker.isRunning():
+                    QMessageBox.warning(self, "File Download", "A file connection is still stopping. Your partial download is preserved; please use Exit again after it stops.")
+                    return
         self.persist_ui_preferences()
         self.save_downloads_to_file(wait=True)
         self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()
@@ -3149,7 +3186,8 @@ class StratrumDownloadStudio(QMainWindow):
             source = sanitize_source_url(job.source_url); source_item = QTableWidgetItem(source); source_item.setToolTip(source); self.table.setItem(row, 7, source_item)
             self.downloads.append({
                 'id': job.job_id, 'url': job.source_url, 'outtmpl': str(Path(job.save_dir) / f'%(title)s [%(id)s]-{job.job_id[:8]}.%(ext)s'),
-                'save_dir': job.save_dir, 'format': build_format_selector(job.requested_format, job.requested_resolution),
+                'save_dir': job.save_dir, 'format': ('FILE' if job.requested_format == 'FILE' else
+                    build_format_selector(job.requested_format, job.requested_resolution)),
                 'ext': job.requested_format, 'thread': None, 'row': row, 'final_path': job.final_output_path,
                 'converted_output_path': '', 'requested_resolution': job.requested_resolution, 'metadata': {}, 'job': job,
             })
@@ -3173,7 +3211,8 @@ class StratrumDownloadStudio(QMainWindow):
     def init_ui(self):
         menubar = self.menuBar()
         tasks_menu = menubar.addMenu("Tasks")
-        tasks_menu.addAction("Add new download").triggered.connect(lambda: self.open_add_dialog(""))
+        tasks_menu.addAction("Add new media download").triggered.connect(lambda: self.open_add_dialog(""))
+        tasks_menu.addAction("Download file (PDF / ZIP / installer)...").triggered.connect(self.open_file_dialog)
         tasks_menu.addAction("Convert local media...").triggered.connect(self.open_local_converter)
         batch_action = tasks_menu.addAction("Batch Download (Phase 2B)"); batch_action.setEnabled(False)
         batch_action.setToolTip("Batch input is deferred to Phase 2B.")
@@ -3221,6 +3260,8 @@ class StratrumDownloadStudio(QMainWindow):
         icon = lambda kind: self.style().standardIcon(kind)
         self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_ArrowDown), "Add URL").triggered.connect(
             lambda: self.open_add_dialog(""))
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileIcon), "File Download").triggered.connect(
+            self.open_file_dialog)
         self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileDialogContentsView), "Converter").triggered.connect(
             self.open_local_converter)
         self.toolbar_resume_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPlay), "Resume")
@@ -3326,10 +3367,10 @@ class StratrumDownloadStudio(QMainWindow):
         return capabilities
 
     def show_quick_start(self):
-        QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
+        QMessageBox.information(self, "Quick Start", "Use Add URL for video/audio. Use File Download for PDF, ZIP, installers and other direct HTTP/HTTPS files. You can pause, resume and choose a save folder.")
 
     def show_supported_sites(self):
-        QMessageBox.information(self, "Supported Sites", "I-DS uses yt-dlp extractors for supported media from HTTP/HTTPS sites. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
+        QMessageBox.information(self, "Supported Sites", "Video and audio use supported yt-dlp extractors. General files use the direct HTTP(S) downloader. Website authorization, redirects and supported formats vary; DRM is unsupported.")
 
     def show_about(self):
         QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME}\nTool by InShaLIve.os\n\nMedia downloads and conversions are supported. General browser file interception is in development.")
@@ -3358,12 +3399,12 @@ class StratrumDownloadStudio(QMainWindow):
             QMessageBox.information(self, "Properties", "Select a download job first.")
             return
         job = record['job']
-        editable = job_capabilities(job)['edit']
+        editable = job_capabilities(job)['edit'] and job.requested_format != 'FILE'
         dialog = QDialog(self); dialog.setWindowTitle("Download Properties"); dialog.setMinimumWidth(620)
         layout = QVBoxLayout(dialog); form = QFormLayout()
         source_field = QLineEdit(sanitize_source_url(job.original_source_url)); source_field.setReadOnly(True)
         folder_field = QLineEdit(job.save_dir); folder_field.setEnabled(editable)
-        format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES)); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
+        format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES) + (['FILE'] if job.requested_format == 'FILE' else [])); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
         resolution_combo = QComboBox(); resolution_combo.addItem("Best available", None)
         for height, label in RESOLUTION_LABELS.items(): resolution_combo.addItem(label, height)
         idx = resolution_combo.findData(job.requested_resolution); resolution_combo.setCurrentIndex(max(0, idx)); resolution_combo.setEnabled(editable and output_profile(job.requested_format).media_kind == 'video')
@@ -3589,6 +3630,7 @@ class StratrumDownloadStudio(QMainWindow):
     def init_server(self):
         self.server_thread = ServerThread(self.app_config)
         self.server_thread.download_requested.connect(self.handle_browser_request)
+        self.server_thread.file_requested.connect(self.handle_file_handoff)
         self.server_thread.failed.connect(self.browser_bridge_failed)
         self.server_thread.start()
 
@@ -3651,6 +3693,78 @@ class StratrumDownloadStudio(QMainWindow):
             final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
             if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata, dialog.request_context_for(final_url))
 
+    def open_file_dialog(self):
+        url, accepted = QInputDialog.getText(self, "Download a File", "HTTP/HTTPS file URL:")
+        if not accepted or not url.strip():
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose where to save the file",
+            self.quick_download_defaults()[0] if self.quick_download_defaults_valid() else str(Path.home())
+        )
+        if folder and not self.start_http_download(url.strip(), folder, show_popup=True):
+            QMessageBox.warning(self, "File Download", "The URL or save folder is not valid. Use an HTTP/HTTPS file link and an existing folder.")
+
+    def handle_file_handoff(self, url, request_context, file_name_hint, receipt):
+        # Queued Qt slot executes on the GUI thread. A timed-out request is
+        # rejected atomically and must not create a late/duplicate file job.
+        receipt.resolve(lambda: self.start_http_download(url, filename_hint=file_name_hint))
+
+    def start_http_download(self, url, save_dir=None, filename_hint="", show_popup=False):
+        valid, _ = validate_url(url)
+        if not valid:
+            return False
+        if save_dir is None:
+            try:
+                save_dir = self.quick_download_defaults()[0]
+            except ValueError:
+                return False
+        try:
+            folder = Path(save_dir).expanduser().resolve(strict=True)
+        except (OSError, ValueError):
+            return False
+        if not folder.is_dir():
+            return False
+        job_id = uuid.uuid4().hex
+        hint = safe_file_name(filename_hint) if filename_hint else ''
+        job = DownloadJob(
+            job_id=job_id, source_url=url, save_dir=str(folder),
+            requested_format='FILE', file_name_hint=hint, state=JobState.QUEUED.value,
+        )
+        self.download_manager.add_job(job)
+        self.app_config.add_recent_folder(folder)
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setFormat("Queued")
+        self.table.setItem(row, 0, QTableWidgetItem(hint or "File download"))
+        self.table.setItem(row, 1, QTableWidgetItem("0"))
+        self.table.setItem(row, 2, QTableWidgetItem("Calculating"))
+        self.table.setCellWidget(row, 3, bar)
+        self.table.setItem(row, 4, QTableWidgetItem("--:--"))
+        self.table.setItem(row, 5, QTableWidgetItem("0 B/s"))
+        self.table.setItem(row, 6, QTableWidgetItem(datetime.now().strftime("%b %d %H:%M:%S %Y")))
+        source_display = sanitize_source_url(url)
+        source_item = QTableWidgetItem(source_display)
+        source_item.setToolTip(source_display)
+        self.table.setItem(row, 7, source_item)
+        record = {
+            'id': job_id, 'url': url, 'outtmpl': str(folder / (hint or 'download.bin')),
+            'save_dir': str(folder), 'format': 'FILE', 'ext': 'FILE', 'thread': None,
+            'row': row, 'final_path': '', 'converted_output_path': '',
+            'requested_resolution': None, 'metadata': {}, 'job': job,
+        }
+        self.downloads.append(record)
+        if show_popup:
+            popup = DownloadProgressPopup(hint or "File download", source_display, self, job_id, self.app_config)
+            popup.pause_requested.connect(self.pause_job)
+            popup.resume_requested.connect(self.resume_job)
+            popup.cancel_requested.connect(self.cancel_job)
+            popup.speed_limit_changed.connect(self.set_job_speed_limit)
+            popup.set_details("General HTTP file download. Existing files will not be overwritten.")
+            self.popups[job_id] = popup
+            popup.show()
+        self.start_queued_jobs()
+        return True
+
     def start_new_download(self, url, save_dir, requested_height, target_ext, metadata=None, request_context=None):
         download_id = uuid.uuid4().hex
         save_path = Path(save_dir).expanduser().resolve()
@@ -3702,6 +3816,18 @@ class StratrumDownloadStudio(QMainWindow):
         self.start_queued_jobs()
 
     def create_download_thread(self, record):
+        if record['job'].requested_format == 'FILE':
+            thread = FileDownloadThread(
+                record['id'], record['url'], record['save_dir'],
+                record['job'].file_name_hint, self.app_config.speed_limit_bps,
+            )
+            thread.progress.connect(self.update_progress)
+            thread.status.connect(self.update_status)
+            thread.result_ready.connect(self.download_finished)
+            thread.finished.connect(lambda id=record['id'], worker=thread: self.file_thread_stopped(id, worker))
+            thread.size_updated.connect(self.update_size)
+            thread.metrics.connect(self.update_job_metrics)
+            return thread
         thread = DownloadThread(
             record['id'], record['url'], record['outtmpl'], record['format'], record['ext'],
             record.get('requested_resolution'), record.get('metadata'), record['save_dir'],
@@ -3727,6 +3853,13 @@ class StratrumDownloadStudio(QMainWindow):
             if pending['id'] in self.popups:
                 self.popups[pending['id']].set_job_state(JobState.RESOLVING.value)
             thread.start()
+
+    def file_thread_stopped(self, job_id, worker):
+        record = self.get_download_by_id(job_id)
+        if record and record.get('thread') is worker:
+            record['thread'] = None
+            if record['job'].state == JobState.QUEUED.value:
+                self.start_queued_jobs()
 
     def get_download_by_id(self, id): return next((d for d in self.downloads if d['id'] == id), None)
 
@@ -3766,7 +3899,7 @@ class StratrumDownloadStudio(QMainWindow):
                 state_map[status] = JobState.DOWNLOADING
             if status in state_map and id in self.download_manager.jobs:
                 self.download_manager.set_state(id, state_map[status])
-            if status == 'Paused':
+            if status == 'Paused' and d['job'].requested_format != 'FILE':
                 d['thread'] = None
             if id in self.popups:
                 self.popups[id].set_job_state(state_map.get(status, status).value if isinstance(state_map.get(status), JobState) else status)

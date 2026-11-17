@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
   "name": "I-DS Download Support",
-  "version": "1.3",
+  "version": "1.4",
   "description": "Media detection and right-click downloads with I-DS by InShaLIve.os",
   "icons": { "16": "icons/i-ds-16.png", "32": "icons/i-ds-32.png", "48": "icons/i-ds-48.png", "128": "icons/i-ds-128.png" },
   "action": { "default_title": "I-DS Browser Settings", "default_icon": { "16": "icons/i-ds-16.png", "32": "icons/i-ds-32.png" } },
-  "permissions": ["contextMenus", "activeTab", "storage", "webRequest"],
+  "permissions": ["contextMenus", "activeTab", "storage", "webRequest", "downloads"],
   "host_permissions": ["http://127.0.0.1:18765/*", "http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"

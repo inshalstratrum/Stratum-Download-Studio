@@ -75,7 +75,17 @@
       <div class="setting">
         <input type="checkbox" id="show-media-buttons" checked>
         <label for="show-media-buttons">Show a download button on detected media
-          <small>Works on supported pages. Use the right-click menu for links. Automatic interception of ordinary browser files is not yet supported.</small>
+          <small>Works on supported pages. Use the right-click menu for links. Automatic interception of ordinary browser files is controlled separately below.</small>
+        </label>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="files-heading">
+      <h2 id="files-heading">General file downloads</h2>
+      <p class="muted">You can already right-click a link and choose <strong>Download file with I-DS</strong>.</p>
+      <div class="setting">
+        <input type="checkbox" id="intercept-general-files">
+        <label for="intercept-general-files">Automatically use I-DS for supported browser files
+          <small>Off by default. When enabled, I-DS pauses Chrome's PDF, ZIP, installer and other supported file downloads, and cancels Chrome's copy only after desktop acceptance. Failed handoffs resume in Chrome. Files that require browser cookies may still fail after acceptance; turn this off for those sites.</small>
         </label>
       </div>
     </section>

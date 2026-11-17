@@ -859,7 +859,7 @@ def test_firefox_manifest_has_stable_id_and_background_script():
     manifest = json.loads(Path('firefox_extension/manifest.json').read_text(encoding='utf-8'))
     gecko = manifest['browser_specific_settings']['gecko']
     assert manifest['manifest_version'] == 3
-    assert manifest['background'] == {'scripts': ['media_candidates.js', 'background.js']}
+    assert manifest['background'] == {'scripts': ['media_candidates.js', 'file_interception.js', 'background.js']}
     assert gecko['id'] == 'stratrum-download-studio@stratrum.local'
     assert gecko['data_collection_permissions']['required'] == ['none']
 
@@ -1917,7 +1917,7 @@ def test_extension_action_dropdown_removed_and_reload_only_reads_saved_token():
     load_handler = script.split('DOMContentLoaded', 1)[1].split('});', 1)[0]
     assert 'primary-action' not in html and 'primaryAction' not in script
     assert html.count('id="token"') == 1
-    assert 'storage.local.get(["authToken", "showMediaButtons"])' in load_handler
+    assert 'storage.local.get(["authToken", "showMediaButtons", "interceptGeneralDownloads"])' in load_handler
     assert 'storage.local.set' not in load_handler and 'storage.local.remove' not in load_handler
 
 

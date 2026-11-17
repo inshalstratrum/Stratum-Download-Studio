@@ -30,8 +30,8 @@ def test_chrome_firefox_icons_and_legacy_pairing_id():
     for manifest in manifests:
         assert manifest["name"] == "I-DS Download Support"
         assert manifest["manifest_version"] == 3
-        assert manifest["version"] == "1.3"
-        assert "downloads" not in manifest["permissions"]
+        assert manifest["version"] == "1.4"
+        assert "downloads" in manifest["permissions"]
         assert manifest["action"]["default_title"] == "I-DS Browser Settings"
         for size, relative_path in manifest["icons"].items():
             path = EXTENSION / relative_path
@@ -46,7 +46,7 @@ def test_options_keep_working_controls_and_accessibility():
         assert f'id="{control_id}"' in html
     for contract in ('role="status"', 'aria-live="polite"', 'for="token"', ':focus-visible', 'prefers-reduced-motion'):
         assert contract in html
-    assert "Automatic interception of ordinary browser files is not yet supported" in html
+    assert "Automatically use I-DS for supported browser files" in html
 
 
 def test_extension_package_includes_icons_and_brand():

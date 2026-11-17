@@ -176,7 +176,7 @@ def test_manifest_frame_and_webrequest_detection_contract():
         assert "webRequest" in manifest["permissions"]
         assert "http://*/*" in manifest["host_permissions"]
         assert "https://*/*" in manifest["host_permissions"]
-    assert firefox["background"]["scripts"] == ["media_candidates.js", "background.js"]
+    assert firefox["background"]["scripts"] == ["media_candidates.js", "file_interception.js", "background.js"]
 
 
 def test_response_observation_is_non_blocking_and_private():
