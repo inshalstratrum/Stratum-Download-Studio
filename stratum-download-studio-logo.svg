@@ -1,5 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <rect width="256" height="256" rx="48" fill="#12365b"/>
-  <path d="M128 42v102m0 0 42-42m-42 42-42-42M60 160v34c0 12 10 22 22 22h92c12 0 22-10 22-22v-34" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="20"/>
-  <circle cx="198" cy="58" r="18" fill="#43d19e"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="I-DS download mark">
+  <title>I-DS — I.os Download Support</title>
+  <defs>
+    <linearGradient id="panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#132440"/>
+      <stop offset="1" stop-color="#22506b"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="49" fill="url(#panel)"/>
+  <path d="M43 55h24v146H43zM89 53h51c54 0 87 29 87 75 0 47-33 75-87 75H89zm33 32v86h18c33 0 52-16 52-43 0-27-19-43-52-43z" fill="#fff" fill-rule="evenodd"/>
+  <path d="M157 103v48m-17-17 17 17 17-17" fill="none" stroke="#37d6b4" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"/>
 </svg>

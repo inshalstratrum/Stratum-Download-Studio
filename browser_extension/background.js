@@ -10,21 +10,26 @@ const frameGenerations = new Map();
 const blockedFrames = new Set();
 const playerRegistry = new candidateApi.PlayerRegistry({ maxOwners: 400, ttlMs: 2 * 60 * 1000, leaseMs: 15 * 1000 });
 const quarantineStore = new candidateApi.QuarantineStore({ maxItems: 100, ttlMs: 30 * 1000 });
-const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
+const DESKTOP_ENDPOINT = "http://127.0.0.1:18765/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
   await extensionApi.contextMenus.removeAll();
   extensionApi.contextMenus.create({
     id: "quick-download-stratum",
-    title: "Quick Download with Stratum Download Studio",
+    title: "Quick Download with I-DS",
     contexts: ["link", "video", "audio"]
   });
   extensionApi.contextMenus.create({
     id: "download-options-stratum",
-    title: "Download with Options in Stratum Download Studio",
+    title: "Download with Options in I-DS",
     contexts: ["link", "video", "audio"]
   });
 });
+
+// The toolbar mark opens pairing/settings; it never starts a download by itself.
+if (extensionApi.action && extensionApi.action.onClicked) {
+  extensionApi.action.onClicked.addListener(() => extensionApi.runtime.openOptionsPage());
+}
 
 async function readLocalStorage(keys) {
   return await extensionApi.storage.local.get(keys);
@@ -33,7 +38,7 @@ async function readLocalStorage(keys) {
 async function sendToDesktopApp(url, action, handoff = {}) {
   const safeUrl = candidateApi.safeUrl(url);
   if (!safeUrl) {
-    return { success: false, code: "invalid_url", message: "Stratum rejected an unsafe or unsupported URL." };
+    return { success: false, code: "invalid_url", message: "I-DS rejected an unsupported URL." };
   }
   const stored = await readLocalStorage(["authToken"]);
   const token = stored.authToken || "";
@@ -41,7 +46,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     return {
       success: false,
       code: "missing_token",
-      message: "Open Stratum extension Options and save the desktop authentication token."
+      message: "Open I-DS extension Options and save the desktop pairing token."
     };
   }
 
@@ -64,7 +69,17 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     });
 
     if (response.ok) {
-      return { success: true, message: "Sent to Stratum Download Studio." };
+      // A different local service can occupy a port. Only trust our expected acknowledgment.
+      let reply = null;
+      try {
+        reply = await response.json();
+      } catch (error) {
+        return { success: false, code: "invalid_bridge_response", message: "The local endpoint is not responding as I-DS. Restart the desktop app." };
+      }
+      if (reply && reply.status === "success") {
+        return { success: true, message: "Sent to I-DS." };
+      }
+      return { success: false, code: "invalid_bridge_response", message: "The local endpoint did not confirm an I-DS download." };
     }
     if (response.status === 403) {
       return {
@@ -89,7 +104,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     return {
       success: false,
       code: "desktop_unavailable",
-      message: "Stratum Download Studio is unavailable. Start the desktop app and try again."
+      message: "I-DS is unavailable. Start the desktop app and try again."
     };
   } finally {
     clearTimeout(timeoutId);

@@ -1,3 +1,18 @@
+# Current State — I-DS foundation (2026-11-17)
+
+- **Current working branch:** `feature/i-ds-foundation`, based on verified local repair `1f48ff0` (the published `main` was still `e2274df` during this audit).
+- **Brand:** Visible desktop and Chrome/Edge/Firefox branding is **I-DS — I.os Download Support**, **Tool by InShaLIve.os**. Download-arrow-in-D SVG, Windows icon and browser icons added. Original internal Stratum filenames, Firefox Gecko add-on ID, desktop config root and extension message/pairing keys remain unchanged for compatibility.
+- **Browser bridge fix:** Docker Desktop occupied `127.0.0.1:8000`. I-DS now binds `127.0.0.1:18765` consistently across server, Chrome and Firefox manifests, and extension requests. A new connection-failure signal reports port issues. The extension requires an actual JSON success acknowledgment instead of treating any HTTP 200 as successful.
+- **UI:** Refreshed existing PyQt6 Fusion styling without framework migration, improved font size and tray/window icon; redesigned Chrome extension settings with mobile layout, keyboard focus, status feedback and preserved pairing/token controls.
+- **Packages/community:** Added `START I-DS.cmd` wrapper, contribution guide, bug/feature issue templates, honest README and extension guide; packaging script now includes required icons and produces `i-ds-chrome.zip`, `i-ds-edge.zip`, and `i-ds-firefox.zip`. Generated ZIP contents were inspected. These are development packages, not store-signed releases or an installed EXE.
+- **Verified final gate:** Full Python pytest suite **299/299 passed**, JavaScript media-candidate suite **47/47 passed**, modified JS and Python syntax, manifest JSON and `git diff --check` passed. Native Windows Qt synthetic GUI startup/screenshot checked brand, eight columns, ten toolbar actions and icon. Chrome Playwright desktop 1120×850 and mobile 390×844 checked token save/clear/error/show, media preference, no JS errors or horizontal overflow. The real synthetic loopback bridge accepted authenticated POST, returned JSON success, rejected invalid token (401), signaled the request and shut down cleanly. Local extension ZIP manifests and icons inspected after generation; ZIPs saved outside the repository.
+- **Not verified yet:** Actual end-user Chrome extension installed and paired with desktop, live YouTube/site extraction, reliable ordinary HTTP files, loss/reconnect/partial-file recovery, signed installer and production manual acceptance.
+- **Open product phases:** 2A.7E history/startup/foreground; 2A.7F resizing; 2B opt-in ordinary browser-file interception with truthful acknowledgment/fallback and real general HTTP downloader; 2B.1 resume/reconnect/queue reliability. Do not misrepresent these as released.
+- **Next work:** Test real browser handoff and YouTube, implement general-file handling without losing native browser downloads on failed handoff, exercise resume/cancel/queue and real FFmpeg, test UI, create user-friendly Windows release after all gates pass.
+- **Governance:** Work from this branch and repository `AGENTS.md`; do not overwrite unrelated scratch work, merge without review, or claim that unpublished features are complete.
+
+---
+
 # Current State — Repair review branch (2026-10-20)
 
 - **Branch:** `repair/output-ownership-cancellation` (forked from `main@e2274df`, preserving the previous uncommitted Antigravity repair edits).

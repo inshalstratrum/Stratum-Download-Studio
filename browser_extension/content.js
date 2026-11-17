@@ -304,7 +304,7 @@ async function requestDownload(candidate, button) {
     showStatus(result && result.message ? result.message : "The extension did not receive a response.", result && result.success ? "success" : "error");
     button.textContent = result && result.success ? "Sent ✓" : originalText;
   } catch (error) {
-    showStatus("Stratum extension communication failed. Open extension Options and try again.");
+    showStatus("I-DS extension communication failed. Open extension Options and try again.");
     button.textContent = originalText;
   } finally {
     button.disabled = false;
@@ -373,7 +373,7 @@ async function handleControlClick(element, button) {
       }
     }
   } catch (error) {
-    showStatus("Stratum could not load detected media choices.");
+    showStatus("I-DS could not load detected media choices.");
     button.textContent = originalText;
     return;
   }
@@ -428,8 +428,8 @@ function attachControl(element, options = {}) {
   elementSourceKeys.set(element, sourceFingerprint(element));
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = "↓ Stratum";
-  button.setAttribute("aria-label", "Choose detected media for Stratum Download Studio");
+  button.textContent = "↓ I-DS";
+  button.setAttribute("aria-label", "Choose detected media for I-DS");
   Object.assign(button.style, {
     position: "fixed", zIndex: "2147483646", padding: "5px 9px", border: "1px solid #ffffff",
     borderRadius: "5px", color: "#ffffff", background: "#0067b8", boxShadow: "0 2px 8px rgba(0,0,0,.35)",

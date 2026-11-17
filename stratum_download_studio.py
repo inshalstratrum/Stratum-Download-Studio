@@ -23,7 +23,8 @@ from stratum_dependency_policy import controlled_yt_dlp_options, load_controlled
 
 yt_dlp = load_controlled_yt_dlp()
 
-APP_NAME = "Stratum Download Studio"
+APP_NAME = "I-DS | I.os Download Support"
+BROWSER_BRIDGE_PORT = 18765
 EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
 DESKTOP_BROWSER_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
@@ -104,19 +105,45 @@ from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServ
 # MODERN UI STYLESHEET
 # ==========================================
 MODERN_STYLE = """
-QMainWindow, QDialog { background-color: #f0f0f0; color: #000000; }
-QTableWidget { background-color: #ffffff; border: 1px solid #a0a0a0; gridline-color: #e0e0e0; color: #000000; }
-QTableWidget::item:selected { background-color: #0078d7; color: #ffffff; }
-QHeaderView::section { background-color: #f0f0f0; padding: 4px; border: 1px solid #a0a0a0; color: #000000; }
-QPushButton { background-color: #e1e1e1; color: black; border-radius: 2px; padding: 5px 15px; border: 1px solid #adadad; }
-QPushButton:hover { background-color: #e5f1fb; border: 1px solid #0078d7; }
-QPushButton:pressed { background-color: #cce4f7; border: 1px solid #005499; }
-QLineEdit, QComboBox { padding: 4px; border: 1px solid #a0a0a0; background-color: white; color: black; }
-QProgressBar { text-align: center; border: 1px solid #a0a0a0; background-color: #e6e6e6; color: black; }
-QProgressBar::chunk { background-color: #06b025; }
-QTreeWidget { border: 1px solid #a0a0a0; background-color: white; color: black; }
-QTreeWidget::item:selected { background-color: #0078d7; color: white; }
-QTabWidget::pane { border: 1px solid #a0a0a0; background: #f0f0f0; }
+QMainWindow, QDialog { background: #f5f8fc; color: #172b45; }
+QLabel, QGroupBox, QCheckBox { color: #172b45; }
+QMenuBar, QMenu, QToolBar { background: #ffffff; color: #172b45; border: none; }
+QMenuBar { border-bottom: 1px solid #dce5ef; padding: 3px 7px; }
+QMenuBar::item { padding: 7px 10px; border-radius: 6px; }
+QMenuBar::item:selected, QMenu::item:selected { background: #e5f3fb; color: #133d61; }
+QMenu::item { padding: 7px 26px; }
+QToolBar { spacing: 5px; padding: 8px; border-bottom: 1px solid #dce5ef; }
+QToolButton { min-height: 42px; min-width: 56px; border: 1px solid transparent;
+              border-radius: 8px; padding: 7px 9px; color: #172b45; background: transparent; }
+QToolButton:hover { background: #e6f3fc; border-color: #c2ddec; }
+QToolButton:pressed, QToolButton:checked { background: #d5eaf7; }
+QToolButton:focus { border: 2px solid #2865da; }
+QTableWidget, QTreeWidget { background: #ffffff; color: #172b45; border: 1px solid #dce5ef;
+                           border-radius: 8px; selection-background-color: #d6f0ef; selection-color: #153d53; }
+QTableWidget { gridline-color: #ebeff5; alternate-background-color: #f9fbfd; }
+QTableWidget::item { padding: 5px; }
+QTableWidget::item:selected, QTreeWidget::item:selected { background: #d6f0ef; color: #153d53; }
+QTreeWidget::item { padding: 7px 9px; }
+QTreeWidget::item:hover { background: #eef5fa; }
+QHeaderView::section { background: #edf3fa; color: #2a405a; padding: 9px 7px;
+                       border: none; border-right: 1px solid #dce5ef; font-weight: 600; }
+QSplitter::handle { background: #e4ebf4; width: 6px; }
+QSplitter::handle:hover { background: #8dc4d6; }
+QPushButton { background: #ffffff; color: #173954; border-radius: 8px;
+              padding: 9px 15px; min-height: 21px; border: 1px solid #bfd0e0; font-weight: 600; }
+QPushButton:hover { background: #e7f3fb; border-color: #569cc0; }
+QPushButton:pressed { background: #d5eaf7; }
+QPushButton:focus { border: 2px solid #2865da; }
+QPushButton:disabled { background: #edf1f5; color: #77899c; border-color: #dce4ed; }
+QLineEdit, QComboBox, QTextEdit, QSpinBox { padding: 8px; border: 1px solid #c5d4e3;
+              border-radius: 7px; background: #ffffff; color: #172b45; selection-background-color: #c4e9e5; }
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QSpinBox:focus { border: 2px solid #2865da; }
+QProgressBar { text-align: center; border: 1px solid #c4d5e2; border-radius: 6px;
+               background: #eaf0f7; color: #173954; min-height: 18px; font-weight: 600; }
+QProgressBar::chunk { background: #18aa93; border-radius: 5px; }
+QTabWidget::pane { border: 1px solid #dce5ef; border-radius: 8px; background: #ffffff; }
+QTabBar::tab { padding: 9px 15px; background: #eaf0f7; color: #42546b; }
+QTabBar::tab:selected { background: #ffffff; color: #163f63; }
 """
 
 def get_ffmpeg_path():
@@ -1514,7 +1541,9 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
         status_code, result = validate_request(self.headers, self.rfile, self.server.app_config)
 
-        self.send_response(status_code); self.send_cors_headers(); self.end_headers()
+        self.send_response(status_code); self.send_cors_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
 
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
@@ -1527,11 +1556,16 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
 class ServerThread(QThread):
     download_requested = pyqtSignal(str, str, dict)
+    failed = pyqtSignal(str)
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
     def run(self):
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), DownloadServerHandler)
+        try:
+            self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", BROWSER_BRIDGE_PORT), DownloadServerHandler)
+        except OSError:
+            self.failed.emit(f"Browser integration cannot start on 127.0.0.1:{BROWSER_BRIDGE_PORT}. Another app may be using the port.")
+            return
         self.httpd.app_config = self.app_config
         self.httpd.url_signal = self.download_requested
         self.httpd.serve_forever()
@@ -2946,7 +2980,10 @@ class StratrumDownloadStudio(QMainWindow):
 
     def init_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        icon_path = Path(__file__).resolve().parent / 'stratum-download-studio.ico'
+        icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
         self.tray_icon.setIcon(icon)
         self.setWindowIcon(icon)
 
@@ -3180,16 +3217,27 @@ class StratrumDownloadStudio(QMainWindow):
         self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(self.toolbar)
 
-        self.toolbar.addAction("➕\nAdd URL").triggered.connect(lambda: self.open_add_dialog(""))
-        self.toolbar.addAction("🎞\nConverter").triggered.connect(self.open_local_converter)
-        self.toolbar_resume_action = self.toolbar.addAction("▶\nResume"); self.toolbar_resume_action.triggered.connect(self.resume_download)
-        self.toolbar_pause_action = self.toolbar.addAction("⏸\nPause"); self.toolbar_pause_action.triggered.connect(self.pause_download)
-        self.toolbar_stop_action = self.toolbar.addAction("⏹\nCancel"); self.toolbar_stop_action.triggered.connect(self.cancel_selected_download)
-        self.toolbar.addAction("🛑\nPause All").triggered.connect(self.pause_all_downloads)
-        self.toolbar_delete_action = self.toolbar.addAction("❌\nDelete"); self.toolbar_delete_action.triggered.connect(self.delete_download)
-        self.toolbar.addAction("🗑\nClear Done").triggered.connect(self.delete_completed)
-        self.toolbar.addAction("⚙\nOptions").triggered.connect(lambda: self.show_dummy_msg("Options"))
-        self.toolbar.addAction("🔗\nShare").triggered.connect(self.share_link)
+        # Native Qt icons avoid missing-emoji boxes on Windows and expose separate text labels.
+        icon = lambda kind: self.style().standardIcon(kind)
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_ArrowDown), "Add URL").triggered.connect(
+            lambda: self.open_add_dialog(""))
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileDialogContentsView), "Converter").triggered.connect(
+            self.open_local_converter)
+        self.toolbar_resume_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPlay), "Resume")
+        self.toolbar_resume_action.triggered.connect(self.resume_download)
+        self.toolbar_pause_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPause), "Pause")
+        self.toolbar_pause_action.triggered.connect(self.pause_download)
+        self.toolbar_stop_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaStop), "Cancel")
+        self.toolbar_stop_action.triggered.connect(self.cancel_selected_download)
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPause), "Pause All").triggered.connect(
+            self.pause_all_downloads)
+        self.toolbar_delete_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_TrashIcon), "Delete")
+        self.toolbar_delete_action.triggered.connect(self.delete_download)
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_DialogResetButton), "Clear Done").triggered.connect(
+            self.delete_completed)
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "Options").triggered.connect(
+            lambda: self.show_dummy_msg("Options"))
+        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_DriveNetIcon), "Share").triggered.connect(self.share_link)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.splitter)
@@ -3281,10 +3329,10 @@ class StratrumDownloadStudio(QMainWindow):
         QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
 
     def show_supported_sites(self):
-        QMessageBox.information(self, "Supported Sites", "Stratum uses yt-dlp extractors for authorized HTTP/HTTPS media. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
+        QMessageBox.information(self, "Supported Sites", "I-DS uses yt-dlp extractors for supported media from HTTP/HTTPS sites. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
 
     def show_about(self):
-        QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME} — Phase 2A.6B media download foundation. Download only content you own or are authorized to save.")
+        QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME}\nTool by InShaLIve.os\n\nMedia downloads and conversions are supported. General browser file interception is in development.")
 
     def export_diagnostics(self):
         logs_dir = self.app_config.app_data_root / 'logs'
@@ -3541,7 +3589,12 @@ class StratrumDownloadStudio(QMainWindow):
     def init_server(self):
         self.server_thread = ServerThread(self.app_config)
         self.server_thread.download_requested.connect(self.handle_browser_request)
+        self.server_thread.failed.connect(self.browser_bridge_failed)
         self.server_thread.start()
+
+    def browser_bridge_failed(self, message):
+        self.statusBar().showMessage(message)
+        self.tray_icon.showMessage("I-DS Browser Connection", message, QSystemTrayIcon.MessageIcon.Warning, 6000)
 
     def handle_browser_request(self, url, action, request_context=None):
         if action not in EXTENSION_ACTIONS:
@@ -3949,7 +4002,7 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(list(argv) if argv is not None else sys.argv)
     app.setStyleSheet(MODERN_STYLE)
     app.setStyle("Fusion")
-    app.setFont(QFont("Segoe UI", 9))
+    app.setFont(QFont("Segoe UI", 10))
     window = StratrumDownloadStudio(runtime_config)
     window.show()
     return app.exec()

@@ -1682,14 +1682,16 @@ def test_phase_2a6b_preferences_persist_and_default_safely(tmp_path):
     assert restored.primary_browser_action == 'download_with_options' and restored.keep_completed_window_open is True
 
 
-def test_visible_active_branding_uses_stratum_and_legacy_security_names_remain():
+def test_visible_active_branding_uses_i_ds_and_legacy_security_names_remain():
     active = [Path('browser_extension/manifest.json'), Path('firefox_extension/manifest.json'),
               Path('browser_extension/options.html'), Path('browser_extension/background.js'), Path('browser_extension/content.js')]
     for path in active:
         text = path.read_text(encoding='utf-8')
-        assert 'Stratum Download Studio' in text or 'Stratum' in text
+        assert 'I-DS' in text
         assert 'Stratrum Download Studio' not in text
+    # Preserve the old header name while existing desktop/browser installations migrate.
     assert 'X-Stratrum-Auth' in Path('browser_extension/background.js').read_text(encoding='utf-8')
+    assert 'X-Stratrum-Auth' in Path('stratum_download_studio.py').read_text(encoding='utf-8')
 
 
 # Phase 2A.6B.1 desktop-owned browser mode
