@@ -2,7 +2,7 @@
 
 **Tool by InShaLIve.os**
 
-This is the unpacked Manifest V3 extension source for I-DS. It offers **right-click media/link handoff**, **supported video/audio detection**, and an **in-player download button**. Phase 2B beta adds a **default-off opt-in** for ordinary browser downloads (PDF, ZIP, installers, images and other known file types). The desktop must acknowledge queued file ownership before the extension cancels Chrome's paused copy.
+This is the unpacked Manifest V3 extension source for I-DS (development version **1.5**, with the shared Download-arrow-in-D logo and accessible settings). It offers **right-click media/link handoff**, **supported video/audio detection**, and an **in-player download button**. Phase 2B beta adds a **default-off opt-in** for ordinary browser downloads (PDF, ZIP, installers, images and other known file types). The desktop must acknowledge queued file ownership before the extension cancels Chrome's paused copy.
 
 ## Install for development
 

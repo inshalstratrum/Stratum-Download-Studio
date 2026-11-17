@@ -30,7 +30,7 @@ def test_chrome_firefox_icons_and_legacy_pairing_id():
     for manifest in manifests:
         assert manifest["name"] == "I-DS Download Support"
         assert manifest["manifest_version"] == 3
-        assert manifest["version"] == "1.4"
+        assert manifest["version"] == "1.5"
         assert "downloads" in manifest["permissions"]
         assert manifest["action"]["default_title"] == "I-DS Browser Settings"
         for size, relative_path in manifest["icons"].items():

@@ -1,3 +1,17 @@
+# Current State — I-DS interface refinement (2026-11-17)
+
+- **Branch:** `feature/i-ds-foundation`; continues `7d3a464` Phase 2B beta. Draft GitHub PR #1 remains open/unmerged. Existing `scratch/` is left untouched.
+- **Owner UX source:** [08 Interactive Interface UX Minimum Standards](https://drive.google.com/file/d/1bup0f-rSL2Dm7gxH-HWlfoTjIscsUXcY/view), local Modules 02 and 08, project `AGENTS.md` and [design contract](20_I_DS_INTERFACE_DESIGN.md). No framework migration or second active code agent.
+- **Desktop:** Added `ids_ui_components.py` with a coherent navy/teal QtSvg icon language and branded header, genuine empty/data views with working Media/Files/Convert actions, category icons, collapsible sidebar and compact/wide presets, saved text scale 100/115/130, live job-count labels and short footer state. Compact toolbar adapts to 760×480 and preserves all 11 actions. Existing media, file, queue, conversion and browser contracts preserved. Clear-done now refreshes the view and removes cleared records from manager state; local downloaded files are preserved.
+- **Brand:** Regenerated `stratum-download-studio-logo.svg`, Windows ICO and browser PNG icons (16/32/48/128) from the same authored SVG via `scripts/build_ids_brand_assets.py`. The code uses built-in QtSvg; Pillow is required only for the developer asset builder, not the app runtime. Browser extension manifests now use version **1.5** without changing extension IDs or pairing keys.
+- **Browser settings:** Same logo, clearer section icons, shorter text with expandable keyboard-accessible help, cleaner toggle panels, focus and contrasting state treatments. Automatic browser file takeover stays default OFF, with previous handoff logic untouched.
+- **Verified final gate:** **313/313 Python pytest** and **52/52 JavaScript tests passed**; Python/JS syntax, manifest JSON, `git diff --check` passed. Three Windows native screenshots inspected (1170×740, 800×545, minimum 760×480) including max 130% text, all toolbar actions, category width/collapse/reopen and real empty→data state. Chrome Playwright isolated page rendered at 1100px, 390px, 260px and 390px with simulated 200% zoom, with storage-based pairing and opt-in controls, keyboard-opened help, loaded logo, zero horizontal overflow and no JS errors. Impeccable detector returned **zero findings** after refining contrast/shadows. These are automated and rendered synthetic tests, not end-user acceptance.
+- **Extension development packages:** Chrome, Edge and Firefox v1.5 ZIPs produced and entries/manifests/icon validated; archived outside repository at `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-ux-20261117\extension-dev-zips`. No signed store release.
+- **Backup:** `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-ux-20261117` contains pre-edit source copies and rendered evidence.
+- **Still pending:** Installed Chrome/Edge extension-to-desktop manual acceptance and native fallback, YouTube media HTTP 403 resolution and real playable output, Phase 2B.1 long-file recovery/signature/auth testing, converter resizing/presets and the final Windows installer. Do not merge PR or label stable yet.
+
+---
+
 # Current State — Phase 2B HTTP files + opt-in browser handoff beta (2026-11-17)
 
 - **Working branch:** `feature/i-ds-foundation`, continuing from foundation commit `55731ba`; draft PR #1 remains unmerged. Historical internal filenames, saved user data and Qt/yt-dlp media code retained.

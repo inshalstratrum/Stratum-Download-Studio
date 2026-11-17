@@ -99,10 +99,12 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSystemTrayIcon, QMenu, QStyle, QSpinBox, QVBoxLayout,
     QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem,
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
-    QWidget, QGridLayout, QCheckBox, QTextEdit, QInputDialog
+    QWidget, QGridLayout, QCheckBox, QTextEdit, QInputDialog,
+    QHBoxLayout, QVBoxLayout, QStackedWidget, QFrame, QSizePolicy, QToolButton
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths, QSize
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices, QCursor
+from ids_ui_components import icon as ids_icon, make_banner, make_empty_state, UI_POLISH_QSS
 
 # ==========================================
 # MODERN UI STYLESHEET
@@ -148,6 +150,7 @@ QTabWidget::pane { border: 1px solid #dce5ef; border-radius: 8px; background: #f
 QTabBar::tab { padding: 9px 15px; background: #eaf0f7; color: #42546b; }
 QTabBar::tab:selected { background: #ffffff; color: #163f63; }
 """
+MODERN_STYLE += UI_POLISH_QSS
 
 def get_ffmpeg_path():
     if hasattr(sys, '_MEIPASS'): return os.path.join(sys._MEIPASS, 'ffmpeg.exe')
@@ -238,6 +241,8 @@ class AppConfig:
     splitter_sizes: list[int] = field(default_factory=lambda: [200, 950])
     column_widths: list[int] = field(default_factory=list)
     hidden_columns: list[int] = field(default_factory=list)
+    sidebar_visible: bool = True
+    ui_text_scale: int = 100
     state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     @property
@@ -268,6 +273,8 @@ class AppConfig:
             'splitter_sizes': list(self.splitter_sizes),
             'column_widths': list(self.column_widths),
             'hidden_columns': list(self.hidden_columns),
+            'sidebar_visible': bool(self.sidebar_visible),
+            'ui_text_scale': int(self.ui_text_scale),
         }
 
     def persist(self):
@@ -440,6 +447,8 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
         column_widths=stored.get('column_widths', []) if isinstance(stored.get('column_widths', []), list) else [],
         hidden_columns=stored.get('hidden_columns', []) if isinstance(stored.get('hidden_columns', []), list) else [],
+        sidebar_visible=bool(stored.get('sidebar_visible', True)),
+        ui_text_scale=int(stored.get('ui_text_scale', 100)) if stored.get('ui_text_scale') in (100, 115, 130) else 100,
     )
     runtime.history_path.parent.mkdir(parents=True, exist_ok=True)
     runtime.persist()
@@ -3004,6 +3013,8 @@ class StratrumDownloadStudio(QMainWindow):
         self.init_tray_icon()
         self.load_downloads_from_file()
         self.load_recovered_queue_jobs()
+        self.download_manager.job_changed.connect(lambda *_: self.refresh_dashboard())
+        self.refresh_dashboard()
         self.init_server()
 
     def init_tray_icon(self):
@@ -3256,44 +3267,116 @@ class StratrumDownloadStudio(QMainWindow):
         self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(self.toolbar)
 
-        # Native Qt icons avoid missing-emoji boxes on Windows and expose separate text labels.
-        icon = lambda kind: self.style().standardIcon(kind)
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_ArrowDown), "Add URL").triggered.connect(
-            lambda: self.open_add_dialog(""))
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileIcon), "File Download").triggered.connect(
-            self.open_file_dialog)
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileDialogContentsView), "Converter").triggered.connect(
-            self.open_local_converter)
-        self.toolbar_resume_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPlay), "Resume")
-        self.toolbar_resume_action.triggered.connect(self.resume_download)
-        self.toolbar_pause_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPause), "Pause")
-        self.toolbar_pause_action.triggered.connect(self.pause_download)
-        self.toolbar_stop_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaStop), "Cancel")
-        self.toolbar_stop_action.triggered.connect(self.cancel_selected_download)
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_MediaPause), "Pause All").triggered.connect(
-            self.pause_all_downloads)
-        self.toolbar_delete_action = self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_TrashIcon), "Delete")
-        self.toolbar_delete_action.triggered.connect(self.delete_download)
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_DialogResetButton), "Clear Done").triggered.connect(
-            self.delete_completed)
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "Options").triggered.connect(
-            lambda: self.show_dummy_msg("Options"))
-        self.toolbar.addAction(icon(QStyle.StandardPixmap.SP_DriveNetIcon), "Share").triggered.connect(self.share_link)
+        # Cohesive local SVG icons; existing QAction references and handlers preserved.
+        actions = [
+            ("video", "Add media", lambda: self.open_add_dialog("")),
+            ("file", "Download file", self.open_file_dialog),
+            ("convert", "Converter", self.open_local_converter),
+            ("play", "Resume", self.resume_download),
+            ("pause", "Pause", self.pause_download),
+            ("cancel", "Cancel", self.cancel_selected_download),
+            ("pause-all", "Pause all", self.pause_all_downloads),
+            ("trash", "Delete", self.delete_download),
+            ("clear", "Clear done", self.delete_completed),
+            ("settings", "Options", lambda: self.show_dummy_msg("Options")),
+            ("share", "Share", self.share_link),
+        ]
+        self.toolbar_actions = {}
+        for glyph, label, callback in actions:
+            action = self.toolbar.addAction(ids_icon(glyph, size=38), label)
+            action.setToolTip(label)
+            action.triggered.connect(callback)
+            self.toolbar_actions[label] = action
+        self.toolbar_resume_action = self.toolbar_actions["Resume"]
+        self.toolbar_pause_action = self.toolbar_actions["Pause"]
+        self.toolbar_stop_action = self.toolbar_actions["Cancel"]
+        self.toolbar_delete_action = self.toolbar_actions["Delete"]
+
+        self.sidebar_toggle_button = QToolButton(self)
+        self.sidebar_toggle_button.setObjectName("idsBannerToggle")
+        self.sidebar_toggle_button.setIcon(ids_icon("sidebar", "#ffffff", size=36))
+        self.sidebar_toggle_button.setIconSize(QSize(23, 23))
+        self.sidebar_toggle_button.setToolTip("Show or hide categories")
+        self.sidebar_toggle_button.setAccessibleName("Show or hide categories")
+        self.sidebar_toggle_button.clicked.connect(lambda: sidebar_action.setChecked(not sidebar_action.isChecked()))
+        self.text_scale_combo = QComboBox(self)
+        self.text_scale_combo.setToolTip("Interface text size")
+        self.text_scale_combo.setAccessibleName("Interface text size")
+        for label, value in (("100%", 100), ("115%", 115), ("130%", 130)):
+            self.text_scale_combo.addItem(label, value)
+        scale_index = self.text_scale_combo.findData(self.app_config.ui_text_scale)
+        self.text_scale_combo.setCurrentIndex(max(0, scale_index))
+        self.text_scale_combo.setMaximumWidth(89)
+        self.text_scale_combo.currentIndexChanged.connect(self.set_text_scale)
+
+        workspace = QWidget(self)
+        workspace.setObjectName("idsWorkspace")
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(13, 11, 13, 9)
+        workspace_layout.setSpacing(11)
+        self.brand_header, self.dashboard_metrics, self.brand_subtitle = make_banner(workspace)
+        self.brand_header.layout().addWidget(self.sidebar_toggle_button)
+        self.brand_header.layout().addWidget(self.text_scale_combo)
+        workspace_layout.addWidget(self.brand_header)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(self.splitter)
+        self.splitter.setHandleWidth(8)
+        self.splitter.setChildrenCollapsible(False)
+        self.sidebar_panel = QFrame(self)
+        self.sidebar_panel.setObjectName("idsSidebarPanel")
+        self.sidebar_panel.setMinimumWidth(162)
+        sidebar_layout = QVBoxLayout(self.sidebar_panel)
+        sidebar_layout.setContentsMargins(10, 11, 6, 10)
+        sidebar_layout.setSpacing(9)
+        sidebar_heading = QHBoxLayout()
+        sidebar_title = QLabel("Library")
+        sidebar_title.setObjectName("idsSidebarTitle")
+        sidebar_heading.addWidget(sidebar_title)
+        sidebar_heading.addStretch()
+        for glyph, tip, width in (
+            ("narrow", "Compact category sidebar", 174),
+            ("wide", "Wider category sidebar", 275),
+        ):
+            button = QToolButton(self.sidebar_panel)
+            button.setIcon(ids_icon(glyph, size=31))
+            button.setIconSize(QSize(20, 20))
+            button.setToolTip(tip)
+            button.setAccessibleName(tip)
+            button.clicked.connect(lambda checked=False, amount=width: self.set_sidebar_width(amount))
+            sidebar_heading.addWidget(button)
+        sidebar_layout.addLayout(sidebar_heading)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
+        self.tree.setAccessibleName("Download categories")
         root_all = QTreeWidgetItem(["All Downloads"])
-        QTreeWidgetItem(root_all, ["Video"]); QTreeWidgetItem(root_all, ["Audio"]); QTreeWidgetItem(root_all, ["Compressed"]); QTreeWidgetItem(root_all, ["Documents"])
-        self.tree.addTopLevelItem(root_all); self.tree.addTopLevelItem(QTreeWidgetItem(["Unfinished"])); self.tree.addTopLevelItem(QTreeWidgetItem(["Finished"]))
+        root_all.setIcon(0, ids_icon("folder", size=30))
+        root_all.setToolTip(0, "All Downloads")
+        for category, glyph in (
+            ("Video", "video"), ("Audio", "audio"),
+            ("Compressed", "archive"), ("Documents", "document"),
+        ):
+            child = QTreeWidgetItem(root_all, [category])
+            child.setIcon(0, ids_icon(glyph, size=30))
+            child.setToolTip(0, category)
+        self.tree.addTopLevelItem(root_all)
+        for label, glyph in (("Unfinished", "clock"), ("Finished", "check")):
+            child = QTreeWidgetItem([label])
+            child.setIcon(0, ids_icon(glyph, size=30))
+            child.setToolTip(0, label)
+            self.tree.addTopLevelItem(child)
         root_all.setExpanded(True)
+        self.tree.setCurrentItem(root_all)
         self.tree.itemClicked.connect(self.filter_by_category)
-        self.splitter.addWidget(self.tree)
+        sidebar_layout.addWidget(self.tree)
+        self.splitter.addWidget(self.sidebar_panel)
 
         self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"])
+        self.table.setHorizontalHeaderLabels([
+            "File Name", "Q", "Size", "Status",
+            "Time Left", "Transfer Rate", "Last Try Date", "Description",
+        ])
+        self.table.setAccessibleName("Download jobs and progress")
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -3304,10 +3387,41 @@ class StratrumDownloadStudio(QMainWindow):
         self.table.itemSelectionChanged.connect(self.update_action_capabilities)
         self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
 
-        self.splitter.addWidget(self.table)
+        self.download_pages = QStackedWidget(self)
+        self.empty_page = make_empty_state(
+            lambda: self.open_add_dialog(""), self.open_file_dialog, self.open_local_converter, self,
+        )
+        self.download_pages.addWidget(self.empty_page)
+        self.download_pages.addWidget(self.table)
+        self.splitter.addWidget(self.download_pages)
+        self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes(self.app_config.splitter_sizes[:2])
-        sidebar_action.toggled.connect(self.tree.setVisible)
+        workspace_layout.addWidget(self.splitter, 1)
+
+        self.dashboard_footer = QFrame(self)
+        self.dashboard_footer.setObjectName("idsFooter")
+        footer_layout = QHBoxLayout(self.dashboard_footer)
+        footer_layout.setContentsMargins(12, 3, 10, 3)
+        self.dashboard_footer_text = QLabel("Ready for a new download")
+        self.dashboard_footer_text.setObjectName("idsFooterText")
+        footer_layout.addWidget(self.dashboard_footer_text)
+        footer_layout.addStretch()
+        self.help_button = QToolButton(self)
+        self.help_button.setIcon(ids_icon("help", size=30))
+        self.help_button.setIconSize(QSize(20, 20))
+        self.help_button.setToolTip("Quick start guide")
+        self.help_button.setAccessibleName("Quick start guide")
+        self.help_button.clicked.connect(self.show_quick_start)
+        footer_layout.addWidget(self.help_button)
+        workspace_layout.addWidget(self.dashboard_footer)
+        self.setCentralWidget(workspace)
+
+        sidebar_action.setChecked(self.app_config.sidebar_visible)
+        self.sidebar_panel.setVisible(self.app_config.sidebar_visible)
+        sidebar_action.toggled.connect(self.set_sidebar_visible)
         toolbar_view_action.toggled.connect(self.toolbar.setVisible)
+        self.apply_text_scale(self.app_config.ui_text_scale, persist=False)
+        self.refresh_dashboard()
 
         columns_menu = view_menu.addMenu("Columns")
         for index, name in enumerate(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"]):
@@ -3319,6 +3433,90 @@ class StratrumDownloadStudio(QMainWindow):
             for index, width in enumerate(self.app_config.column_widths[:self.table.columnCount()]):
                 self.table.setColumnWidth(index, max(40, int(width)))
         self.update_action_capabilities()
+
+    def set_sidebar_visible(self, visible):
+        self.sidebar_panel.setVisible(bool(visible))
+        self.app_config.sidebar_visible = bool(visible)
+        self.sidebar_toggle_button.setToolTip("Hide categories" if visible else "Show categories")
+        self.app_config.persist()
+
+    def set_sidebar_width(self, width):
+        if not self.sidebar_panel.isVisible():
+            self.sidebar_panel.show()
+            self.app_config.sidebar_visible = True
+        total = max(500, sum(self.splitter.sizes()))
+        chosen = max(self.sidebar_panel.minimumWidth(), min(int(width), total - 340))
+        self.splitter.setSizes([chosen, total - chosen])
+        self.app_config.splitter_sizes = list(self.splitter.sizes())
+        self.app_config.persist()
+
+    def set_text_scale(self, index):
+        self.apply_text_scale(self.text_scale_combo.itemData(index))
+
+    def apply_text_scale(self, value, persist=True):
+        scale = int(value) if value in (100, 115, 130) else 100
+        app = QApplication.instance()
+        if app:
+            font = QFont("Segoe UI", 10)
+            font.setPointSize({100: 10, 115: 12, 130: 13}[scale])
+            app.setFont(font)
+        self.app_config.ui_text_scale = scale
+        if hasattr(self, 'sidebar_panel'):
+            self.sidebar_panel.setMinimumWidth({100: 162, 115: 187, 130: 225}[scale])
+        if persist:
+            self.app_config.persist()
+        if hasattr(self, 'table'):
+            self.table.verticalHeader().setDefaultSectionSize(int(37 * scale / 100))
+
+    def refresh_dashboard(self):
+        if not hasattr(self, 'dashboard_metrics'):
+            return
+        jobs = [record['job'] for record in self.downloads if record.get('job')]
+        active_states = {
+            JobState.CONNECTING.value, JobState.RESOLVING.value,
+            JobState.DOWNLOADING.value, JobState.MERGING.value,
+            JobState.VERIFYING.value, JobState.CONVERTING.value,
+        }
+        counts = {
+            'active': sum(job.state in active_states for job in jobs),
+            'waiting': sum(job.state in {JobState.QUEUED.value, JobState.PAUSED.value} for job in jobs),
+            'done': sum(job.state == JobState.COMPLETED.value for job in jobs),
+        }
+        for key, word in (('active', 'Active'), ('waiting', 'Waiting'), ('done', 'Finished')):
+            self.dashboard_metrics[key].setText(f"{word}  {counts[key]}")
+            self.dashboard_metrics[key].setAccessibleName(f"{word}: {counts[key]} downloads")
+        self.download_pages.setCurrentIndex(1 if self.table.rowCount() else 0)
+        if counts['active']:
+            status = f"{counts['active']} download{'s' if counts['active'] != 1 else ''} in progress"
+        elif counts['waiting']:
+            status = f"{counts['waiting']} download{'s' if counts['waiting'] != 1 else ''} waiting"
+        elif jobs:
+            status = "All current downloads are idle"
+        else:
+            status = "Ready for a new download"
+        self.dashboard_footer_text.setText(status)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'toolbar') and hasattr(self, 'dashboard_metrics'):
+            compact = self.width() < 1090
+            self.toolbar.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly if compact else
+                Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+            )
+            self.dashboard_metrics['done'].setVisible(self.width() >= 1000)
+            self.brand_subtitle.setVisible(self.width() >= 820)
+            very_narrow = self.width() < 840
+            self.toolbar.setIconSize(QSize(22, 22) if very_narrow else QSize(30, 30))
+            self.toolbar.setStyleSheet(
+                "QToolBar {padding:2px 6px;} QToolButton {min-width:31px;"
+                "min-height:29px;padding:3px 5px;}" if very_narrow else ""
+            )
+            self.brand_header.setMinimumHeight(75 if very_narrow else 91)
+            self.brand_header.layout().setContentsMargins(
+                14 if very_narrow else 22, 8 if very_narrow else 12,
+                14 if very_narrow else 20, 8 if very_narrow else 12
+            )
 
     def selected_record(self):
         rows = self.table.selectionModel().selectedRows() if hasattr(self, 'table') else []
@@ -3624,8 +3822,14 @@ class StratrumDownloadStudio(QMainWindow):
             if record and record['job'].state == JobState.COMPLETED.value:
                 self.downloads.remove(record)
                 self.table.removeRow(row)
+                self.download_manager.jobs.pop(record['id'], None)
+                if record['id'] in self.download_manager.queue:
+                    self.download_manager.queue.remove(record['id'])
                 for other in self.downloads:
-                    if other['row'] > row: other['row'] -= 1
+                    if other['row'] > row:
+                        other['row'] -= 1
+        self.download_manager.persist()
+        self.refresh_dashboard()
 
     def init_server(self):
         self.server_thread = ServerThread(self.app_config)
@@ -3995,6 +4199,7 @@ class StratrumDownloadStudio(QMainWindow):
                     QMessageBox.warning(self, "Download Failed", clean_error_summary(error_msg))
             d['thread'] = None
             self.save_downloads_to_file()
+            self.refresh_dashboard()
             self.update_action_capabilities()
             self.start_queued_jobs()
 
@@ -4048,6 +4253,7 @@ class StratrumDownloadStudio(QMainWindow):
                 self.download_manager.persist()
                 for other in self.downloads:
                     if other['row'] > row: other['row'] -= 1
+        self.refresh_dashboard()
 
     def trigger_conversion(self, target_ext):
         record = self.selected_record()

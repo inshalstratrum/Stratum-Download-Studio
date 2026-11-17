@@ -33,7 +33,9 @@ The underlying source and compatibility filenames still use the historical Strat
 3. Double-click **`SETUP I-DS.cmd`** once (internet required). It checks the desktop GUI and installs verified, isolated media dependencies if needed.
 4. Double-click **`START I-DS.cmd`**. The historical `START STRATUM DOWNLOADER.cmd` remains supported.
 
-To download supported media, select **Add URL**. For a direct PDF, ZIP or installer URL, select **File Download**, paste the link and choose the save folder. Existing files are not overwritten.
+To download supported media, select **Add media**. For a direct PDF, ZIP or installer URL, select **Download file**, paste the link and choose the save folder. Existing files are not overwritten.
+
+**New interface:** The first screen offers **Media**, **Files** and **Convert**. The header shows Active / Waiting / Finished jobs. Use the header sidebar icon to collapse or reopen categories, the small sidebar width controls to adjust it, and the **100% / 115% / 130%** control to enlarge text. These preferences are saved.
 
 ## Chrome / Edge extension
 
