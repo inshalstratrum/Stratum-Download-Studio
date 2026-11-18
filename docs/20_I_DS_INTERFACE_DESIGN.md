@@ -1,8 +1,11 @@
 ---
 type: Project UI design contract
 title: I-DS desktop and browser interface
-updated_at: 2026-11-17T10:25:00+05:00
+updated_at: "2026-11-18T21:27:05+05:00"
 revisions:
+  - at: "2026-11-18T21:27:05+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Added responsive converter resize controls and real native Windows verification."
   - at: 2026-11-17T10:25:00+05:00
     change: Initial tested I-DS PyQt6 and extension visual refinement
 ---
@@ -33,11 +36,13 @@ revisions:
 | Browser | Same I-DS mark, shorter descriptions, toggles, keyboard-opened help, original pairing behavior | Playwright Chrome on desktop/mobile/minimal 260px and simulated 200% zoom |
 | Focus | Qt buttons/combo remain keyboard focusable; browser focus rings and help summary support Enter | Native and Playwright tests |
 | Scroll/overflow | Download table may scroll horizontally at narrow widths; settings page must not overflow | Render and browser scroll-width checks |
+| Media converter | Select Original size or up-to-height presets; keep aspect ratio; don't upscale; disable invalid conversions | 320-test full suite; real FFmpeg re-encode/FFprobe/decode |
+| Narrow converter | Break options and actions into short rows; keep action buttons reachable at 760×480 with 130% text | Actual native Windows rendered screenshot |
 
 **Not applicable:** custom canvas zoom/pan and a resizable multiline composer (this product has neither a spatial canvas nor a text editor). Desktop app is Windows-native; mobile responsive checks apply to the browser settings page, not a nonexistent mobile desktop client.
 
 ## Verification boundaries
 
-**Automated:** tests verify behaviors and basic layout, not every visual accessibility property. **Rendered:** Windows desktop screenshots and isolated Chrome/Playwright page screenshots in `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-ux-20261117`. **Owner acceptance:** still required. **Not claimed:** real Chrome extension-to-desktop interception, public YouTube playback, a signed production installer, or all combinations of Windows display scaling.
+**Automated:** tests verify behaviors and basic layout, not every visual accessibility property. **Rendered:** Windows desktop screenshots and isolated Chrome/Playwright page screenshots in `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-ux-20261117`. **Owner acceptance:** still required. **Newly verified (2026-11-18):** Isolated Edge MV3 extension accepted a synthetic link through the real Qt bridge into exactly one queue job, while prior fallback checks preserved the native browser download. Actual user-profile browser installation and full content transfer are not yet accepted. Converter was rendered at 900×560 and 760×480 at 130% text and passed real FFmpeg re-encode/decode checks. **Still not claimed:** installed Chrome acceptance, full public YouTube playback, signed production installer, or all Windows display scale combinations.
 
 Avoid assigning development to a second active agent while this repository has the `AGENTS.md` one-writer rule. Reuse local skills selectively; do not install unrelated toolkits into the app.

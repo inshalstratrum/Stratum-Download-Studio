@@ -9,10 +9,10 @@
 ## What works today
 
 - **Desktop media URLs:** Add a supported video/audio URL, choose a real output format and available resolution, and start downloading through the controlled yt-dlp engine.
-- **Direct file downloads (Phase 2B beta):** Desktop **File Download** supports HTTP/HTTPS PDFs, ZIPs, images, installers and other files, with progress, safe unique filenames and verified resumable partials when the server provides validators. The native Chrome/Edge transfer is opt-in and remains unverified in an installed user browser.
+- **Direct file downloads (Phase 2B beta):** Desktop **File Download** supports HTTP/HTTPS PDFs, ZIPs, images, installers and other files, with progress, safe unique filenames and resumable partials when the server provides validators. Interruption, validator changes and parallel files passed isolated HTTP recovery tests. Edge extension-to-Qt queue handoff passed in an isolated test profile; installed user-profile Chrome/Edge and browser-origin content saving still need acceptance.
 - **Chrome/Edge browser companion:** Detect supported on-page media, show an in-player I-DS button, right-click a file link, or opt in to automatic handoff of supported general-file downloads.
 - **Download management:** Status, pause/cancel, queue history/recovery logic, speed controls, and completion actions are implemented. Reliability still needs live long-session testing.
-- **Media converter:** FFmpeg-based conversions with format validation and progress/cancellation controls where supported.
+- **Media converter:** FFmpeg-based conversions with format validation, progress/cancellation and **Video size** presets (Original, up to 1080p / 720p / 480p / 360p / 240p). Resizing preserves aspect ratio and never upscales. A real FFmpeg 640×480 to 480×360 conversion passed FFprobe and frame decoding.
 - **Local pairing:** The extension sends authenticated requests to a loopback-only desktop endpoint. Pairing tokens stay local.
 
 The underlying source and compatibility filenames still use the historical Stratum names to preserve existing configurations and tooling.
@@ -21,7 +21,7 @@ The underlying source and compatibility filenames still use the historical Strat
 
 - Manual Chrome/Edge installed-extension acceptance of opt-in PDF/ZIP/installer handoff and correct resume-to-browser fallback after failed desktop acceptance. Chrome downloads requiring session cookies may not transfer successfully.
 - Extended HTTP retry/recovery stress testing, especially large authenticated or expiring signed links (**Phase 2B.1**).
-- Further video-detection and site compatibility checks, including live YouTube testing. Site access and formats can change; DRM-protected content is not supported.
+- Further video-detection and site compatibility checks, including **full YouTube playback**. A short sample downloaded using an embedded client, but a full public video transfer hit network timeouts; full playback remains unverified. Site access and formats can change; DRM-protected content is not supported.
 - Polished installer, signed releases, a published browser store extension, and full accessibility/manual desktop acceptance tests.
 
 **Do not install from unrelated websites.** This repository's launcher uses the Python source; it is not a signed Windows installer.

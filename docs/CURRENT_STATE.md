@@ -1,3 +1,28 @@
+---
+type: project-status
+title: I-DS Current State
+updated_at: "2026-11-18T21:27:05+05:00"
+revisions:
+  - at: "2026-11-18T21:27:05+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — Phase 2B.1 recovery and converter resizing (2026-11-18)
+
+- **Branch:** `feature/i-ds-foundation` continuing `8f7ebbd`. Draft PR #1 remains unmerged; this state entry documents the verified implementation before/with its new commit. Unrelated `scratch/` was not touched.
+- **General files — recovery:** Added deterministic real-loopback HTTP tests for interrupted socket transfers and validated byte-range resume, modified ETag server restart without mixing old bytes, HTTP 503 bounded retry, and four concurrent unique output names. **12/12 HTTP-focused tests passed**, including eight existing checks. Existing `ids_http_engine.py` core was preserved.
+- **Actual browser handoff:** Microsoft Edge with the **real MV3 extension loaded in a fresh isolated test profile** passed both synthetic outcomes: handoff failure kept/completed native browser download, while a simulated desktop acknowledgment cancelled it. Separately, the real Edge extension sent a synthetic ZIP link over the **actual authenticated Qt desktop server on 127.0.0.1:18765**, which recorded exactly **one queued FILE job** and paired one temporary extension origin; Edge cancelled its native download after acceptance. The test deliberately disabled the outbound file worker, so this does **not** prove full browser-origin file content was saved. No user browser profile or login was accessed. Isolated Chrome refused flags to load unpacked extensions; actual installed Chrome/Edge owner-profile acceptance is still pending.
+- **Local converter:** Added accessible **Original size / Up to 1080p, 720p, 480p, 360p, 240p** video-height selector. FFmpeg uses aspect-preserving `scale=-2:height`, never enlarges smaller video, ignores video resizing for audio targets, retains source file and output verification. Existing controller signatures remain compatible when no resize is requested. Restructured converter controls into logical two-row options and action groups to fit narrow windows. **22/22 converter-focused tests passed** including a real synthetic 640×480 → 480×360 MP4 re-encode, FFprobe stream check and FFmpeg frame decode.
+- **Rendered UX:** Actual native Windows Qt converter screenshots taken at 900×560 normal scale and 760×480 at 130% text scale. Both showed every control without clipping after the two-row layout change. Existing dashboard controls and browser-options interface were not changed.
+- **Complete regression:** **320/320 Python pytest tests passed** (2026-11-18), **52/52 JavaScript tests passed**; updated code passed Python compilation, JavaScript syntax and `git diff --check`. Owner acceptance and installed-browser manual review have not occurred.
+- **YouTube limitation:** Approved local `yt-dlp` **2026.07.04** retrieved **10,241 test-mode MP4 bytes** using YouTube `web_embedded` client for a public Blender video, but that sample is **not a playable video**. A complete ~24.16 MiB download reached ~36.9% then failed on a remote Googlevideo read timeout despite a retry; other attempts encountered DNS/remote-disconnect errors and historically HTTP 403. **Complete YouTube download and playback remain unverified**; no fallback setting or dependency pin was changed without end-to-end verification.
+- **Release gate:** No signed installer produced because YouTube completion, owner-profile Chrome/Edge and a fresh clean-PC bootstrap remain unverified. Continue using the existing source-only `SETUP I-DS.cmd` then `START I-DS.cmd`. FFmpeg/FFprobe required separately for media processing. PR #1 must stay draft.
+- **Evidence / backup:** `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-phase2b1-20261117` retains pre-edit code, test logs, native screenshots and testing scripts, including `verify-edge-qt-v2.log`, `full-pytest-20261118.log` and `js-regression-20261118.log`. Disposable isolated browser profiles, failed incomplete YouTube `.part` and abandoned atomic-edit `.tmp` were removed only after verification. User browser profiles, completed files and `scratch/` preserved.
+- **Next:** Diagnose intermittent Googlevideo network failures without bypassing content protections; get a complete lawful public YouTube MP4 and independent FFprobe/FFmpeg playback, test installed Chrome user workflow, test fresh-PC source bootstrap and signed installer only after release gates.
+
+---
+
 # Current State — I-DS interface refinement (2026-11-17)
 
 - **Branch:** `feature/i-ds-foundation`; continues `7d3a464` Phase 2B beta. Draft GitHub PR #1 remains open/unmerged. Existing `scratch/` is left untouched.

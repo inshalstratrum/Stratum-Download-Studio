@@ -1414,7 +1414,7 @@ class ConversionPlan:
     command: tuple
 
 
-def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, destination=None):
+def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, destination=None, resize_height=None):
     source = Path(input_path).resolve(strict=True)
     actual_probe = probe if probe is not None else probe_media_file(source)
     target_name = str(target_ext).upper()
@@ -1430,9 +1430,20 @@ def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, d
     codec_args = profile.ffmpeg_video_args if required_stream == 'video' else profile.ffmpeg_audio_args
     if not codec_args:
         raise ValueError(f'{target_name} is not compatible with this input')
+    if resize_height is not None and (isinstance(resize_height, bool) or
+                                     resize_height not in {240, 360, 480, 720, 1080, 1440, 2160}):
+        raise ValueError("Unsupported resize preset")
+    source_heights = [
+        stream.get('height') for stream in actual_probe.get('streams', [])
+        if isinstance(stream, dict) and stream.get('codec_type') == 'video'
+        and isinstance(stream.get('height'), int) and stream['height'] > 0
+    ]
+    source_height = max(source_heights, default=0)
+    applied_height = resize_height if required_stream == 'video' and resize_height and source_height > resize_height else None
+    resize_args = ('-vf', f'scale=-2:{applied_height}') if applied_height else ()
     temporary = final_path.with_name(f'{final_path.stem}.partial-{uuid.uuid4().hex[:8]}.{profile.extension}')
     command = (
-        get_ffmpeg_path(), '-y', '-v', 'error', '-i', str(source), *codec_args,
+        get_ffmpeg_path(), '-y', '-v', 'error', '-i', str(source), *resize_args, *codec_args,
         '-progress', 'pipe:1', '-nostats', str(temporary),
     )
     return ConversionPlan(source, final_path, temporary, target_name, required_stream, float(actual_probe.get('duration') or 0), command)
@@ -1641,10 +1652,11 @@ class FormatFetcherThread(QThread):
 class ConvertThread(QThread):
     finished = pyqtSignal(str, bool, str, str)
     progress = pyqtSignal(str, dict)
-    def __init__(self, row_id, input_file, target_ext, output_dir=None, destination=None):
+    def __init__(self, row_id, input_file, target_ext, output_dir=None, destination=None, resize_height=None):
         super().__init__()
         self.row_id = row_id; self.input_file = input_file; self.target_ext = target_ext
         self.output_dir = output_dir; self.destination = destination
+        self.resize_height = resize_height
         self.cancelled = False
         self.process = None
         self._process_lock = threading.Lock()
@@ -1723,7 +1735,7 @@ class ConvertThread(QThread):
 
             source_probe = probe_media_file(input_path)
             with _conversion_name_lock:
-                plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination)
+                plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination, self.resize_height)
                 output_path = plan.destination
                 potential_claim_path = output_path.with_name(output_path.name + '.claim')
                 claim_fd = os.open(potential_claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1795,10 +1807,14 @@ class ConversionJobController(QObject):
         self.thread_factory = thread_factory
         self.jobs = {}
 
-    def start(self, job_id, input_file, target_ext, output_dir=None, destination=None):
+    def start(self, job_id, input_file, target_ext, output_dir=None, destination=None, resize_height=None):
         if job_id in self.jobs:
             return False
-        thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
+        if resize_height is None:
+            thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
+        else:
+            thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination,
+                                         resize_height=resize_height)
         generation = uuid.uuid4().hex
         self.jobs[job_id] = {'thread': thread, 'generation': generation, 'state': 'starting', 'snapshot': {'state': 'starting'}}
         thread.progress.connect(lambda emitted_id, snapshot, token=generation: self._progress(emitted_id, snapshot, token))
@@ -2609,11 +2625,25 @@ class LocalConverterDialog(QDialog):
         top = QHBoxLayout()
         add_button = QPushButton('Add Files'); add_button.clicked.connect(self.select_files); top.addWidget(add_button)
         self.target_combo = QComboBox(); self.target_combo.addItems(list(OUTPUT_PROFILES)); top.addWidget(QLabel('Target:')); top.addWidget(self.target_combo)
+        self.resize_combo = QComboBox()
+        self.resize_combo.setAccessibleName("Resize converted video")
+        self.resize_combo.setToolTip("Preserves aspect ratio and never enlarges video. Audio outputs are not resized.")
+        self.resize_combo.addItem("Original size", None)
+        for height in (1080, 720, 480, 360, 240):
+            self.resize_combo.addItem(f"Up to {height}p", height)
+        top.addWidget(QLabel("Video size:"))
+        top.addWidget(self.resize_combo)
         self.apply_all_button = QPushButton('Apply format to all'); self.apply_all_button.clicked.connect(self.apply_format_to_all); top.addWidget(self.apply_all_button)
-        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to each source folder)'); top.addWidget(self.output_edit, 1)
-        browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); top.addWidget(browse_button)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        destination_row = QHBoxLayout()
+        destination_row.addWidget(QLabel("Save to:"))
+        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to source folder)'); destination_row.addWidget(self.output_edit, 1)
+        browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); destination_row.addWidget(browse_button)
         self.overwrite_combo = QComboBox(); self.overwrite_combo.addItem('Unique name', 'unique'); self.overwrite_combo.addItem('Ask before replace', 'ask'); self.overwrite_combo.addItem('Skip existing', 'skip')
-        top.addWidget(self.overwrite_combo); layout.addLayout(top)
+        destination_row.addWidget(self.overwrite_combo)
+        layout.addLayout(destination_row)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(['Source', 'Detected media', 'Target', 'Progress', 'State', 'Output'])
@@ -2628,12 +2658,17 @@ class LocalConverterDialog(QDialog):
         self.cancel_button = QPushButton('Cancel'); self.cancel_button.clicked.connect(self.cancel_active); self.cancel_button.setEnabled(False); buttons.addWidget(self.cancel_button)
         self.pause_button = QPushButton('Pause'); self.pause_button.clicked.connect(self.pause_active); buttons.addWidget(self.pause_button)
         self.resume_button = QPushButton('Resume'); self.resume_button.clicked.connect(self.resume_active); buttons.addWidget(self.resume_button)
-        self.remove_button = QPushButton('Remove Selected'); self.remove_button.clicked.connect(self.remove_selected); buttons.addWidget(self.remove_button)
-        self.clear_button = QPushButton('Clear List'); self.clear_button.clicked.connect(self.clear_list); buttons.addWidget(self.clear_button)
-        self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); buttons.addWidget(self.open_output_button)
-        self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); buttons.addWidget(self.open_folder_button)
-        buttons.addStretch(1); close_button = QPushButton('Close'); close_button.clicked.connect(self.close); buttons.addWidget(close_button)
+        buttons.addStretch(1)
         layout.addLayout(buttons)
+
+        secondary_buttons = QHBoxLayout()
+        self.remove_button = QPushButton('Remove Selected'); self.remove_button.clicked.connect(self.remove_selected); secondary_buttons.addWidget(self.remove_button)
+        self.clear_button = QPushButton('Clear List'); self.clear_button.clicked.connect(self.clear_list); secondary_buttons.addWidget(self.clear_button)
+        self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); secondary_buttons.addWidget(self.open_output_button)
+        self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); secondary_buttons.addWidget(self.open_folder_button)
+        secondary_buttons.addStretch(1)
+        close_button = QPushButton('Close'); close_button.clicked.connect(self.close); secondary_buttons.addWidget(close_button)
+        layout.addLayout(secondary_buttons)
         self.target_combo.currentTextChanged.connect(self.refresh_target_availability)
         self.table.itemSelectionChanged.connect(self.update_button_states)
         self.update_button_states()
@@ -2730,7 +2765,10 @@ class LocalConverterDialog(QDialog):
             try:
                 target = entry['target']
                 destination = conversion_destination_for_behavior(entry['source'], target, output_dir, behavior, self._confirm_replace, reserved)
-                plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination)
+                resize_height = self.resize_combo.currentData() if output_profile(target).media_kind == 'video' else None
+                plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination,
+                                             resize_height=resize_height)
+                entry['resize_height'] = resize_height
                 self.pending_jobs.append((entry, plan))
                 reserved.add(str(plan.destination.resolve()))
                 entry['state'] = 'queued'
@@ -2746,7 +2784,9 @@ class LocalConverterDialog(QDialog):
         entry, plan = self.pending_jobs.pop(0)
         self.active_job_id = entry['job_id']; entry['state'] = 'starting'
         self.table.item(entry['row'], 4).setText('Starting')
-        self.conversion_controller.start(entry['job_id'], entry['source'], plan.target_name, plan.destination.parent, plan.destination)
+        self.conversion_controller.start(entry['job_id'], entry['source'], plan.target_name,
+                                         plan.destination.parent, plan.destination,
+                                         resize_height=entry.get('resize_height'))
         self.update_button_states()
 
     def on_progress(self, job_id, snapshot):
