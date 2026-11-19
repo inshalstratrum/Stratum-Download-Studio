@@ -16,7 +16,7 @@ foreach($name in @('I-DS Download Support.lnk','Uninstall I-DS.lnk')) {
   $expected=if($name -eq 'I-DS Download Support.lnk'){$target}else{Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'}
   if ($shortcut.TargetPath -eq $expected) { Remove-Item -LiteralPath $path -Force }
 }
-foreach($name in @('I-DS.exe','I-DS.previous.exe','Uninstall I-DS.ps1','README - START HERE.txt','FFmpeg-LICENSE.txt','LICENSE.txt')) {
+foreach($name in @('I-DS.exe','I-DS.previous.exe','Uninstall I-DS.ps1','README - START HERE.txt','THIRD_PARTY_NOTICES.txt','FFmpeg-LICENSE.txt','LICENSE.txt')) {
   $path=Join-Path $InstallRoot $name
   if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}
 }

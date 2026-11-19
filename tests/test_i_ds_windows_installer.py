@@ -57,3 +57,13 @@ def test_windows_release_contract_is_non_destructive_and_staged():
     assert "source" not in uninstall.lower() or "downloads" in uninstall.lower()
     assert "Unsigned staging only" in build
     assert "--add-data" in build and "--distpath" in build
+    assert "THIRD_PARTY_NOTICES.txt" in build
+    assert "GNU GENERAL PUBLIC LICENSE" in build
+    assert "Copy-Item -LiteralPath $FFmpegLicensePath -Destination $licenses" in build
+    assert "ffmpeg -L | Out-File" not in build
+    assert "KeepIntermediates" in build
+    assert "app-build.log" in build and "setup-build.log" in build
+    assert "$ErrorActionPreference='Continue'" in build
+    assert "THIRD_PARTY_NOTICES.txt" in src
+    assert "THIRD_PARTY_NOTICES.txt" in uninstall
+    assert (ROOT / "THIRD_PARTY_NOTICES.txt").is_file()

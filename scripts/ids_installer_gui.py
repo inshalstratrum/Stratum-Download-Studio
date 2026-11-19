@@ -107,8 +107,8 @@ class SetupWindow(QWidget):
         subtitle=QLabel("Tool by InShaLIve.os • One-click Windows installation")
         subtitle.setObjectName("subtitle")
         v.addWidget(subtitle)
-        notice=QLabel("Installs for this Windows user — no administrator password.\n"
-                      "Your saved downloads, browser settings and existing files stay untouched.")
+        notice=QLabel("Installs for your Windows account. No admin access needed.\n"
+                      "Downloads and settings are preserved.")
         notice.setObjectName("notice")
         notice.setWordWrap(True)
         v.addWidget(notice)

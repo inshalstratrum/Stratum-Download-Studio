@@ -36,6 +36,7 @@ if (Test-Path -LiteralPath $sourceUninstall) {
 }
 foreach ($entry in @(
   @('LICENSE','LICENSE.txt'),
+  @('THIRD_PARTY_NOTICES.txt','THIRD_PARTY_NOTICES.txt'),
   @('FFmpeg-LICENSE.txt','FFmpeg-LICENSE.txt'),
   @('README - START HERE.txt','README - START HERE.txt'),
   @('00 - START HERE.txt','README - START HERE.txt')

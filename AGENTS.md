@@ -10,3 +10,4 @@
 - Never claim manual tests were performed unless actually performed.
 - Update docs/CURRENT_STATE.md after each committed phase.
 - Keep final responses to at most 15 lines.
+- After successful checks, clean only verified inactive/generated test caches, isolated browser profiles, temporary PyInstaller _MEI extractions and duplicate build outputs; preserve working code, app/config data, downloads, recovery copies and unrelated scratch. Retain one private unsigned installer and compact evidence, report measured storage freed. Never delete active process files.

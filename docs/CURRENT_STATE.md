@@ -1,8 +1,14 @@
 ---
 type: project-status
 title: I-DS Current State
-updated_at: "2026-11-19T22:08:10+05:00"
+updated_at: "2026-11-19T23:23:27+05:00"
 revisions:
+  - at: "2026-11-19T23:23:27+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Completed final 336 Python/52 JavaScript regression, removed 21.17 MiB obsolete dependency rollback and caches, and fixed PyInstaller stderr handling in quiet build workflow."
+  - at: "2026-11-19T23:15:08+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Verified GPLv3 notice repair in private installer, native Windows 200% DPI, signing/Chrome feasibility and measured cleanup without altering user data."
   - at: "2026-11-19T22:08:10+05:00"
     by: "chatgpt/gpt-6"
     change: "Verified live MP3, isolated installed Edge file handoff and fallback, private self-contained Windows installer, and full release-candidate test gate."
@@ -12,6 +18,20 @@ revisions:
   - at: "2026-11-18T21:27:05+05:00"
     by: "chatgpt/gpt-6"
     change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — private installer license repair and storage cleanup (2026-11-19 late)
+
+- **Starting checkpoint:** Published `5535bc4`, branch `feature/i-ds-foundation`, draft PR #1 unchanged pending this task's commit. Checked working tree first: only unrelated `scratch/` untracked. No user downloads, original browser profile, live app or public GitHub release modified.
+- **Storage, measured cleanup:** Under `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261119-acceptance`, removed verified inactive duplicate PyInstaller builds/extractions and synthetic test sandboxes (**2,836.2 MiB**), previous isolated test profiles/media plus older synthetic archives (**107.8 MiB**), and license-rebuild intermediates/test Chrome profile (**616.4 MiB**), totaling about **3,560.4 MiB measured**. Kept one verified unsigned setup at `dist-setup\I-DS-Setup.exe`, compact logs/screenshots, pre-edit source backups and small extension ZIP archives. Original repo `scratch/`, media/runtime dependencies, config/history and user browser profiles preserved. Added cleanup rule to repo `AGENTS.md` for future sessions.
+- **Corrected GPLv3 installer:** Found the build script's old `ffmpeg -L | Out-File` could create an empty `FFmpeg-LICENSE.txt`. New builder copies **35,147 bytes of actual GNU GPLv3** from the identical installed Gyan FFmpeg build and fails on missing/invalid license; includes `THIRD_PARTY_NOTICES.txt`, verifies payload before packaging and cleans duplicate generated outputs on success. Reused exact already-tested I-DS app EXE with **SHA-256 `0b75782143f11a392561de9790e1d78557dbddf4dcf8c1d70a35eea477fef352`** instead of rebuilding the app. Independently inspected new PyInstaller archive: GPL license byte-for-byte equals supplier's 35,147-byte file, notices **1,691 bytes**, same app SHA-256, scripts intact. Corrected private unsigned setup is **334,346,103 bytes**; a real sandbox installation copied app, GPL and notices and verified Start Menu shortcut; uninstall completed while preserving user data. The prior unsigned setup was replaced only after these checks and removed to avoid duplicate storage.
+- **Native Windows scaling:** At **200% QT scale** (DPR 2.0, 480×340 logical / 960×680 physical), the original setup instruction label was clipped. Shortened help text to two concise sentences and rerendered/tested: label fits its size hint, two visible 44+ logical-pixel-high buttons within window; screenshot inspected at `installer-Windows-200pct-fixed.png`. Source-level native Qt UI PASS; full packaged 200% end-user acceptance still pending.
+- **Chrome/Edge profile reality:** Read **only installed extension metadata**, not cookies/tokens/history. Default browser roots: 18 Chrome profiles and one Edge profile had **no matching I-DS extension entry**. Chrome 157 opened `chrome://extensions` in isolated headless test profile but its Load unpacked action invoked an OS folder selector unavailable through Playwright, so owner-profile full transfer cannot be claimed. No active browser profile changed. Prior isolated installed Edge fallback/full PDF handoff remains PASS from `5535bc4`.
+- **Signing/clean OS:** Local installer Authenticode status **NotSigned**; 3 SignTool candidates discovered but **zero usable code-signing certificates**. Windows Sandbox executable absent; Hyper-V VM listing inaccessible (VirtualizationException). An actual *separate clean Windows OS* test was not performed; earlier isolated clean-config/no-system-Python/FFmpeg tests remain PASS. Do not sign with test cert or publish.
+- **License disclosure:** Updated existing `docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md` and bundled `THIRD_PARTY_NOTICES.txt`. Local Gyan FFmpeg 9.0 full static build is GPLv3 and reports source commit `d32b387f2b`; hosting the exact corresponding source and reviewing all dependent-library/source obligations remain required before public redistribution. This is a pre-publication blocker, not a claim of completed legal compliance.
+- **Final regression and E: cleanup:** **336/336 Python pytest** and **52/52 browser JavaScript** PASS; Python and PowerShell syntax, YAML metadata and Git diff checks PASS. Verified all 18 controlled distributions, then removed obsolete `.deps-rollback` (**21.17 MiB**) and generated Python/pytest caches (**1.56 MiB**) from E:; `scratch/` untouched. The repeatable builder now safely records PyInstaller's stderr/INFO log under Windows PowerShell without aborting on `ErrorActionPreference=Stop`, and removes logs/intermediate copies on verified success. Source-level builder logic was checked; its full two-stage rebuild was not repeated to avoid ~gigabytes of duplicate temporary output. Final observed free storage: **C: 27.50 GiB, E: 8.94 GiB**.
+- **Pending acceptance:** Actual installed Chrome/Edge owner-profile extension handoff/fallback, genuinely separate clean Windows PC/VM, signing with a real certificate, full GPLv3 source/notice review, and owner review of published-download experience. PR remains draft; no installer attached to GitHub release.
+
 ---
 
 # Current State — Windows release-candidate acceptance (2026-11-19 evening)

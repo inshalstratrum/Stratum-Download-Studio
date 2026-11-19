@@ -50,9 +50,9 @@ The extension requests broad HTTP/HTTPS site access to detect media; browser-sid
 
 ## Windows installer development
 
-- Repeatable local build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1` (PyInstaller, locked dependencies and FFmpeg/FFprobe required on the builder). Generated executables stay inside ignored `dist/`; nothing is published automatically.
+- Repeatable local build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1` (PyInstaller, locked dependencies and FFmpeg/FFprobe required on the builder). Generated executables stay inside ignored `dist/`; nothing is published automatically. On successful builds the script removes its disposable working copies by default and keeps only the setup; use `-KeepIntermediates` when debugging.
 - The staged `I-DS-Setup.exe` installs to the current Windows user's Programs folder, adds Start Menu shortcuts, and preserves user downloads/settings during uninstall. The branded executable includes FFmpeg/FFprobe and Deno; source-mode setup remains separate.
-- Windows SmartScreen may warn about unsigned builds. Complete code signing, license checks and owner acceptance before creating a public release.
+- Windows SmartScreen may warn about unsigned builds. Complete code signing, license checks and owner acceptance before creating a public release. **The bundled Gyan FFmpeg binary is GPLv3**, and the legal notice/source-availability review in [docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md](docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md) remains a release blocker.
 
 ## Developer checks
 
