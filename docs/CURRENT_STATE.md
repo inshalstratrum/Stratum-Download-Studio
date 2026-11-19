@@ -1,8 +1,11 @@
 ---
 type: project-status
 title: I-DS Current State
-updated_at: "2026-11-19T23:23:27+05:00"
+updated_at: "2026-11-20T00:09:37+05:00"
 revisions:
+  - at: "2026-11-20T00:09:37+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Started GitHub-hosted fresh Windows verification while Shal was offline; 336 Python and 52 browser JavaScript tests passed. Added a synthetic sandbox installer check for the next clean Windows run."
   - at: "2026-11-19T23:23:27+05:00"
     by: "chatgpt/gpt-6"
     change: "Completed final 336 Python/52 JavaScript regression, removed 21.17 MiB obsolete dependency rollback and caches, and fixed PyInstaller stderr handling in quiet build workflow."
@@ -18,6 +21,16 @@ revisions:
   - at: "2026-11-18T21:27:05+05:00"
     by: "chatgpt/gpt-6"
     change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — GitHub-hosted clean Windows verification (2026-11-20)
+
+- **Connection checkpoint:** Shal was offline at resume; earlier remote read timed out with no response. No local PC changes were made or tests claimed in this session. Current GitHub branch was verified at `11cb114`, draft PR #1; development CI addition advanced the branch to `d0e981c`.
+- **Independent Windows 2025 VM:** On GitHub Actions run [44595049258](https://github.com/inshalstratrum/Stratum-Download-Studio/actions/runs/44595049258), confirmed **SUCCESS**: fresh Python 3.14, Node, exact hash-verified 18 controlled distributions, pinned Deno 2.8.3, FFmpeg/FFprobe, **336/336 Python pytest** and **52/52 extension JavaScript**. Job ran on a separate GitHub-hosted Windows virtual machine; this supports independent clean-Windows **source** acceptance only. No installer, private user data, secrets or downloadable artifacts uploaded.
+- **Additional clean-room gate added:** The development workflow now includes a synthetic **1.5 MB** application fixture for `install_ids_windows.ps1` and `uninstall_ids_windows.ps1`; tests installed file SHA-256 equivalence, Start Menu shortcut creation and sentinel user-download preservation. **PENDING** until the next workflow run passes. This is not an end-to-end test of the private packaged setup executable.
+- **Public release gates unchanged:** Owner-profile Chrome and Edge have no verified installed I-DS extension, so real owner browser handoff/fallback remains UNTESTED. Private unsigned installer remains only on Shal at the previously verified path, unavailable while Shal offline. No signing certificate validated; FFmpeg GPLv3 corresponding-source/library notices remain incomplete for redistribution. Draft PR #1 stays open; no merge, GitHub release or installer attachment.
+- **Next Shal sync:** Once the Remote Desktop Commander device reconnects, inspect current uncommitted files and run `git pull --ff-only origin feature/i-ds-foundation` only if the local branch is safe to fast-forward; then perform owner-session browser checks and verify the private installer. Do not modify or delete `scratch/`, user profiles, app settings or downloads.
+
 ---
 
 # Current State — private installer license repair and storage cleanup (2026-11-19 late)
