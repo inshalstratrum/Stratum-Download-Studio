@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import shutil
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
@@ -23,6 +24,13 @@ from stratum_dependency_policy import (
 
 verified = verify_controlled_install(CONTROLLED_DEPENDENCIES)
 verify_controlled_deno(REPOSITORY_ROOT, CONTROLLED_DENO)
+
+# Release-candidate self-contained media tools; fail instead of shipping an
+# application that cannot complete audio postprocessing on a clean PC.
+FFMPEG_BINARY = shutil.which('ffmpeg')
+FFPROBE_BINARY = shutil.which('ffprobe')
+if not FFMPEG_BINARY or not FFPROBE_BINARY:
+    raise RuntimeError('Both FFmpeg and FFprobe must be available for I-DS packaging')
 if set(verified) != set(APPROVED_DISTRIBUTIONS):
     raise RuntimeError('Refusing to package an incomplete dependency manifest')
 
@@ -50,12 +58,16 @@ for data_module in ('certifi', 'curl_cffi', 'yt_dlp_ejs'):
 a = Analysis(
     ['stratum_download_studio.py'],
     pathex=[str(CONTROLLED_DEPENDENCIES)],
-    binaries=[(str(CONTROLLED_DENO), 'tools/deno')],
+    binaries=[
+        (str(CONTROLLED_DENO), 'tools/deno'),
+        (str(Path(FFMPEG_BINARY).resolve()), '.'),
+        (str(Path(FFPROBE_BINARY).resolve()), '.'),
+    ],
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(REPOSITORY_ROOT / 'pyinstaller_runtime_hook.py')],
     excludes=list(INTENTIONALLY_EXCLUDED_MODULES + FORBIDDEN_AMBIENT_RUNTIME_MODULES) + ['Cryptodome.SelfTest'],
     noarchive=False,
     optimize=0,
@@ -68,7 +80,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='StratumDownloadStudio',
+    name='I-DS',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -76,6 +88,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    icon=str(REPOSITORY_ROOT / 'stratum-download-studio.ico'),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

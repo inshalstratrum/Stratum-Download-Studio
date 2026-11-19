@@ -9,7 +9,7 @@
 ## What works today
 
 - **Desktop media URLs:** Add a supported video/audio URL, choose a real output format and available resolution, and start downloading through the controlled yt-dlp engine.
-- **Direct file downloads (Phase 2B beta):** Desktop **File Download** supports HTTP/HTTPS PDFs, ZIPs, images, installers and other files, with progress, safe unique filenames and resumable partials when the server provides validators. Interruption, validator changes and parallel files passed isolated HTTP recovery tests. Edge extension-to-Qt queue handoff passed in an isolated test profile; installed user-profile Chrome/Edge and browser-origin content saving still need acceptance.
+- **Direct file downloads (Phase 2B beta):** Desktop **File Download** supports HTTP/HTTPS PDFs, ZIPs, images, installers and other files, with progress, safe unique filenames and resumable partials when the server provides validators. Interruption, validator changes and parallel files passed recovery tests. The installed Edge executable with an isolated extension profile preserved its native download when I-DS was absent; when connected, Edge cancelled its copy and I-DS saved a verified public PDF (13,264 bytes). Real owner-profile Chrome/Edge acceptance remains pending.
 - **Chrome/Edge browser companion:** Detect supported on-page media, show an in-player I-DS button, right-click a file link, or opt in to automatic handoff of supported general-file downloads.
 - **Download management:** Status, pause/cancel, queue history/recovery logic, speed controls, and completion actions are implemented. Reliability still needs live long-session testing.
 - **Media converter:** FFmpeg-based conversions with format validation, progress/cancellation and **Video size** presets (Original, up to 1080p / 720p / 480p / 360p / 240p). Resizing preserves aspect ratio and never upscales. A real FFmpeg 640×480 to 480×360 conversion passed FFprobe and frame decoding.
@@ -21,10 +21,10 @@ The underlying source and compatibility filenames still use the historical Strat
 
 - Manual Chrome/Edge installed-extension acceptance of opt-in PDF/ZIP/installer handoff and correct resume-to-browser fallback after failed desktop acceptance. Chrome downloads requiring session cookies may not transfer successfully.
 - Extended HTTP retry/recovery stress testing, especially large authenticated or expiring signed links (**Phase 2B.1**).
-- Further video-detection and site compatibility checks, particularly **YouTube HTTP 403**. A controlled public test video completed through a one-time isolated Android-client retry and passed FFprobe/FFmpeg playback checks. **MP4 download worker verified; MP3 and all websites/videos not yet proven.** Site access and formats can change; DRM-protected content is not supported.
-- Polished installer, signed releases, a published browser store extension, and full accessibility/manual desktop acceptance tests.
+- Further video-detection and site compatibility checks, particularly **YouTube HTTP 403**. The one-time Android-client retry completed both a verified MP4 and a **5.05 MiB MP3** through the actual I-DS worker. FFmpeg lookup was repaired for Windows WinGet links and frozen builds. Other websites/videos and owner-profile downloads remain unverified. DRM-protected content is not supported.
+- A private unsigned **I-DS-Setup.exe** installer has been built and passed sandbox installation, startup, shortcut and uninstall tests without Python or FFmpeg on the test PATH. **Code signing, bundled third-party license/source compliance review, a separate clean Windows PC, Chrome owner-profile acceptance and browser-store publication** remain pending.
 
-**Do not install from unrelated websites.** This repository's launcher uses the Python source; it is not a signed Windows installer.
+**Do not install from unrelated websites.** GitHub currently provides the source, not a signed public installer. The tested private setup candidate is deliberately not attached to a release until the remaining acceptance checks pass.
 
 ## Quick start on Windows
 
@@ -47,6 +47,12 @@ To download supported media, select **Add media**. For a direct PDF, ZIP or inst
 The on-video **I-DS** button opens **Download with Options**. Its grip lets you drag it; **−/+** compacts or expands it, and **×** dismisses it for that player. Right-click **Quick Download with I-DS** remains the fast-start alternative. Use **Download file with I-DS** on ordinary links. Under extension settings, optionally enable **Automatically use I-DS for supported browser files**. It is off by default; a failed desktop handoff resumes Chrome. Avoid enabling it for private downloads that depend on browser cookies until live compatibility testing is complete.
 
 The extension requests broad HTTP/HTTPS site access to detect media; browser-side request observations do not copy passwords, cookies, or authorization headers.
+
+## Windows installer development
+
+- Repeatable local build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1` (PyInstaller, locked dependencies and FFmpeg/FFprobe required on the builder). Generated executables stay inside ignored `dist/`; nothing is published automatically.
+- The staged `I-DS-Setup.exe` installs to the current Windows user's Programs folder, adds Start Menu shortcuts, and preserves user downloads/settings during uninstall. The branded executable includes FFmpeg/FFprobe and Deno; source-mode setup remains separate.
+- Windows SmartScreen may warn about unsigned builds. Complete code signing, license checks and owner acceptance before creating a public release.
 
 ## Developer checks
 

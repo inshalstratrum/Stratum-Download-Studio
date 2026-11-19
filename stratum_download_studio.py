@@ -4,6 +4,7 @@ import uuid
 import json
 import http.server
 import subprocess
+import shutil
 import re
 from datetime import datetime
 import secrets
@@ -153,18 +154,27 @@ QTabBar::tab:selected { background: #ffffff; color: #163f63; }
 MODERN_STYLE += UI_POLISH_QSS
 
 def get_ffmpeg_path():
-    if hasattr(sys, '_MEIPASS'): return os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    local_ffmpeg = os.path.join(base_dir, 'ffmpeg.exe')
-    if os.path.exists(local_ffmpeg): return local_ffmpeg
-    return 'ffmpeg'
+    if hasattr(sys, '_MEIPASS'):
+        frozen = Path(sys._MEIPASS) / 'ffmpeg.exe'
+        if frozen.is_file():
+            return str(frozen)
+    local_ffmpeg = Path(__file__).resolve().parent / 'ffmpeg.exe'
+    if local_ffmpeg.is_file():
+        return str(local_ffmpeg)
+    # yt-dlp expects ffmpeg_location to be an actual path, not 'ffmpeg'.
+    # WinGet commonly exposes ffmpeg/ffprobe as adjacent .EXE symlinks.
+    return shutil.which('ffmpeg') or 'ffmpeg'
 
 
 def get_ffprobe_path():
     if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, 'ffprobe.exe')
+        frozen = Path(sys._MEIPASS) / 'ffprobe.exe'
+        if frozen.is_file():
+            return str(frozen)
     local_ffprobe = Path(__file__).resolve().parent / 'ffprobe.exe'
-    return str(local_ffprobe) if local_ffprobe.exists() else 'ffprobe'
+    if local_ffprobe.is_file():
+        return str(local_ffprobe)
+    return shutil.which('ffprobe') or 'ffprobe'
 
 def validate_token(token):
     return isinstance(token, str) and len(token) == 64 and all(c in string.hexdigits for c in token)

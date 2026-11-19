@@ -1,14 +1,31 @@
 ---
 type: project-status
 title: I-DS Current State
-updated_at: "2026-11-19T08:59:38+05:00"
+updated_at: "2026-11-19T22:08:10+05:00"
 revisions:
+  - at: "2026-11-19T22:08:10+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Verified live MP3, isolated installed Edge file handoff and fallback, private self-contained Windows installer, and full release-candidate test gate."
   - at: "2026-11-19T08:59:38+05:00"
     by: "chatgpt/gpt-6"
     change: "Verified I-DS public YouTube 403 fallback, fixed popup and browser action UX, tested Edge overlay and pairing, and organized launch entry."
   - at: "2026-11-18T21:27:05+05:00"
     by: "chatgpt/gpt-6"
     change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — Windows release-candidate acceptance (2026-11-19 evening)
+
+- **Git checkpoint before work:** `feature/i-ds-foundation`, published `3d58838`, draft PR #1 remains open. User downloads, browser profiles, old configurations and unrelated `scratch/` preserved. No public release, signed executable, or PR merge.
+- **MP3 and FFmpeg — verified:** A real I-DS `DownloadThread` completed the reported public YouTube link after its bounded HTTP 403 fallback, producing a **5.05 MiB audio-only MP3**. FFprobe identified the MP3 audio stream, no video stream, and FFmpeg decoded the audio. Fixed `get_ffmpeg_path` / `get_ffprobe_path` to resolve actual Windows WinGet executables and prefer bundled frozen paths; original MP3 failure (“ffmpeg not found”) reproduced first and disappeared after the change. Other private or protected sites remain untested.
+- **Installed Microsoft Edge — real browser API and Qt worker:** In a **fresh isolated profile**, the actual installed Edge browser and real I-DS MV3 extension completed a native fallback download with the desktop absent; with a connected authenticated desktop bridge, Edge cancelled the native copy and the actual desktop downloader saved a public W3C **13,264-byte PDF** with a PDF header. Edge History showed complete state for fallback and cancelled state for the accepted handoff. An isolated test harness did not exit normally after the transfer and was stopped after verifying outputs; this is not installed *owner-profile* acceptance. No login/cookies/user browser data touched.
+- **Installed Chrome limitation:** Chrome 157.0.8103.79 was found, but its isolated automated launch rejected unpacked extension injection, and the relevant CDP loading method was unavailable. **Installed Chrome extension handoff and owner-profile browser permissions are UNTESTED**; manual browser acceptance remains necessary. Do not assume a profile is connected based on old screenshots.
+- **Self-contained Windows app:** Updated `StratumDownloadStudio.spec` to create branded `I-DS.exe`, include locked Deno, FFmpeg and FFprobe plus runtime hook, without renaming compatibility source. PyInstaller **6.20** produced a private **283.68 MiB** one-file EXE, which opened the real Qt loopback bridge on a fresh synthetic config and exposed both FFmpeg tools in unpacked resources. No system Python or FFmpeg was on the test PATH during the clean-config installed-app test.
+- **Windows installer:** Added `scripts/ids_installer_gui.py` (branded Qt one-click per-user setup with progress and update confirmation), `scripts/install_ids_windows.ps1`, `scripts/uninstall_ids_windows.ps1`, and repeatable `scripts/build_windows_installer.ps1`. PyInstaller privately built `I-DS-Setup.exe` (**334,332,863 bytes**, unsigned). Actual native Windows setup GUI was rendered at 570x340 and 480x340 at 10/13pt; buttons fit and the packaged installer window opened/responded. Actual setup executable was exercised in a sandbox using synthetic user profile and no system Python/FFmpeg on PATH: installer exited 0, installed EXE SHA-256 matched, Start Menu shortcuts existed, installed I-DS launched and generated isolated config, and uninstall removed app while preserving user data. Sandboxed upgrade also preserved the previous EXE before replacement. Not a physically separate clean PC test.
+- **Tests and staging:** **336/336 full Python pytest** and **52/52 JavaScript** passed; Python syntax, installer PowerShell parsing, JS syntax and `git diff --check` passed. A generated ignored `extension_packages/` folder caused the first Python gate to fail; its three confirmed development ZIPs were hash-verified and moved reversibly to the existing safety backup, then the full Python gate passed. Sandbox evidence and unpublished unsigned EXEs are stored in `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261119-acceptance`. No EXE release has been published. `scratch/` untouched.
+- **UX acceptance (applicable UX-01–UX-15):** For setup GUI, UX-01 to UX-04 and UX-10 are N/A; UX-05/06/07/08/09/11/14 and relevant UX-15 were visually inspected at Windows desktop width 480/570px and 13/10pt. UX-12 narrow desktop PASS; 200% Windows scaling UNTESTED. UX-13 actual install/error/success tested through sandbox install and GUI smoke separately, but not every interactive error state; owner GUI acceptance remains pending. Skills read: local Module 08 full master; native PyQt6/Playwright and project tests reused.
+- **Release blockers / next:** Finish real Chrome owner-profile and Edge owner-profile extension acceptance and fallback (no profile changes without owner session), a separate fresh Windows PC/VM test, signing certificate and Windows SmartScreen acceptance, bundled FFmpeg GPLv3 license/source distribution compliance review, 200% Windows scaling, and owner review of the Windows installer UX. PR #1 stays **draft**. Windows development source setup continues to work; private installer remains clearly marked **unsigned and unreleased**.
+
 ---
 
 # Current State — I-DS owner-reported reliability fixes (2026-11-19)

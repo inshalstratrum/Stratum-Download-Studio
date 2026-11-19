@@ -653,7 +653,9 @@ def test_cleanup_paths_do_not_exist():
 def test_final_spec_uses_final_entrypoint_and_executable_name():
     spec = Path('StratumDownloadStudio.spec').read_text(encoding='utf-8')
     assert "['stratum_download_studio.py']" in spec
-    assert "name='StratumDownloadStudio'" in spec
+    assert "name='I-DS'" in spec
+    assert "icon=str(REPOSITORY_ROOT / 'stratum-download-studio.ico')" in spec
+    assert "pyinstaller_runtime_hook.py" in spec
 
 
 def test_generated_directories_are_ignored():
