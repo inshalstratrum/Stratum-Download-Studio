@@ -333,7 +333,7 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, code: "invalid_candidate", message: "No complete downloadable media detected." });
       return false;
     }
-    sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl)).then(sendResponse);
+    sendToDesktopApp(selected.url, "download_with_options", trustedHandoff(selected, pageUrl)).then(sendResponse);
     return true;
   }
   return false;

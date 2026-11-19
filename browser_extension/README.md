@@ -6,11 +6,11 @@ This is the unpacked Manifest V3 extension source for I-DS (development version 
 
 ## Install for development
 
-1. Start the I-DS desktop application with **START I-DS.cmd**.
+1. Start I-DS using **00 - OPEN I-DS** (created by setup); the legacy command file still works.
 2. Open **chrome://extensions** or **edge://extensions** and enable Developer mode.
 3. Choose **Load unpacked** and select this **browser_extension** directory, not a ZIP.
 4. Click the I-DS extension toolbar icon to open settings.
-5. Desktop → **Options → Browser Integration → Copy Token**; paste it into extension settings and save.
+5. Desktop → **Options → Browser Integration → Copy Token**; in extension settings click **Connect with copied token**. If clipboard access is unavailable, use the manual token field.
 
 If the token is missing, Settings opens automatically. For connection issues, restart the desktop app and verify local pairing. Do not share pairing tokens.
 
@@ -19,7 +19,7 @@ If the token is missing, Settings opens automatically. For connection issues, re
 - Right-click a page link, video, or audio source and choose **Quick Download with I-DS** or **Download with Options in I-DS**.
 - Right-click **Download file with I-DS** for a direct general HTTP(S) file.
 - Enable **Automatically use I-DS for supported browser files** in extension settings only if you want ordinary Chrome downloads handed to the desktop. Handoff failures resume the original browser download. Once the desktop has accepted a job, later server failures still require retry in I-DS.
-- The **I-DS** button appears on detectable playable media. You can disable it under the extension settings.
+- The **I-DS** button appears on detected playable media and opens download options. Drag its grip to reposition, use **−/+** to compact/expand, or **×** to dismiss on that player. You can also disable it globally in extension settings.
 - The toolbar icon opens settings; it does not trigger a download by itself.
 
 The extension inspects permitted HTTP/HTTPS pages, frames, and response metadata to identify supported media. It suppresses segmented fragments, avoids unsafe URL schemes, does not send stored browser cookies or auth headers to the desktop app, and keeps candidate metadata inside the extension until a user chooses a download. DRM is unsupported.

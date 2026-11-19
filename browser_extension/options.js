@@ -9,6 +9,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("intercept-general-files").checked = result.interceptGeneralDownloads === true;
 });
 
+document.getElementById("paste-connect").addEventListener("click", async () => {
+  const status = document.getElementById("status");
+  try {
+    // Clipboard read only on an explicit click in the extension's own page.
+    const token = (await navigator.clipboard.readText()).trim();
+    if (!/^[a-fA-F0-9]{64}$/.test(token)) {
+      status.style.color = "#9c3344";
+      status.textContent = "Copy Token in I-DS desktop, then click Connect here.";
+      return;
+    }
+    await extensionApi.storage.local.set({ authToken: token });
+    document.getElementById("token").placeholder = "A token is currently saved";
+    status.style.color = "#087e86";
+    status.textContent = "Pairing token saved. Try a download to check the connection.";
+  } catch (error) {
+    status.style.color = "#9c3344";
+    status.textContent = "Clipboard access unavailable. Paste the token manually below.";
+  }
+});
+
 document.getElementById("toggle-visibility").addEventListener("click", () => {
   const tokenInput = document.getElementById("token");
   const toggleButton = document.getElementById("toggle-visibility");

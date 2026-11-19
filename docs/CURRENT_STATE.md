@@ -1,11 +1,27 @@
 ---
 type: project-status
 title: I-DS Current State
-updated_at: "2026-11-18T21:27:05+05:00"
+updated_at: "2026-11-19T08:59:38+05:00"
 revisions:
+  - at: "2026-11-19T08:59:38+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Verified I-DS public YouTube 403 fallback, fixed popup and browser action UX, tested Edge overlay and pairing, and organized launch entry."
   - at: "2026-11-18T21:27:05+05:00"
     by: "chatgpt/gpt-6"
     change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — I-DS owner-reported reliability fixes (2026-11-19)
+
+- **Starting point:** `feature/i-ds-foundation` at published `9224654`, PR #1 still draft. Reconnected to Shal, inspected actual uncommitted files and last Python process. The previous live Android-client test PID was no longer attached; its completed log and 14.36 MiB output were independently verified before any further work.
+- **YouTube HTTP 403:** The user's reported public video URL returned 27 metadata formats. A default-client full download reproduced HTTP 403; a separate Android client completed **14.36 MiB**, video H.264 + audio AAC with valid FFprobe and FFmpeg-decoded frame. The desktop `DownloadThread` now makes at most **one** public Android-client retry after an actual YouTube HTTP 403 and only with a proven per-job output tag; it uses a distinct `-android-` filename so old partial bytes are never mixed across clients. A **real isolated I-DS MP4 download worker** exercised that fallback, completed the file, passed media verification and decoded a frame. This is **not** proof all YouTube videos or MP3 jobs will work; user-profile browser flow remains unaccepted. Controlled yt-dlp version, DRM limits and cookie rules unchanged.
+- **Download errors and dialog:** Failure dialogs now disappear after acknowledgment, terminal progress buttons say **Close** rather than triggering the cancel/partial-data question, and explicit cancel choices close the active popup. Browser-triggered Download with Options no longer raises the entire main window, and the in-player button requests the options path instead of silent Quick Download. Explicit right-click Quick Download remains.
+- **Browser UX:** Existing MV3 media candidate/ownership logic preserved; improved small I-DS overlay with distinct drag grip, compact/expand button and dismiss control. Verified in isolated live Edge: controls draggable, compact/expand/dismiss working, no remaining orphan controls; inspected screenshot. Pairing remains per-installation and local: Copy Token in desktop → **Connect with copied token** in the extension (a deliberate clipboard-read gesture; manual paste remains available). Isolated Edge verified storage save/clear and 390px responsive layout with no horizontal overflow. **Actual installed Chrome/Edge clipboard permission and owner profile are UNTESTED**; no hidden automatic token-sharing or new secret endpoint was added. Automatic left-click file interception remains opt-in and native-download fallback unchanged.
+- **Windows entry and file audit:** Created a working **`00 - OPEN I-DS.lnk`** on Shal pointing to `pythonw.exe`, its branded ICO and `START I-DS.pyw`; `SETUP I-DS.cmd` now generates it through `scripts/create_ids_shortcut.ps1` (shortcut target/icon/path verified). Created `00 - START HERE.txt` for nontechnical users. Moved only the **stale**, independently verified broken `Start Stratum Download Studio.lnk` to `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261118-functional` so it can be restored. Historical source, compatibility launchers, controlled dependencies, caches, `scratch/`, downloads and user settings were not moved or deleted. Actual normal-session launch via new shortcut still requires owner acceptance.
+- **Automated and rendered:** **332/332 Python tests passed in one full run** after isolating Windows Qt popup integration tests in child processes; **52/52 JS tests passed**, Python/JS compilation and `git diff --check` passed. Synthetic popup/foreground behavior and extension overlay were actually exercised. New relevant browser UI at 390px visually inspected. An earlier combined Qt test-process crash was reproduced and resolved by independent process isolation, not by skipping any tests. No installer build or public release.
+- **Backups and evidence:** `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261118-functional` contains pre-edit source files, UI screenshots, synthetic Edge profiles, test scripts, 14.36 MiB full-media evidence, and regression logs (`pytest-final-isolated.log`, `full-js-resume.log`). Local only; no secret token or user browser profile was copied into the repo.
+- **Next AI work:** Verify real owner-installed Chrome/Edge handoff, native file fallback, entire main-UI options foreground, MP3 end-to-end, and clean Windows bootstrap; refine root navigation without moving compatibility code. Leave PR draft, no EXE release until acceptance gates pass. Staging source was tested; owner acceptance remains pending.
+
 ---
 
 # Current State — Phase 2B.1 recovery and converter resizing (2026-11-18)

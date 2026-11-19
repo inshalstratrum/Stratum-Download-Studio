@@ -15,13 +15,13 @@
 - **Media converter:** FFmpeg-based conversions with format validation, progress/cancellation and **Video size** presets (Original, up to 1080p / 720p / 480p / 360p / 240p). Resizing preserves aspect ratio and never upscales. A real FFmpeg 640×480 to 480×360 conversion passed FFprobe and frame decoding.
 - **Local pairing:** The extension sends authenticated requests to a loopback-only desktop endpoint. Pairing tokens stay local.
 
-The underlying source and compatibility filenames still use the historical Stratum names to preserve existing configurations and tooling.
+The underlying source and compatibility filenames still use the historical Stratum names to preserve existing configurations and tooling. **On Windows, use `00 - OPEN I-DS` to start the GUI with the I-DS product icon and no persistent command window.** A broken old Start Stratum shortcut was moved to a reversible local backup; do not remove the internal source files.
 
 ## Still in development
 
 - Manual Chrome/Edge installed-extension acceptance of opt-in PDF/ZIP/installer handoff and correct resume-to-browser fallback after failed desktop acceptance. Chrome downloads requiring session cookies may not transfer successfully.
 - Extended HTTP retry/recovery stress testing, especially large authenticated or expiring signed links (**Phase 2B.1**).
-- Further video-detection and site compatibility checks, including **full YouTube playback**. A short sample downloaded using an embedded client, but a full public video transfer hit network timeouts; full playback remains unverified. Site access and formats can change; DRM-protected content is not supported.
+- Further video-detection and site compatibility checks, particularly **YouTube HTTP 403**. A controlled public test video completed through a one-time isolated Android-client retry and passed FFprobe/FFmpeg playback checks. **MP4 download worker verified; MP3 and all websites/videos not yet proven.** Site access and formats can change; DRM-protected content is not supported.
 - Polished installer, signed releases, a published browser store extension, and full accessibility/manual desktop acceptance tests.
 
 **Do not install from unrelated websites.** This repository's launcher uses the Python source; it is not a signed Windows installer.
@@ -31,7 +31,7 @@ The underlying source and compatibility filenames still use the historical Strat
 1. Install **Python 3.14** (recommended; Python 3.10+ is supported where compatible wheels exist) and **FFmpeg** for media conversions.
 2. Download this branch using **Code → Download ZIP** and extract it, or clone the repository.
 3. Double-click **`SETUP I-DS.cmd`** once (internet required). It checks the desktop GUI and installs verified, isolated media dependencies if needed.
-4. Double-click **`START I-DS.cmd`**. The historical `START STRATUM DOWNLOADER.cmd` remains supported.
+4. Double-click **`00 - OPEN I-DS`** (product logo, no persistent terminal). Setup creates the shortcut. The older `START I-DS.cmd` and `START STRATUM DOWNLOADER.cmd` remain available for compatibility.
 
 To download supported media, select **Add media**. For a direct PDF, ZIP or installer URL, select **Download file**, paste the link and choose the save folder. Existing files are not overwritten.
 
@@ -42,9 +42,9 @@ To download supported media, select **Add media**. For a direct PDF, ZIP or inst
 1. Open `chrome://extensions` (or `edge://extensions`), enable **Developer mode**, and choose **Load unpacked**.
 2. Select the repository's **`browser_extension`** folder.
 3. In I-DS desktop, open **Options → Browser Integration → Copy Token**.
-4. Click the **I-DS browser toolbar icon**, paste the token into Settings, and save it.
+4. Click the I-DS browser icon and choose **Connect with copied token**. If browser clipboard access is unavailable, expand the manual section and paste the token normally.
 
-Use the on-video **I-DS** button or right-click **Quick Download with I-DS** for media. Use **Download file with I-DS** on ordinary links. Under extension settings, optionally enable **Automatically use I-DS for supported browser files**. It is off by default; a failed desktop handoff resumes Chrome. Avoid enabling it for private downloads that depend on browser cookies until live compatibility testing is complete.
+The on-video **I-DS** button opens **Download with Options**. Its grip lets you drag it; **−/+** compacts or expands it, and **×** dismisses it for that player. Right-click **Quick Download with I-DS** remains the fast-start alternative. Use **Download file with I-DS** on ordinary links. Under extension settings, optionally enable **Automatically use I-DS for supported browser files**. It is off by default; a failed desktop handoff resumes Chrome. Avoid enabling it for private downloads that depend on browser cookies until live compatibility testing is complete.
 
 The extension requests broad HTTP/HTTPS site access to detect media; browser-side request observations do not copy passwords, cookies, or authorization headers.
 

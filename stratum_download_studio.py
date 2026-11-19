@@ -534,6 +534,32 @@ def extraction_options_for_url(base_options, url):
     return options
 
 
+def should_retry_public_youtube_403(error, url, output_template, job_id):
+    """Try one separately named, public Android-client transfer after a media HTTP 403.
+
+    An independent filename prevents resuming incompatible partial bytes from
+    a different YouTube client. Do not attempt this for other sites or jobs
+    without an established per-job output tag.
+    """
+    if not isinstance(url, str) or not re.search(r'(?i)\bHTTP Error 403\b', str(error or '')):
+        return False
+    valid, _ = validate_url(url)
+    if not valid:
+        return False
+    host = (urllib.parse.urlsplit(url).hostname or '').lower()
+    if host not in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'music.youtube.com'}:
+        return False
+    suffix = f'-{str(job_id)[:8]}.%(ext)s'
+    return bool(job_id and str(output_template).endswith(suffix))
+
+
+def alternate_youtube_output_template(output_template, job_id):
+    suffix = f'-{str(job_id)[:8]}.%(ext)s'
+    if not job_id or not str(output_template).endswith(suffix):
+        raise ValueError('No safely isolated alternate media output template')
+    return str(output_template)[:-len(suffix)] + '-android' + suffix
+
+
 def is_authentication_extraction_error(error):
     return bool(AUTHENTICATION_ERROR_RE.search(str(error or '')))
 
@@ -2105,18 +2131,38 @@ class DownloadThread(QThread):
                     self.ydl = ydl
                     info = ydl.extract_info(self.url, download=True)
             except Exception as first_error:
-                if not should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                if self.cancelled or self.paused or self.isInterruptionRequested():
                     raise
-                self.status.emit(self.id, 'Authentication required; retrying once')
-                retry_base = build_download_options(
-                    self.profile_name, self.outtmpl, self.requested_height, self.metadata,
-                    [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
-                    self.request_context,
-                )
-                retry_options = authenticated_retry_options(retry_base, self.url, self.app_config)
-                with yt_dlp.YoutubeDL(retry_options) as ydl:
-                    self.ydl = ydl
-                    info = ydl.extract_info(self.url, download=True)
+                if should_retry_public_youtube_403(first_error, self.url, self.outtmpl, self.id):
+                    # Distinct per-job output avoids mixing old client .part ranges.
+                    alternate_template = alternate_youtube_output_template(self.outtmpl, self.id)
+                    self.status.emit(self.id, 'YouTube stream rejected; trying one alternate public client')
+                    retry_base = build_download_options(
+                        self.profile_name, alternate_template, self.requested_height, self.metadata,
+                        [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                        self.request_context,
+                    )
+                    retry_options = extraction_options_for_url(retry_base, self.url)
+                    retry_options['extractor_args'] = {
+                        **retry_options.get('extractor_args', {}),
+                        'youtube': {'player_client': ['android']},
+                    }
+                    with yt_dlp.YoutubeDL(retry_options) as ydl:
+                        self.ydl = ydl
+                        info = ydl.extract_info(self.url, download=True)
+                elif should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                    self.status.emit(self.id, 'Authentication required; retrying once')
+                    retry_base = build_download_options(
+                        self.profile_name, self.outtmpl, self.requested_height, self.metadata,
+                        [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                        self.request_context,
+                    )
+                    retry_options = authenticated_retry_options(retry_base, self.url, self.app_config)
+                    with yt_dlp.YoutubeDL(retry_options) as ydl:
+                        self.ydl = ydl
+                        info = ydl.extract_info(self.url, download=True)
+                else:
+                    raise
             if isinstance(info, dict) and isinstance(info.get('url'), str):
                 self.resolved_media_url = info['url']
             if self.cancelled or self.isInterruptionRequested():
@@ -2541,6 +2587,8 @@ class DownloadProgressPopup(QDialog):
             self.pause_btn.setEnabled(True)
         else:
             self.pause_btn.setEnabled(False)
+        terminal = normalized in {JobState.FAILED.value, JobState.CANCELLED.value, JobState.COMPLETED.value}
+        self.cancel_btn.setText("Close" if terminal else "Cancel")
 
     def persist_keep_open_preference(self, checked):
         if self.app_config:
@@ -2569,6 +2617,9 @@ class DownloadProgressPopup(QDialog):
             self.pause_requested.emit(self.job_id)
 
     def request_cancel(self):
+        if self.job_state in {JobState.COMPLETED.value, JobState.FAILED.value, JobState.CANCELLED.value}:
+            self.close()
+            return
         if self.job_state in {JobState.CONVERTING.value, JobState.PAUSED.value, 'starting'}:
             if QMessageBox.question(self, "Cancel Conversion", "Cancel only this conversion? The source and previous valid outputs will be preserved.") == QMessageBox.StandardButton.Yes:
                 self.cancel_requested.emit(self.job_id, False)
@@ -2582,8 +2633,10 @@ class DownloadProgressPopup(QDialog):
         question.exec()
         if question.clickedButton() == keep_button:
             self.cancel_requested.emit(self.job_id, False)
+            self.close()
         elif question.clickedButton() == remove_button:
             self.cancel_requested.emit(self.job_id, True)
+            self.close()
 
     def apply_speed_limit(self):
         unit = self.speed_unit_combo.currentText()
@@ -2901,8 +2954,8 @@ class BrowserIntegrationDialog(QDialog):
         self.setWindowTitle("Browser Integration")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Copy the local authentication token into the Chrome, Edge, or Firefox extension. "
-            "The token is masked and must never be shared or logged."
+            "Connect your browser in two steps: Click Copy Token here, then open "
+            "I-DS extension settings and click Connect with copied token."
         ))
         token_field = QLineEdit(app_config.auth_token)
         token_field.setReadOnly(True)
@@ -2935,7 +2988,8 @@ class BrowserIntegrationDialog(QDialog):
 
         actions = QHBoxLayout()
         copy_button = QPushButton("Copy Token")
-        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(app_config.auth_token))
+        copy_button.setAccessibleName("Copy private browser pairing token")
+        copy_button.clicked.connect(self.copy_pairing_token)
         actions.addWidget(copy_button)
         guide_button = QPushButton("Open Extension Guide")
         guide_button.clicked.connect(self.open_guide)
@@ -2950,6 +3004,9 @@ class BrowserIntegrationDialog(QDialog):
         close_button.clicked.connect(self.accept)
         actions.addWidget(close_button)
         layout.addLayout(actions)
+        self.copy_feedback = QLabel("")
+        self.copy_feedback.setAccessibleName("Browser pairing instruction")
+        layout.addWidget(self.copy_feedback)
 
         layout.addWidget(QLabel(f"Paired browser origins (maximum {MAX_PAIRED_ORIGINS}):"))
         pairing_actions = QHBoxLayout()
@@ -2962,6 +3019,10 @@ class BrowserIntegrationDialog(QDialog):
         self.pairing_label = QLabel()
         layout.addWidget(self.pairing_label)
         self.refresh_origins()
+
+    def copy_pairing_token(self):
+        QApplication.clipboard().setText(self.app_config.auth_token)
+        self.copy_feedback.setText("Copied. In your I-DS extension, click Connect with copied token.")
 
     def persist_default_action(self):
         selected = self.default_action_combo.currentData()
@@ -3929,9 +3990,13 @@ class StratrumDownloadStudio(QMainWindow):
 
     def open_add_dialog(self, url="", request_foreground=False, request_context=None):
         if isinstance(url, bool): url = ""
-        self.show_normal(request_foreground=request_foreground)
+        # Browser handoffs should foreground ONLY the small options dialog,
+        # not pull the entire download manager across the browser window.
+        if not request_foreground:
+            self.show_normal(request_foreground=False)
         dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config, request_context=request_context)
         if request_foreground:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             QTimer.singleShot(0, lambda: self.request_foreground(dialog))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
@@ -4237,6 +4302,8 @@ class StratrumDownloadStudio(QMainWindow):
                     self.popups[id].set_details(f"State: {state.value}\nSafe error: {clean_error_summary(error_msg)}\nPartial files were retained unless removal was explicitly requested.")
                 if not cancelled:
                     QMessageBox.warning(self, "Download Failed", clean_error_summary(error_msg))
+                if popup := self.popups.pop(id, None):
+                    popup.close()
             d['thread'] = None
             self.save_downloads_to_file()
             self.refresh_dashboard()

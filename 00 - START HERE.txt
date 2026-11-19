@@ -1,0 +1,34 @@
+I-DS — I.os Download Support
+Tool by InShaLIve.os
+
+OPEN THE APP
+    Double-click: 00 - OPEN I-DS
+    This uses the I-DS logo and runs WITHOUT a terminal.
+
+FIRST-TIME SETUP (only once, on a new Windows PC)
+    Double-click: SETUP I-DS.cmd
+    Then double-click: 00 - OPEN I-DS
+
+CONNECT YOUR BROWSER
+    1. In Chrome/Edge extensions, load the browser_extension folder.
+    2. In desktop I-DS -> Options -> Browser Integration -> Copy Token.
+    3. In browser I-DS settings -> Connect with copied token.
+    4. Enable automatic file handoff for IDM-like left-click downloads.
+       It stays optional because sites requiring browser logins may not transfer.
+
+DO NOT REMOVE TECHNICAL FILES
+    stratum_download_studio.py, StratumDownloadStudio.pyw, .spec, .deps,
+    requirements, tests and .git files are part of the app or its source history.
+    Older "Stratum" filenames are compatibility internals, not a second app.
+
+FOR DEVELOPERS
+    README.md                 Project overview and setup
+    docs/                     Specifications, current status and usage guides
+    scripts/                  Developer and installer helpers
+    tests/ + test_*.py        Regression checks
+    browser_extension/        Chrome/Edge companion
+    firefox_extension/        Firefox companion
+    .deps/ and .tools/        Controlled download dependencies
+    scratch/                  Existing unrelated work (do not remove)
+
+For help, read README.md and docs/CURRENT_STATE.md.
