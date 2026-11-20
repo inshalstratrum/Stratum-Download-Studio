@@ -653,7 +653,9 @@ def test_cleanup_paths_do_not_exist():
 def test_final_spec_uses_final_entrypoint_and_executable_name():
     spec = Path('StratumDownloadStudio.spec').read_text(encoding='utf-8')
     assert "['stratum_download_studio.py']" in spec
-    assert "name='StratumDownloadStudio'" in spec
+    assert "name='I-DS'" in spec
+    assert "icon=str(REPOSITORY_ROOT / 'stratum-download-studio.ico')" in spec
+    assert "pyinstaller_runtime_hook.py" in spec
 
 
 def test_generated_directories_are_ignored():
@@ -859,7 +861,7 @@ def test_firefox_manifest_has_stable_id_and_background_script():
     manifest = json.loads(Path('firefox_extension/manifest.json').read_text(encoding='utf-8'))
     gecko = manifest['browser_specific_settings']['gecko']
     assert manifest['manifest_version'] == 3
-    assert manifest['background'] == {'scripts': ['media_candidates.js', 'background.js']}
+    assert manifest['background'] == {'scripts': ['media_candidates.js', 'file_interception.js', 'background.js']}
     assert gecko['id'] == 'stratrum-download-studio@stratrum.local'
     assert gecko['data_collection_permissions']['required'] == ['none']
 
@@ -1682,14 +1684,16 @@ def test_phase_2a6b_preferences_persist_and_default_safely(tmp_path):
     assert restored.primary_browser_action == 'download_with_options' and restored.keep_completed_window_open is True
 
 
-def test_visible_active_branding_uses_stratum_and_legacy_security_names_remain():
+def test_visible_active_branding_uses_i_ds_and_legacy_security_names_remain():
     active = [Path('browser_extension/manifest.json'), Path('firefox_extension/manifest.json'),
               Path('browser_extension/options.html'), Path('browser_extension/background.js'), Path('browser_extension/content.js')]
     for path in active:
         text = path.read_text(encoding='utf-8')
-        assert 'Stratum Download Studio' in text or 'Stratum' in text
+        assert 'I-DS' in text
         assert 'Stratrum Download Studio' not in text
+    # Preserve the old header name while existing desktop/browser installations migrate.
     assert 'X-Stratrum-Auth' in Path('browser_extension/background.js').read_text(encoding='utf-8')
+    assert 'X-Stratrum-Auth' in Path('stratum_download_studio.py').read_text(encoding='utf-8')
 
 
 # Phase 2A.6B.1 desktop-owned browser mode
@@ -1707,7 +1711,7 @@ def test_one_shared_authentication_token_accepts_both_explicit_actions(runtime):
 def test_extension_normal_button_sends_neutral_default_action():
     background = Path('browser_extension/background.js').read_text(encoding='utf-8')
     normal_handler = background.split('runtime.onMessage.addListener', 1)[1]
-    assert 'sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl))' in normal_handler
+    assert 'sendToDesktopApp(selected.url, "download_with_options", trustedHandoff(selected, pageUrl))' in normal_handler
     assert 'primaryAction' not in background
 
 
@@ -1915,7 +1919,7 @@ def test_extension_action_dropdown_removed_and_reload_only_reads_saved_token():
     load_handler = script.split('DOMContentLoaded', 1)[1].split('});', 1)[0]
     assert 'primary-action' not in html and 'primaryAction' not in script
     assert html.count('id="token"') == 1
-    assert 'storage.local.get(["authToken", "showMediaButtons"])' in load_handler
+    assert 'storage.local.get(["authToken", "showMediaButtons", "interceptGeneralDownloads"])' in load_handler
     assert 'storage.local.set' not in load_handler and 'storage.local.remove' not in load_handler
 
 

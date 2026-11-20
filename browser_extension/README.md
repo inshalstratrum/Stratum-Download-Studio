@@ -1,46 +1,56 @@
-# Stratum Download Studio Browser Extensions
+# I-DS Browser Companion (Chrome / Edge)
 
-The Chromium Manifest V3 source in this directory supports Google Chrome and Microsoft Edge. It preserves right-click link/video/audio downloads and adds user-controlled detection for HTML5 media, safe embedded extractor pages, direct media, HLS, and DASH.
+**Tool by InShaLIve.os**
 
-## Why broad site access is requested
+This is the unpacked Manifest V3 extension source for I-DS (development version **1.5**, with the shared Download-arrow-in-D logo and accessible settings). It offers **right-click media/link handoff**, **supported video/audio detection**, and an **in-player download button**. Phase 2B beta adds a **default-off opt-in** for ordinary browser downloads (PDF, ZIP, installers, images and other known file types). The desktop must acknowledge queued file ownership before the extension cancels Chrome's paused copy.
 
-Automatic media detection requires content scripts in permitted HTTP/HTTPS frames and non-blocking response observations on those sites. Chrome and Edge therefore show a broad permission warning. Detection observes media elements, nested sources, supported frame-local extractor pages, manifest resource URLs, and strong complete-file response evidence. A media-looking network extension alone is not treated as a complete download. The extension does not read forms, cookies, authorization headers, private page contents, or unrelated page text. Candidate metadata remains inside the extension until the user clicks a Stratum button; no telemetry is sent externally.
+## Install for development
 
-Direct HTTP/HTTPS media and HLS/DASH manifests are offered once. Segment and chunk floods are suppressed. Blob-only players fall back to the safe page URL; `blob:`, `data:`, extension, file, and script URLs are never sent. DRM/EME media is unsupported. Detection does not claim universal site support and does not cover general files such as images, documents, archives, installers, or ISOs.
+1. Launch I-DS using its **Desktop** or **Start Menu** shortcut. In the desktop app choose **Help > Set Up Chrome / Edge Extension**. The private installer keeps extension files in **I-DS\Browser Extension** under the installed app folder. Source-only users can use this repository's `browser_extension` folder.
+2. Open **chrome://extensions** or **edge://extensions** and enable Developer mode.
+3. Choose **Load unpacked** and select this **browser_extension** directory, not a ZIP.
+4. Click the I-DS extension toolbar icon to open settings.
+5. Desktop → **Options → Browser Integration → Copy Token**; in extension settings click **Connect with copied token**. If clipboard access is unavailable, use the manual token field.
 
-The option **Show download button on detected media** is enabled by default and can be disabled in extension Options.
+If the token is missing, Settings opens automatically. For connection issues, restart the desktop app and verify local pairing. Do not share pairing tokens.
 
-## Chrome and Edge development
+## Usage
 
-1. Open `chrome://extensions/` or `edge://extensions/`.
-2. Enable Developer mode.
-3. Select **Load unpacked** once.
-4. Choose this `browser_extension/` directory directly. Do not extract a generated ZIP for development.
-5. Open extension Options, save the masked desktop token, and confirm the media-button option.
+- Right-click a page link, video, or audio source and choose **Quick Download with I-DS** or **Download with Options in I-DS**.
+- Right-click **Download file with I-DS** for a direct general HTTP(S) file.
+- Enable **Automatically use I-DS for supported browser files** in extension settings only if you want ordinary Chrome downloads handed to the desktop. Handoff failures resume the original browser download. Once the desktop has accepted a job, later server failures still require retry in I-DS.
+- The **I-DS** button appears on detected playable media and opens download options. Drag its grip to reposition, use **−/+** to compact/expand, or **×** to dismiss on that player. You can also disable it globally in extension settings.
+- The toolbar icon opens settings; it does not trigger a download by itself.
 
-Do not install the unpacked source and an extracted submission package simultaneously. They receive different extension origins and create confusing duplicate buttons and pairings.
+The extension inspects permitted HTTP/HTTPS pages, frames, and response metadata to identify supported media. It suppresses segmented fragments, avoids unsafe URL schemes, does not send stored browser cookies or auth headers to the desktop app, and keeps candidate metadata inside the extension until a user chooses a download. DRM is unsupported.
 
-An inactive Manifest V3 service worker is normal: Chromium sleeps it until an extension event needs it. Sleeping is not an error.
+## Browser permissions
 
-## Connection messages
+- HTTP/HTTPS site access: detect supported media elements and response candidates.
+- Context menus: show explicit right-click download actions.
+- Local storage: remember the masked pairing token, media-button preference and opt-in interception setting. Also retains paused native download IDs for startup recovery (no URLs or files).
+- Loopback HTTP on 127.0.0.1:18765: communicate with the desktop application.
 
-- Missing token: Options opens and the page shows where to save the token.
-- Desktop unavailable: the page shows a concise start-the-desktop-app message.
-- Pairing rejected: the page directs the user to reset browser pairing in desktop Options.
-- Tokens are never displayed in page messages or written to logs.
+The `downloads` permission enables opt-in file interception. The extension first pauses the native Chrome file, waits for an authenticated desktop job acceptance, then cancels the native copy; if acceptance fails, it resumes Chrome. It never accesses browser cookies or credential headers, so private/session-dependent files may fail after desktop acceptance. Interception remains **off by default** and is not yet signed or store-published.
 
-## Packaging
+## Tests
 
-Run `powershell -ExecutionPolicy Bypass -File browser_extension/package_extension.ps1` from the repository root. It creates separate Chrome, Edge, and Firefox ZIPs under ignored `extension_packages/`. ZIPs are for store submission/testing, not Chromium unpacked development. Packaging does not create tokens or random add-on IDs.
+Run `node --test *.test.js` from this directory, or `node --test browser_extension/*.test.js` from the repository root.
 
-## Distribution limits
+## Packaging and limitations
 
-- Chrome consumer release requires publication through the Chrome Web Store.
-- Edge consumer release requires publication through Microsoft Edge Add-ons.
-- Firefox self-distribution requires a Mozilla-signed XPI; an unsigned development ZIP is not customer-ready.
-- Enterprise force-install policies are for managed organizations, not normal consumer installation.
-- A future desktop installer may offer a user-confirmed browser-extension suggestion after installation. It must not attempt silent consumer installation.
+Use `powershell -ExecutionPolicy Bypass -File browser_extension/package_extension.ps1` from the repository root for development ZIPs. These are **not** Chrome Web Store, Edge Add-ons, or Firefox-approved releases. Firefox has a separate extension source directory and its own distribution requirements.
 
-The desktop application never shows extension-install dialogs during normal startup. Browser Integration remains available manually from desktop Options.
+## Distribution and safe installation
 
-Up to six valid extension origins can be paired concurrently. Use **Remove Selected** to retire one browser origin or **Reset All Pairings** before a broad reinstall.
+- **Chrome Web Store** publication is required for normal Chrome consumer installation.
+- **Microsoft Edge Add-ons** publication is required for normal Edge consumer installation.
+- **Mozilla-signed XPI** is required for normal Firefox self-distribution.
+- **Enterprise force-install** applies to managed organizations, not consumer browsers.
+- A desktop installer may provide a **user-confirmed** suggestion to install the extension but must not attempt **silent consumer installation**.
+
+## Single development installation
+
+- Choose this `browser_extension/` directory directly through Load unpacked.
+- Do not install the unpacked source and an extracted submission package simultaneously. These are separate extension origins and can cause confusing duplicate controls and pairings.
+- An inactive Manifest V3 service worker is normal: Chromium suspends it between events. Sleeping is not an error.

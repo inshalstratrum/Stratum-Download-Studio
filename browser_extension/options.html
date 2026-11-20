@@ -1,35 +1,118 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Stratum Extension Options</title>
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; max-width: 450px; }
-        .input-group { display: flex; margin: 10px 0; }
-        input { flex: 1; padding: 8px; }
-        button { padding: 10px 15px; background-color: #0078d7; color: white; border: none; cursor: pointer; margin-right: 5px;}
-        button:hover { background-color: #005a9e; }
-        button.danger { background-color: #d13438; }
-        button.danger:hover { background-color: #a80000; }
-        #status { margin-top: 10px; color: green; font-weight: bold; }
-        .note { font-size: 0.9em; color: #555; margin-bottom: 15px;}
-        .setting { margin: 16px 0; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>I-DS | Browser settings</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", system-ui, sans-serif; color: #182c45; background: #f3f7fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 30px 18px; line-height: 1.5; }
+    main { max-width: 670px; margin: auto; }
+    .hero { padding: 27px 30px; border-radius: 18px; color: white; background: linear-gradient(120deg, #132440, #22506b); box-shadow: 0 12px 30px rgba(0, 0, 0, .16); }
+    .identity { display: flex; gap: 17px; align-items: center; }
+    .mark { flex: 0 0 74px; height: 74px; border-radius: 17px; overflow: hidden; box-shadow: 0 5px 16px rgba(0,0,0,.18); }
+    .mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    h1 { font-size: 32px; margin: 0; letter-spacing: -.05em; line-height: 1.2; }
+    .hero p { margin: 5px 0 0; color: #e0ecf8; }
+    .panel { background: #fff; border: 1px solid #dce7f0; border-radius: 15px; padding: 24px 25px; margin-top: 18px; box-shadow: 0 6px 18px rgba(0, 0, 0, .06); }
+    h2 { font-size: 19px; margin: 0 0 6px; letter-spacing: -.02em; }
+    p { margin: 0 0 16px; }
+    .muted { font-size: 14px; color: #4c6176; }
+    label.field-label { font-weight: 650; display: block; margin: 18px 0 7px; }
+    .input-group { display: flex; align-items: stretch; gap: 9px; }
+    input[type=password], input[type=text] { min-width: 0; flex: 1; padding: 12px; color: #172b45; background: white; border: 1px solid #aebfd0; border-radius: 9px; font-size: 15px; }
+    button { min-height: 44px; border: 1px solid #c1d3df; border-radius: 9px; padding: 10px 16px; background: #fff; color: #13354b; font-weight: 650; font-size: 14px; cursor: pointer; transition: background .15s ease, transform .15s ease, box-shadow .15s ease; }
+    button:hover { background: #e9f3fa; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button.primary { color: #fff; background: #1568a0; border-color: #1568a0; }
+    button.primary:hover { background: #105782; box-shadow: 0 6px 14px rgba(21,104,160,.2); }
+    button.danger { color: #9c3344; border-color: #e6c7ce; }
+    button.danger:hover { background: #fff1f3; }
+    button:focus-visible, input:focus-visible { outline: 3px solid #20a59c; outline-offset: 3px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .setting { display: flex; align-items: flex-start; gap: 11px; margin-top: 14px; }
+    .setting input { width: 21px; height: 21px; margin: 1px 0 0; accent-color: #128777; flex: 0 0 auto; }
+    .setting label { font-weight: 650; cursor: pointer; }
+    .setting small { display: block; font-size: 13px; color: #567086; font-weight: 400; margin-top: 4px; }
+    #status { min-height: 22px; margin-top: 14px; font-size: 14px; font-weight: 650; }
+    footer { text-align: center; margin-top: 22px; color: #4f6376; font-size: 13px; }
+    @media (max-width: 430px) { body { padding: 14px 10px; } .hero, .panel { padding: 19px; } .mark { flex-basis: 62px; height: 62px; } h1 { font-size: 27px; } .input-group { flex-wrap: wrap; } .input-group input { flex-basis: 100%; } }
+    @media (prefers-reduced-motion: reduce) { button { transition: none; } button:hover { transform: none; } }
+    .help { margin: 0 0 8px; color:#335f74; font-size:14px; }
+    .help summary { display: list-item; cursor: pointer; font-weight: 650; padding: 8px 4px; border-radius: 6px; }
+    .help summary:hover { background:#eaf4f8; }
+    .help summary:focus-visible { outline:3px solid #087e86; outline-offset: 3px; }
+    .help p { margin: 8px 0 4px; font-size: 14px; color:#486477; line-height:1.55; }
+    .section-icon { width:23px; height:23px; flex:none; color:#087e86; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    h2 { display:flex; align-items:center; gap:9px; }
+    .setting { border: 1px solid #dbe8f1; border-radius:12px; padding:14px 13px; background:#f8fcfe; }
+    .setting:focus-within { outline:2px solid #087e86; outline-offset:3px; }
+    .setting:hover { background:#eff8fc; }
+    .panel { box-shadow: 0 9px 24px rgba(0, 0, 0, .075); }
+    .hero { background: linear-gradient(110deg,#112742,#165473 68%,#0c687b); }
+    body { background: linear-gradient(180deg,#eef6fa,#f5f8fc); }
+    @media (max-width: 430px) { .identity { flex-wrap:wrap; } .mark { height:62px; } .hero p { font-size:13px; } .panel { margin-top:13px; } .actions button { flex:1; } }
+    @media (max-width: 260px) { .mark { flex-basis:50px; height:50px; } h1 { font-size:23px; } .panel { padding:13px; } }
+  </style>
 </head>
 <body>
-    <h2>Stratum Download Studio</h2>
-    <p>Enter the Auth Token from the desktop application (Options -> Browser Integration):</p>
-    <p class="note">This token is strictly local and validates requests between your browser and the Stratum desktop app. <strong>Never share this token with anyone.</strong></p>
-    <div class="input-group">
-        <input type="password" id="token" placeholder="Paste 64-character hex token here">
-        <button id="toggle-visibility" type="button">Show</button>
-    </div>
-    <button id="save">Save Token</button>
-    <button id="clear" class="danger">Clear Token</button>
-    <div class="setting">
-        <label><input type="checkbox" id="show-media-buttons" checked> Show download button on detected media</label>
-    </div>
-    <p class="note">Set the default Quick Download or Download with Options behavior in desktop Options → Browser Integration. Automatic media detection requires access to HTTP and HTTPS pages, so the browser will display a broad site-access permission warning.</p>
-    <div id="status"></div>
-    <script src="options.js"></script>
+  <main>
+    <header class="hero">
+      <div class="identity">
+        <div class="mark" aria-hidden="true">
+          <img src="icons/i-ds-128.png" width="74" height="74" alt="">
+        </div>
+        <div><h1>I-DS</h1><p>Download Support · Browser settings</p></div>
+      </div>
+    </header>
+    <section class="panel" aria-labelledby="pairing-heading">
+      <h2 id="pairing-heading"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M9 9h6M9 13h4"/></svg>Connect the desktop app</h2>
+      <p class="muted">Start I-DS desktop, click <strong>Copy Token</strong> in Browser Integration, then connect here.</p>
+      <div class="actions">
+        <button id="paste-connect" type="button" class="primary">Connect with copied token</button>
+      </div>
+      <details class="help" style="margin-top:12px" id="manual-pairing">
+        <summary>Enter token manually or need help?</summary>
+        <p>Open I-DS desktop → Options → Browser Integration → Copy Token.</p>
+        <label class="field-label" for="token">Desktop pairing token</label>
+      <div class="input-group">
+        <input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="Paste your 64-character token">
+        <button id="toggle-visibility" type="button" aria-label="Show or hide pairing token">Show</button>
+      </div>
+      <div class="actions">
+        <button id="save" type="button" class="primary">Save token</button>
+        <button id="clear" type="button" class="danger">Clear token</button>
+      </div>
+      </details>
+      <div id="status" role="status" aria-live="polite"></div>
+      <p class="muted" style="margin-top:9px">Keep this token private. It stays in your extension settings.</p>
+    </section>
+    <section class="panel" aria-labelledby="detection-heading">
+      <h2 id="detection-heading"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 6 3-6 3z"/></svg>Video and audio</h2>
+      <div class="setting">
+        <input type="checkbox" id="show-media-buttons" checked>
+        <label for="show-media-buttons">Show a download button on detected media
+          <small>Show an in-video I-DS action on supported websites.</small>
+        </label>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="files-heading">
+      <h2 id="files-heading"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H5V5a2 2 0 0 1 2-2zM14 3v6h5M9 15h6"/></svg>File downloads</h2>
+      <p class="muted">Right-click any supported link → <strong>Download file with I-DS</strong>.</p>
+      <div class="setting">
+        <input type="checkbox" id="intercept-general-files">
+        <label for="intercept-general-files">Automatically use I-DS for supported browser files
+          <small>Off by default. Browser downloads resume if desktop handoff fails. Sign-in-only files may still fail in I-DS.</small>
+        </label>
+      </div>
+      <details class="help" style="margin-top:14px">
+        <summary>How automatic handoff works</summary>
+        <p>Chrome pauses a supported file. Only after I-DS confirms the new job does Chrome cancel its copy. Downloads requiring website cookies can fail after handoff; disable this setting for those sites.</p>
+      </details>
+    </section>
+    <footer>Tool by InShaLIve.os</footer>
+  </main>
+  <script src="options.js"></script>
 </body>
 </html>

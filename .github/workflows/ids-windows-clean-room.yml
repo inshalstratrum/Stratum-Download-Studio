@@ -1,0 +1,108 @@
+name: I-DS clean Windows verification
+
+# Development-only validation on a fresh GitHub-hosted Windows VM.
+# This workflow does not package, sign, publish, or upload binaries.
+on:
+  push:
+    branches: [feature/i-ds-foundation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: i-ds-clean-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-source-regression:
+    name: Fresh Windows source and browser tests
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Check out this development branch
+        uses: actions/checkout@v4
+
+      - name: Install Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Check clean Windows toolchain
+        shell: pwsh
+        run: |
+          python --version
+          node --version
+          git status --short
+
+      - name: Install only desktop and test prerequisites
+        shell: pwsh
+        run: |
+          python -m pip install --no-cache-dir --disable-pip-version-check pytest PyQt6
+
+      - name: Bootstrap pinned yt-dlp and Deno with hash verification
+        shell: pwsh
+        run: |
+          ./scripts/bootstrap_ytdlp.ps1 -Python python
+
+      - name: Verify local FFmpeg and FFprobe tools
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed on the clean runner' }
+            $env:PATH += ';C:\ProgramData\chocolatey\bin'
+          }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            throw 'Both FFmpeg and FFprobe must be available for converter tests'
+          }
+          ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
+
+      - name: Run full Python regression on fresh Windows
+        shell: pwsh
+        run: |
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run both browser extension test suites
+        shell: pwsh
+        run: |
+          node --test browser_extension/media_candidates.test.js browser_extension/file_interception.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test per-user installer scripts with synthetic data
+        shell: pwsh
+        run: |
+          # Deliberately use a synthetic stub. Never upload or install the private EXE.
+          $ErrorActionPreference = 'Stop'
+          $sandbox = Join-Path $env:RUNNER_TEMP 'i-ds-install-test'
+          $env:I_DS_TEST_INSTALLROOT = Join-Path $sandbox 'Programs\I-DS'
+          $env:I_DS_TEST_SHORTCUTSROOT = Join-Path $sandbox 'StartMenu'
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          $dummy = Join-Path $sandbox 'synthetic-I-DS.exe'
+          [System.IO.File]::WriteAllBytes($dummy, (New-Object byte[] 1500000))
+          $sentinel = Join-Path $sandbox 'owner-downloads.keep'
+          Set-Content -LiteralPath $sentinel -Value 'preserve me' -Encoding UTF8
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_ids_windows.ps1 -SourceExe $dummy -NoLaunch
+          if ($LASTEXITCODE -ne 0) { throw 'Synthetic clean-Windows install failed' }
+          $installed = Join-Path $env:I_DS_TEST_INSTALLROOT 'I-DS.exe'
+          if (-not (Test-Path -LiteralPath $installed)) { throw 'Installed application file missing' }
+          if ((Get-FileHash -LiteralPath $dummy).Hash -ne (Get-FileHash -LiteralPath $installed).Hash) {
+            throw 'Synthetic installed file hash mismatch'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:I_DS_TEST_SHORTCUTSROOT 'I-DS Download Support.lnk'))) {
+            throw 'Start Menu shortcut not created'
+          }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $env:I_DS_TEST_INSTALLROOT 'Uninstall I-DS.ps1')
+          if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $installed)) {
+            throw 'Synthetic clean-Windows uninstall failed'
+          }
+          if (-not (Test-Path -LiteralPath $sentinel)) {
+            throw 'Uninstall unexpectedly removed preserved test download'
+          }
+          Write-Output 'PASS fresh-Windows installer scripts, hash/shortcuts/uninstall and data preservation'

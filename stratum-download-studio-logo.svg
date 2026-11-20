@@ -1,5 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <rect width="256" height="256" rx="48" fill="#12365b"/>
-  <path d="M128 42v102m0 0 42-42m-42 42-42-42M60 160v34c0 12 10 22 22 22h92c12 0 22-10 22-22v-34" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="20"/>
-  <circle cx="198" cy="58" r="18" fill="#43d19e"/>
+<defs>
+ <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0f294c"/><stop offset="1" stop-color="#105978"/></linearGradient>
+ <linearGradient id="letter" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#33decc"/><stop offset="1" stop-color="#26a9e6"/></linearGradient>
+</defs>
+<rect width="256" height="256" rx="56" fill="url(#body)"/>
+<path d="M45 53v150" fill="none" stroke="white" stroke-linecap="round" stroke-width="27"/>
+<path d="M103 56h41c55 0 90 27 90 72s-35 72-90 72h-41z" fill="none" stroke="url(#letter)" stroke-linejoin="round" stroke-width="26"/>
+<path d="M164 96v53m-18-18 18 18 18-18" fill="none" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M144 163v8c0 5 4 8 9 8h22c5 0 9-3 9-8v-8" fill="none" stroke="#5df2d6" stroke-width="10" stroke-linecap="round"/>
 </svg>

@@ -1,0 +1,32 @@
+I-DS — Third-party notices (private Windows release candidate)
+Tool by InShaLIve.os
+
+I-DS application source: MIT License (see LICENSE.txt and the source repository).
+An MIT license for the I-DS application does not override the licenses of bundled components.
+
+FFmpeg and FFprobe
+  Bundle source: Gyan FFmpeg 9.0-full_build-www.gyan.dev, Windows static build.
+  License: GNU GPL version 3. See FFmpeg-LICENSE.txt installed beside I-DS.exe.
+  Supplier and build details: https://www.gyan.dev/ffmpeg/builds/
+  Source reference reported by the installed build:
+    https://github.com/FFmpeg/FFmpeg/commit/d32b387f2b
+  FFmpeg licensing guidance: https://ffmpeg.org/legal.html
+  Before distributing this setup publicly, verify and provide the complete
+  corresponding source code for the precise FFmpeg build and included libraries,
+  review additional library licenses, and retain copyright/license notices.
+  The above source reference alone is NOT proof of redistribution compliance.
+
+PyQt6
+  The desktop GUI uses PyQt6 under GPLv3 unless separately commercially licensed.
+  Distribution must respect the GPLv3 obligations. Application source is
+  published at https://github.com/inshalstratrum/Stratum-Download-Studio
+  PyQt6: https://www.riverbankcomputing.com/software/pyqt/
+
+Other components
+  Python: PSF License — https://docs.python.org/3/license.html
+  Deno: MIT License — https://github.com/denoland/deno
+  yt-dlp: Unlicense — https://github.com/yt-dlp/yt-dlp
+  Additional dependencies have their own package metadata and license files.
+
+This private unsigned setup candidate is not a public release.
+Code signing and a complete third-party compliance review remain pending.

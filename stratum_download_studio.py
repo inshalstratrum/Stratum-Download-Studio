@@ -4,6 +4,7 @@ import uuid
 import json
 import http.server
 import subprocess
+import shutil
 import re
 from datetime import datetime
 import secrets
@@ -20,11 +21,15 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from stratum_dependency_policy import controlled_yt_dlp_options, load_controlled_yt_dlp
+from ids_http_qt import FileDownloadThread
+from ids_http_engine import check_public_url, FileTransferError, safe_file_name
+from ids_handoff import HandoffReceipt
 
 yt_dlp = load_controlled_yt_dlp()
 
-APP_NAME = "Stratum Download Studio"
-EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options'}
+APP_NAME = "I-DS | I.os Download Support"
+BROWSER_BRIDGE_PORT = 18765
+EXTENSION_ACTIONS = {'default', 'quick', 'options', 'quick_download', 'download_with_options', 'http_download'}
 DESKTOP_BROWSER_ACTIONS = {'quick_download', 'download_with_options'}
 MAX_REQUEST_BODY = 16 * 1024
 MAX_OPERATIONAL_URL = 8192
@@ -95,43 +100,81 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSystemTrayIcon, QMenu, QStyle, QSpinBox, QVBoxLayout,
     QHBoxLayout, QHeaderView, QSplitter, QTreeWidget, QTreeWidgetItem,
     QPushButton, QComboBox, QMenuBar, QFormLayout, QGroupBox, QTabWidget,
-    QWidget, QGridLayout, QCheckBox, QTextEdit
+    QWidget, QGridLayout, QCheckBox, QTextEdit, QInputDialog,
+    QHBoxLayout, QVBoxLayout, QStackedWidget, QFrame, QSizePolicy, QToolButton
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent, QUrl, QObject, QTimer, QStandardPaths, QSize
 from PyQt6.QtGui import QIcon, QAction, QFont, QClipboard, QPixmap, QDesktopServices, QCursor
+from ids_ui_components import icon as ids_icon, make_banner, make_empty_state, UI_POLISH_QSS
 
 # ==========================================
 # MODERN UI STYLESHEET
 # ==========================================
 MODERN_STYLE = """
-QMainWindow, QDialog { background-color: #f0f0f0; color: #000000; }
-QTableWidget { background-color: #ffffff; border: 1px solid #a0a0a0; gridline-color: #e0e0e0; color: #000000; }
-QTableWidget::item:selected { background-color: #0078d7; color: #ffffff; }
-QHeaderView::section { background-color: #f0f0f0; padding: 4px; border: 1px solid #a0a0a0; color: #000000; }
-QPushButton { background-color: #e1e1e1; color: black; border-radius: 2px; padding: 5px 15px; border: 1px solid #adadad; }
-QPushButton:hover { background-color: #e5f1fb; border: 1px solid #0078d7; }
-QPushButton:pressed { background-color: #cce4f7; border: 1px solid #005499; }
-QLineEdit, QComboBox { padding: 4px; border: 1px solid #a0a0a0; background-color: white; color: black; }
-QProgressBar { text-align: center; border: 1px solid #a0a0a0; background-color: #e6e6e6; color: black; }
-QProgressBar::chunk { background-color: #06b025; }
-QTreeWidget { border: 1px solid #a0a0a0; background-color: white; color: black; }
-QTreeWidget::item:selected { background-color: #0078d7; color: white; }
-QTabWidget::pane { border: 1px solid #a0a0a0; background: #f0f0f0; }
+QMainWindow, QDialog { background: #f5f8fc; color: #172b45; }
+QLabel, QGroupBox, QCheckBox { color: #172b45; }
+QMenuBar, QMenu, QToolBar { background: #ffffff; color: #172b45; border: none; }
+QMenuBar { border-bottom: 1px solid #dce5ef; padding: 3px 7px; }
+QMenuBar::item { padding: 7px 10px; border-radius: 6px; }
+QMenuBar::item:selected, QMenu::item:selected { background: #e5f3fb; color: #133d61; }
+QMenu::item { padding: 7px 26px; }
+QToolBar { spacing: 5px; padding: 8px; border-bottom: 1px solid #dce5ef; }
+QToolButton { min-height: 42px; min-width: 56px; border: 1px solid transparent;
+              border-radius: 8px; padding: 7px 9px; color: #172b45; background: transparent; }
+QToolButton:hover { background: #e6f3fc; border-color: #c2ddec; }
+QToolButton:pressed, QToolButton:checked { background: #d5eaf7; }
+QToolButton:focus { border: 2px solid #2865da; }
+QTableWidget, QTreeWidget { background: #ffffff; color: #172b45; border: 1px solid #dce5ef;
+                           border-radius: 8px; selection-background-color: #d6f0ef; selection-color: #153d53; }
+QTableWidget { gridline-color: #ebeff5; alternate-background-color: #f9fbfd; }
+QTableWidget::item { padding: 5px; }
+QTableWidget::item:selected, QTreeWidget::item:selected { background: #d6f0ef; color: #153d53; }
+QTreeWidget::item { padding: 7px 9px; }
+QTreeWidget::item:hover { background: #eef5fa; }
+QHeaderView::section { background: #edf3fa; color: #2a405a; padding: 9px 7px;
+                       border: none; border-right: 1px solid #dce5ef; font-weight: 600; }
+QSplitter::handle { background: #e4ebf4; width: 6px; }
+QSplitter::handle:hover { background: #8dc4d6; }
+QPushButton { background: #ffffff; color: #173954; border-radius: 8px;
+              padding: 9px 15px; min-height: 21px; border: 1px solid #bfd0e0; font-weight: 600; }
+QPushButton:hover { background: #e7f3fb; border-color: #569cc0; }
+QPushButton:pressed { background: #d5eaf7; }
+QPushButton:focus { border: 2px solid #2865da; }
+QPushButton:disabled { background: #edf1f5; color: #77899c; border-color: #dce4ed; }
+QLineEdit, QComboBox, QTextEdit, QSpinBox { padding: 8px; border: 1px solid #c5d4e3;
+              border-radius: 7px; background: #ffffff; color: #172b45; selection-background-color: #c4e9e5; }
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QSpinBox:focus { border: 2px solid #2865da; }
+QProgressBar { text-align: center; border: 1px solid #c4d5e2; border-radius: 6px;
+               background: #eaf0f7; color: #173954; min-height: 18px; font-weight: 600; }
+QProgressBar::chunk { background: #18aa93; border-radius: 5px; }
+QTabWidget::pane { border: 1px solid #dce5ef; border-radius: 8px; background: #ffffff; }
+QTabBar::tab { padding: 9px 15px; background: #eaf0f7; color: #42546b; }
+QTabBar::tab:selected { background: #ffffff; color: #163f63; }
 """
+MODERN_STYLE += UI_POLISH_QSS
 
 def get_ffmpeg_path():
-    if hasattr(sys, '_MEIPASS'): return os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    local_ffmpeg = os.path.join(base_dir, 'ffmpeg.exe')
-    if os.path.exists(local_ffmpeg): return local_ffmpeg
-    return 'ffmpeg'
+    if hasattr(sys, '_MEIPASS'):
+        frozen = Path(sys._MEIPASS) / 'ffmpeg.exe'
+        if frozen.is_file():
+            return str(frozen)
+    local_ffmpeg = Path(__file__).resolve().parent / 'ffmpeg.exe'
+    if local_ffmpeg.is_file():
+        return str(local_ffmpeg)
+    # yt-dlp expects ffmpeg_location to be an actual path, not 'ffmpeg'.
+    # WinGet commonly exposes ffmpeg/ffprobe as adjacent .EXE symlinks.
+    return shutil.which('ffmpeg') or 'ffmpeg'
 
 
 def get_ffprobe_path():
     if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, 'ffprobe.exe')
+        frozen = Path(sys._MEIPASS) / 'ffprobe.exe'
+        if frozen.is_file():
+            return str(frozen)
     local_ffprobe = Path(__file__).resolve().parent / 'ffprobe.exe'
-    return str(local_ffprobe) if local_ffprobe.exists() else 'ffprobe'
+    if local_ffprobe.is_file():
+        return str(local_ffprobe)
+    return shutil.which('ffprobe') or 'ffprobe'
 
 def validate_token(token):
     return isinstance(token, str) and len(token) == 64 and all(c in string.hexdigits for c in token)
@@ -208,6 +251,8 @@ class AppConfig:
     splitter_sizes: list[int] = field(default_factory=lambda: [200, 950])
     column_widths: list[int] = field(default_factory=list)
     hidden_columns: list[int] = field(default_factory=list)
+    sidebar_visible: bool = True
+    ui_text_scale: int = 100
     state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     @property
@@ -238,6 +283,8 @@ class AppConfig:
             'splitter_sizes': list(self.splitter_sizes),
             'column_widths': list(self.column_widths),
             'hidden_columns': list(self.hidden_columns),
+            'sidebar_visible': bool(self.sidebar_visible),
+            'ui_text_scale': int(self.ui_text_scale),
         }
 
     def persist(self):
@@ -410,15 +457,24 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
         splitter_sizes=stored.get('splitter_sizes', [200, 950]) if isinstance(stored.get('splitter_sizes', [200, 950]), list) else [200, 950],
         column_widths=stored.get('column_widths', []) if isinstance(stored.get('column_widths', []), list) else [],
         hidden_columns=stored.get('hidden_columns', []) if isinstance(stored.get('hidden_columns', []), list) else [],
+        sidebar_visible=bool(stored.get('sidebar_visible', True)),
+        ui_text_scale=int(stored.get('ui_text_scale', 100)) if stored.get('ui_text_scale') in (100, 115, 130) else 100,
     )
     runtime.history_path.parent.mkdir(parents=True, exist_ok=True)
     runtime.persist()
     return runtime
 
 
+def browser_extension_directory(base_directory=None):
+    if base_directory is not None:
+        return Path(base_directory) / 'browser_extension'
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent / 'Browser Extension'
+    return Path(__file__).resolve().parent / 'browser_extension'
+
+
 def browser_extension_guide_path(base_directory=None):
-    base = Path(base_directory) if base_directory is not None else Path(__file__).resolve().parent
-    extension_directory = base / 'browser_extension'
+    extension_directory = browser_extension_directory(base_directory)
     readme_path = extension_directory / 'README.md'
     if readme_path.is_file():
         return readme_path.resolve()
@@ -433,6 +489,23 @@ def open_browser_extension_guide(opener=None, base_directory=None):
         opener(guide_path)
         return True
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path)))
+
+
+def open_browser_extensions_settings(browser, opener=None):
+    if browser not in ('chrome', 'edge'):
+        return False
+    app = 'Google/Chrome/Application/chrome.exe' if browser == 'chrome' else 'Microsoft/Edge/Application/msedge.exe'
+    roots = [os.environ.get('ProgramFiles', ''), os.environ.get('ProgramFiles(x86)', ''), os.environ.get('LOCALAPPDATA', '')]
+    for root in roots:
+        candidate = Path(root) / Path(app) if root else None
+        if candidate is not None and candidate.is_file():
+            url = browser + '://extensions'
+            if opener is not None:
+                opener(str(candidate), url)
+            else:
+                subprocess.Popen([str(candidate), url], close_fds=True)
+            return True
+    return False
 
 
 def validate_extension_origin(origin):
@@ -493,6 +566,32 @@ def extraction_options_for_url(base_options, url):
         merged_args.update(site_options['extractor_args'])
         options['extractor_args'] = merged_args
     return options
+
+
+def should_retry_public_youtube_403(error, url, output_template, job_id):
+    """Try one separately named, public Android-client transfer after a media HTTP 403.
+
+    An independent filename prevents resuming incompatible partial bytes from
+    a different YouTube client. Do not attempt this for other sites or jobs
+    without an established per-job output tag.
+    """
+    if not isinstance(url, str) or not re.search(r'(?i)\bHTTP Error 403\b', str(error or '')):
+        return False
+    valid, _ = validate_url(url)
+    if not valid:
+        return False
+    host = (urllib.parse.urlsplit(url).hostname or '').lower()
+    if host not in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'music.youtube.com'}:
+        return False
+    suffix = f'-{str(job_id)[:8]}.%(ext)s'
+    return bool(job_id and str(output_template).endswith(suffix))
+
+
+def alternate_youtube_output_template(output_template, job_id):
+    suffix = f'-{str(job_id)[:8]}.%(ext)s'
+    if not job_id or not str(output_template).endswith(suffix):
+        raise ValueError('No safely isolated alternate media output template')
+    return str(output_template)[:-len(suffix)] + '-android' + suffix
 
 
 def is_authentication_extraction_error(error):
@@ -621,7 +720,14 @@ def validate_request(headers, rfile, runtime):
     except OSError:
         return 500, b'{"error": "Unable to persist browser pairing"}'
 
-    return 200, {'url': url, 'action': action, 'context': handoff}
+    file_name_hint = data.get('fileName', '')
+    if not isinstance(file_name_hint, str) or len(file_name_hint) > 240:
+        return 400, b'{"error": "Invalid file name hint"}'
+    result = {'url': url, 'action': action, 'context': handoff}
+    # Keep historical response contracts byte-for-byte compatible for media.
+    if action == 'http_download':
+        result['file_name_hint'] = safe_file_name(file_name_hint) if file_name_hint else ''
+    return 200, result
 
 
 def recorded_save_directory(download_record):
@@ -884,7 +990,13 @@ def postprocessor_output_path(event):
     return event.get('filepath') or event.get('filename') or info.get('filepath') or info.get('_filename')
 
 
-def collect_output_candidates(info, postprocessed_paths, save_dir, extension, preexisting=None):
+def collect_output_candidates(info, postprocessed_paths, save_dir, extension, preexisting=None, *,
+                              output_tag=None):
+    """Collect yt-dlp output hints; glob only using a proven per-job filename tag.
+
+    Extractor IDs are not ownership: concurrent jobs can share them. Missing
+    hints must fail closed instead of scanning another worker's output.
+    """
     candidates = []
     candidates.extend(path for path in postprocessed_paths if path)
     if isinstance(info, dict):
@@ -896,21 +1008,26 @@ def collect_output_candidates(info, postprocessed_paths, save_dir, extension, pr
             if isinstance(item, dict):
                 candidates.extend(item.get(key) for key in ('filepath', '_filename') if item.get(key))
     before = {str(Path(path).resolve()) for path in (preexisting or set())}
-    for path in Path(save_dir).glob(f'*.{extension}'):
-        if str(path.resolve()) not in before:
-            candidates.append(str(path))
+    if output_tag:
+        # The job-specific template puts the tag at the END of the output stem.
+        candidates.extend(str(path) for path in Path(save_dir).glob(f'*{output_tag}.{extension}'))
     unique = []
+    seen = set()
     for candidate in candidates:
         if not candidate:
             continue
         try:
-            resolved = str(Path(candidate).resolve())
-        except OSError:
-            resolved = str(candidate)
-        if resolved in before:
+            path = Path(candidate)
+            resolved = str(path.resolve())
+        except (OSError, TypeError, ValueError):
             continue
-        if str(candidate) not in unique:
-            unique.append(str(candidate))
+        if resolved in before or resolved in seen:
+            continue
+        if output_tag and (path.suffix.lower() != f'.{extension}'.lower()
+                           or not path.stem.endswith(output_tag)):
+            continue
+        seen.add(resolved)
+        unique.append(str(candidate))
     return unique
 
 
@@ -1000,9 +1117,12 @@ def profile_codecs_compatible(probe, profile_name):
     return video_ok and audio_ok
 
 
-def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None):
+def resolve_final_media(info, postprocessed_paths, save_dir, profile_name, preexisting=None, probe_runner=None, *,
+                        output_tag=None):
     profile = output_profile(profile_name)
-    candidates = collect_output_candidates(info, postprocessed_paths, save_dir, profile.extension, preexisting)
+    candidates = collect_output_candidates(
+        info, postprocessed_paths, save_dir, profile.extension, preexisting, output_tag=output_tag,
+    )
     valid = []
     errors = []
     for candidate in candidates:
@@ -1096,6 +1216,7 @@ class DownloadJob:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec='seconds'))
     started_at: str = ''
     completed_at: str = ''
+    file_name_hint: str = ''
 
     def to_dict(self):
         payload = asdict(self)
@@ -1353,7 +1474,7 @@ class ConversionPlan:
     command: tuple
 
 
-def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, destination=None):
+def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, destination=None, resize_height=None):
     source = Path(input_path).resolve(strict=True)
     actual_probe = probe if probe is not None else probe_media_file(source)
     target_name = str(target_ext).upper()
@@ -1369,21 +1490,32 @@ def build_conversion_plan(input_path, target_ext, output_dir=None, probe=None, d
     codec_args = profile.ffmpeg_video_args if required_stream == 'video' else profile.ffmpeg_audio_args
     if not codec_args:
         raise ValueError(f'{target_name} is not compatible with this input')
+    if resize_height is not None and (isinstance(resize_height, bool) or
+                                     resize_height not in {240, 360, 480, 720, 1080, 1440, 2160}):
+        raise ValueError("Unsupported resize preset")
+    source_heights = [
+        stream.get('height') for stream in actual_probe.get('streams', [])
+        if isinstance(stream, dict) and stream.get('codec_type') == 'video'
+        and isinstance(stream.get('height'), int) and stream['height'] > 0
+    ]
+    source_height = max(source_heights, default=0)
+    applied_height = resize_height if required_stream == 'video' and resize_height and source_height > resize_height else None
+    resize_args = ('-vf', f'scale=-2:{applied_height}') if applied_height else ()
     temporary = final_path.with_name(f'{final_path.stem}.partial-{uuid.uuid4().hex[:8]}.{profile.extension}')
     command = (
-        get_ffmpeg_path(), '-y', '-v', 'error', '-i', str(source), *codec_args,
+        get_ffmpeg_path(), '-y', '-v', 'error', '-i', str(source), *resize_args, *codec_args,
         '-progress', 'pipe:1', '-nostats', str(temporary),
     )
     return ConversionPlan(source, final_path, temporary, target_name, required_stream, float(actual_probe.get('duration') or 0), command)
 
 
-def convert_incompatible_profile_output(input_path, profile_name, save_dir, probe=None, runner=None):
+def convert_incompatible_profile_output(input_path, profile_name, save_dir, probe=None, runner=None,
+                                        cancel_check=None):
     source = Path(input_path).resolve(strict=True)
     actual_probe = probe if probe is not None else probe_media_file(source)
     if profile_codecs_compatible(actual_probe, profile_name):
         return source, actual_probe
     plan = build_conversion_plan(source, profile_name, save_dir, actual_probe)
-    runner = runner or subprocess.run
     kwargs = {
         'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
         'timeout': CONVERSION_TIMEOUT_SECONDS,
@@ -1391,22 +1523,63 @@ def convert_incompatible_profile_output(input_path, profile_name, save_dir, prob
     creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if creation_flags:
         kwargs['creationflags'] = creation_flags
+
+    def check_cancellation():
+        if cancel_check is not None and cancel_check():
+            raise CancelException("Cancelled")
+
     try:
-        result = runner(list(plan.command), **kwargs)
+        check_cancellation()
+        if cancel_check is not None and runner is None:
+            # The download worker must be able to interrupt FFmpeg mid-conversion.
+            popen_options = {key: value for key, value in kwargs.items() if key != 'timeout'}
+            process = subprocess.Popen(list(plan.command), **popen_options)
+            try:
+                deadline = time.monotonic() + CONVERSION_TIMEOUT_SECONDS
+                while True:
+                    check_cancellation()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValueError("FFmpeg compatibility conversion timed out")
+                    try:
+                        stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                        result = subprocess.CompletedProcess(plan.command, process.returncode, stdout, stderr)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
+        else:
+            result = (runner or subprocess.run)(list(plan.command), **kwargs)
+        check_cancellation()
         if result.returncode != 0:
             raise ValueError(f"FFmpeg compatibility conversion failed: {clean_error_summary(result.stderr)}")
         validate_final_media(plan.temporary_output, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
+        check_cancellation()
         os.replace(plan.temporary_output, plan.destination)
-        final_path, final_probe = validate_final_media(plan.destination, plan.destination.parent, plan.target_name, required_stream=plan.required_stream)
-        if not profile_codecs_compatible(final_probe, plan.target_name):
-            raise ValueError(f"FFprobe found incompatible codecs in the final {plan.target_name} output")
-        source.unlink()
+        try:
+            final_path, final_probe = validate_final_media(
+                plan.destination, plan.destination.parent, plan.target_name,
+                required_stream=plan.required_stream,
+            )
+            if not profile_codecs_compatible(final_probe, plan.target_name):
+                raise ValueError(f"FFprobe found incompatible codecs in the final {plan.target_name} output")
+            check_cancellation()
+            # Source deletion is irreversible: only after successful validation and
+            # a final cancellation check should we discard the original media.
+            source.unlink()
+        except CancelException:
+            plan.destination.unlink(missing_ok=True)
+            raise
         return final_path, final_probe
     finally:
-        try:
-            plan.temporary_output.unlink()
-        except FileNotFoundError:
-            pass
+        plan.temporary_output.unlink(missing_ok=True)
 
 
 def parse_ffmpeg_progress(values, duration, started_at, now=None):
@@ -1459,7 +1632,24 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
         status_code, result = validate_request(self.headers, self.rfile, self.server.app_config)
 
-        self.send_response(status_code); self.send_cors_headers(); self.end_headers()
+        if status_code == 200 and result['action'] == 'http_download':
+            receipt = HandoffReceipt()
+            self.server.file_signal.emit(
+                result['url'], result['context'], result['file_name_hint'], receipt
+            )
+            # Do not acknowledge until Qt has actually accepted the local job.
+            accepted = receipt.wait(5)
+            self.send_response(200 if accepted else 503)
+            self.send_cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"success"}' if accepted else
+                             b'{"error":"Desktop did not accept file handoff"}')
+            return
+
+        self.send_response(status_code); self.send_cors_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
 
         if status_code == 200:
             self.wfile.write(b'{"status": "success"}')
@@ -1472,13 +1662,20 @@ class DownloadServerHandler(http.server.BaseHTTPRequestHandler):
 
 class ServerThread(QThread):
     download_requested = pyqtSignal(str, str, dict)
+    file_requested = pyqtSignal(str, dict, str, object)
+    failed = pyqtSignal(str)
     def __init__(self, app_config):
         super().__init__()
         self.app_config = app_config
     def run(self):
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), DownloadServerHandler)
+        try:
+            self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", BROWSER_BRIDGE_PORT), DownloadServerHandler)
+        except OSError:
+            self.failed.emit(f"Browser integration cannot start on 127.0.0.1:{BROWSER_BRIDGE_PORT}. Another app may be using the port.")
+            return
         self.httpd.app_config = self.app_config
         self.httpd.url_signal = self.download_requested
+        self.httpd.file_signal = self.file_requested
         self.httpd.serve_forever()
     def stop(self):
         if hasattr(self, 'httpd'):
@@ -1515,10 +1712,11 @@ class FormatFetcherThread(QThread):
 class ConvertThread(QThread):
     finished = pyqtSignal(str, bool, str, str)
     progress = pyqtSignal(str, dict)
-    def __init__(self, row_id, input_file, target_ext, output_dir=None, destination=None):
+    def __init__(self, row_id, input_file, target_ext, output_dir=None, destination=None, resize_height=None):
         super().__init__()
         self.row_id = row_id; self.input_file = input_file; self.target_ext = target_ext
         self.output_dir = output_dir; self.destination = destination
+        self.resize_height = resize_height
         self.cancelled = False
         self.process = None
         self._process_lock = threading.Lock()
@@ -1597,10 +1795,11 @@ class ConvertThread(QThread):
 
             source_probe = probe_media_file(input_path)
             with _conversion_name_lock:
-                plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination)
+                plan = build_conversion_plan(input_path, self.target_ext, self.output_dir, source_probe, self.destination, self.resize_height)
                 output_path = plan.destination
-                claim_path = output_path.with_name(output_path.name + '.claim')
-                claim_fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                potential_claim_path = output_path.with_name(output_path.name + '.claim')
+                claim_fd = os.open(potential_claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                claim_path = potential_claim_path
                 os.close(claim_fd)
             temporary_path = plan.temporary_output
             self.progress.emit(self.row_id, {'source': str(plan.source), 'destination': str(output_path), 'target': plan.target_name, 'state': 'starting', 'percent': 0.0, 'elapsed': 0.0, 'eta': None})
@@ -1668,10 +1867,14 @@ class ConversionJobController(QObject):
         self.thread_factory = thread_factory
         self.jobs = {}
 
-    def start(self, job_id, input_file, target_ext, output_dir=None, destination=None):
+    def start(self, job_id, input_file, target_ext, output_dir=None, destination=None, resize_height=None):
         if job_id in self.jobs:
             return False
-        thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
+        if resize_height is None:
+            thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination)
+        else:
+            thread = self.thread_factory(job_id, input_file, target_ext, output_dir, destination,
+                                         resize_height=resize_height)
         generation = uuid.uuid4().hex
         self.jobs[job_id] = {'thread': thread, 'generation': generation, 'state': 'starting', 'snapshot': {'state': 'starting'}}
         thread.progress.connect(lambda emitted_id, snapshot, token=generation: self._progress(emitted_id, snapshot, token))
@@ -1962,38 +2165,76 @@ class DownloadThread(QThread):
                     self.ydl = ydl
                     info = ydl.extract_info(self.url, download=True)
             except Exception as first_error:
-                if not should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                if self.cancelled or self.paused or self.isInterruptionRequested():
                     raise
-                self.status.emit(self.id, 'Authentication required; retrying once')
-                retry_base = build_download_options(
-                    self.profile_name, self.outtmpl, self.requested_height, self.metadata,
-                    [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
-                    self.request_context,
-                )
-                retry_options = authenticated_retry_options(retry_base, self.url, self.app_config)
-                with yt_dlp.YoutubeDL(retry_options) as ydl:
-                    self.ydl = ydl
-                    info = ydl.extract_info(self.url, download=True)
+                if should_retry_public_youtube_403(first_error, self.url, self.outtmpl, self.id):
+                    # Distinct per-job output avoids mixing old client .part ranges.
+                    alternate_template = alternate_youtube_output_template(self.outtmpl, self.id)
+                    self.status.emit(self.id, 'YouTube stream rejected; trying one alternate public client')
+                    retry_base = build_download_options(
+                        self.profile_name, alternate_template, self.requested_height, self.metadata,
+                        [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                        self.request_context,
+                    )
+                    retry_options = extraction_options_for_url(retry_base, self.url)
+                    retry_options['extractor_args'] = {
+                        **retry_options.get('extractor_args', {}),
+                        'youtube': {'player_client': ['android']},
+                    }
+                    with yt_dlp.YoutubeDL(retry_options) as ydl:
+                        self.ydl = ydl
+                        info = ydl.extract_info(self.url, download=True)
+                elif should_retry_authenticated_extraction(first_error, self.url, self.app_config):
+                    self.status.emit(self.id, 'Authentication required; retrying once')
+                    retry_base = build_download_options(
+                        self.profile_name, self.outtmpl, self.requested_height, self.metadata,
+                        [self.progress_hook], [self.postprocessor_hook], self.speed_limit_bps,
+                        self.request_context,
+                    )
+                    retry_options = authenticated_retry_options(retry_base, self.url, self.app_config)
+                    with yt_dlp.YoutubeDL(retry_options) as ydl:
+                        self.ydl = ydl
+                        info = ydl.extract_info(self.url, download=True)
+                else:
+                    raise
             if isinstance(info, dict) and isinstance(info.get('url'), str):
                 self.resolved_media_url = info['url']
             if self.cancelled or self.isInterruptionRequested():
                 raise CancelException("Cancelled")
             self.current_stage = 'verification'
             self.status.emit(self.id, 'Verifying output')
+            # Derive ownership from the actual per-download output template,
+            # NEVER from the source video's extractor ID.
+            suffix = f'-{str(self.id)[:8]}'
+            output_tag = suffix if (self.id and self.outtmpl.endswith(f'{suffix}.%(ext)s')) else None
             final_path, probe = resolve_final_media(
-                info, self.postprocessed_paths, self.save_dir, self.profile_name, preexisting,
+                info, self.postprocessed_paths, self.save_dir, self.profile_name,
+                preexisting, output_tag=output_tag,
             )
             if not profile_codecs_compatible(probe, self.profile_name):
+                if self.cancelled or self.isInterruptionRequested():
+                    raise CancelException("Cancelled")
                 self.current_stage = 'conversion'
                 self.status.emit(self.id, f'Converting to compatible {profile.extension.upper()}')
-                final_path, probe = convert_incompatible_profile_output(final_path, self.profile_name, self.save_dir, probe)
+                final_path, probe = convert_incompatible_profile_output(
+                    final_path, self.profile_name, self.save_dir, probe,
+                    cancel_check=lambda: self.cancelled or self.isInterruptionRequested(),
+                )
+                if self.cancelled or self.isInterruptionRequested():
+                    raise CancelException("Cancelled")
                 final_path, probe = validate_final_media(final_path, self.save_dir, self.profile_name)
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.final_filename = str(final_path)
             self.final_probe = probe
             cleanup_verified_intermediates(self.temporary_paths, final_path, self.save_dir)
             size = final_path.stat().st_size
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.metrics.emit(self.id, size, size, 0.0, 0)
             self.size_updated.emit(self.id, final_path.name, self.format_size(size))
+            if self.cancelled or self.isInterruptionRequested():
+                raise CancelException("Cancelled")
             self.progress.emit(
                 self.id, final_path.name, 100.0, format_bytes(size), format_bytes(size),
                 '0 B/s', '00:00:00', 'Completed'
@@ -2016,6 +2257,87 @@ class DownloadThread(QThread):
 # ==========================================
 # 4. STRATRUM DOWNLOAD STUDIO UI
 # ==========================================
+class StandardFileDownloadDialog(QDialog):
+    """One clear file-download form; browser auto-handoff keeps its opt-in flow."""
+
+    def __init__(self, parent=None, default_folder="", recent_folders=None):
+        super().__init__(parent)
+        self.setWindowTitle("Download a File - I-DS")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        info = QLabel("Choose a file link, optional name, and where to save it.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        fields = QFormLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://example.com/file.pdf")
+        self.url_edit.setAccessibleName("File download URL")
+        fields.addRow("File URL", self.url_edit)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Use website filename (recommended)")
+        self.name_edit.setAccessibleName("Optional custom filename")
+        fields.addRow("File name", self.name_edit)
+        destination = QHBoxLayout()
+        self.folder_combo = QComboBox()
+        self.folder_combo.setEditable(True)
+        self.folder_combo.setAccessibleName("Destination folder")
+        folders = [str(item) for item in (recent_folders or []) if str(item).strip()]
+        if default_folder and default_folder not in folders:
+            folders.insert(0, default_folder)
+        self.folder_combo.addItems(folders)
+        if default_folder:
+            self.folder_combo.setCurrentText(default_folder)
+        destination.addWidget(self.folder_combo, 1)
+        browse = QPushButton("Browse...")
+        browse.setAccessibleName("Browse for save folder")
+        browse.clicked.connect(self.browse_folder)
+        destination.addWidget(browse)
+        fields.addRow("Save to", destination)
+        layout.addLayout(fields)
+        safety = QLabel("Existing files are kept: I-DS creates a unique filename when necessary.")
+        safety.setWordWrap(True)
+        layout.addWidget(safety)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.start_button = QPushButton("Start Download")
+        self.start_button.clicked.connect(self.validate_and_accept)
+        self.start_button.setDefault(True)
+        actions.addWidget(cancel)
+        actions.addWidget(self.start_button)
+        layout.addLayout(actions)
+
+    def browse_folder(self):
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose Download Folder", self.folder_combo.currentText()
+        )
+        if selected:
+            self.folder_combo.setCurrentText(selected)
+
+    def validate_and_accept(self):
+        url = self.url_edit.text().strip()
+        if not validate_url(url)[0]:
+            QMessageBox.warning(self, "File URL", "Enter a valid HTTP or HTTPS file link.")
+            return
+        selected = self.folder_combo.currentText().strip()
+        try:
+            folder = Path(selected).expanduser().resolve(strict=True) if selected else None
+        except (OSError, ValueError):
+            folder = None
+        if folder is None or not folder.is_dir():
+            QMessageBox.warning(self, "Save Folder", "Choose an existing destination folder.")
+            return
+        self.accept()
+
+    def get_data(self):
+        return (
+            self.url_edit.text().strip(),
+            self.folder_combo.currentText().strip(),
+            safe_file_name(self.name_edit.text().strip()) if self.name_edit.text().strip() else "",
+        )
+
+
 class DownloadFileInfoDialog(QDialog):
     def __init__(self, parent=None, prefill_url="", app_config=None, request_context=None):
         super().__init__(parent)
@@ -2380,6 +2702,8 @@ class DownloadProgressPopup(QDialog):
             self.pause_btn.setEnabled(True)
         else:
             self.pause_btn.setEnabled(False)
+        terminal = normalized in {JobState.FAILED.value, JobState.CANCELLED.value, JobState.COMPLETED.value}
+        self.cancel_btn.setText("Close" if terminal else "Cancel")
 
     def persist_keep_open_preference(self, checked):
         if self.app_config:
@@ -2408,6 +2732,9 @@ class DownloadProgressPopup(QDialog):
             self.pause_requested.emit(self.job_id)
 
     def request_cancel(self):
+        if self.job_state in {JobState.COMPLETED.value, JobState.FAILED.value, JobState.CANCELLED.value}:
+            self.close()
+            return
         if self.job_state in {JobState.CONVERTING.value, JobState.PAUSED.value, 'starting'}:
             if QMessageBox.question(self, "Cancel Conversion", "Cancel only this conversion? The source and previous valid outputs will be preserved.") == QMessageBox.StandardButton.Yes:
                 self.cancel_requested.emit(self.job_id, False)
@@ -2421,8 +2748,10 @@ class DownloadProgressPopup(QDialog):
         question.exec()
         if question.clickedButton() == keep_button:
             self.cancel_requested.emit(self.job_id, False)
+            self.close()
         elif question.clickedButton() == remove_button:
             self.cancel_requested.emit(self.job_id, True)
+            self.close()
 
     def apply_speed_limit(self):
         unit = self.speed_unit_combo.currentText()
@@ -2464,11 +2793,25 @@ class LocalConverterDialog(QDialog):
         top = QHBoxLayout()
         add_button = QPushButton('Add Files'); add_button.clicked.connect(self.select_files); top.addWidget(add_button)
         self.target_combo = QComboBox(); self.target_combo.addItems(list(OUTPUT_PROFILES)); top.addWidget(QLabel('Target:')); top.addWidget(self.target_combo)
+        self.resize_combo = QComboBox()
+        self.resize_combo.setAccessibleName("Resize converted video")
+        self.resize_combo.setToolTip("Preserves aspect ratio and never enlarges video. Audio outputs are not resized.")
+        self.resize_combo.addItem("Original size", None)
+        for height in (1080, 720, 480, 360, 240):
+            self.resize_combo.addItem(f"Up to {height}p", height)
+        top.addWidget(QLabel("Video size:"))
+        top.addWidget(self.resize_combo)
         self.apply_all_button = QPushButton('Apply format to all'); self.apply_all_button.clicked.connect(self.apply_format_to_all); top.addWidget(self.apply_all_button)
-        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to each source folder)'); top.addWidget(self.output_edit, 1)
-        browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); top.addWidget(browse_button)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        destination_row = QHBoxLayout()
+        destination_row.addWidget(QLabel("Save to:"))
+        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText('Output folder (defaults to source folder)'); destination_row.addWidget(self.output_edit, 1)
+        browse_button = QPushButton('Browse'); browse_button.clicked.connect(self.select_output_folder); destination_row.addWidget(browse_button)
         self.overwrite_combo = QComboBox(); self.overwrite_combo.addItem('Unique name', 'unique'); self.overwrite_combo.addItem('Ask before replace', 'ask'); self.overwrite_combo.addItem('Skip existing', 'skip')
-        top.addWidget(self.overwrite_combo); layout.addLayout(top)
+        destination_row.addWidget(self.overwrite_combo)
+        layout.addLayout(destination_row)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(['Source', 'Detected media', 'Target', 'Progress', 'State', 'Output'])
@@ -2483,12 +2826,17 @@ class LocalConverterDialog(QDialog):
         self.cancel_button = QPushButton('Cancel'); self.cancel_button.clicked.connect(self.cancel_active); self.cancel_button.setEnabled(False); buttons.addWidget(self.cancel_button)
         self.pause_button = QPushButton('Pause'); self.pause_button.clicked.connect(self.pause_active); buttons.addWidget(self.pause_button)
         self.resume_button = QPushButton('Resume'); self.resume_button.clicked.connect(self.resume_active); buttons.addWidget(self.resume_button)
-        self.remove_button = QPushButton('Remove Selected'); self.remove_button.clicked.connect(self.remove_selected); buttons.addWidget(self.remove_button)
-        self.clear_button = QPushButton('Clear List'); self.clear_button.clicked.connect(self.clear_list); buttons.addWidget(self.clear_button)
-        self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); buttons.addWidget(self.open_output_button)
-        self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); buttons.addWidget(self.open_folder_button)
-        buttons.addStretch(1); close_button = QPushButton('Close'); close_button.clicked.connect(self.close); buttons.addWidget(close_button)
+        buttons.addStretch(1)
         layout.addLayout(buttons)
+
+        secondary_buttons = QHBoxLayout()
+        self.remove_button = QPushButton('Remove Selected'); self.remove_button.clicked.connect(self.remove_selected); secondary_buttons.addWidget(self.remove_button)
+        self.clear_button = QPushButton('Clear List'); self.clear_button.clicked.connect(self.clear_list); secondary_buttons.addWidget(self.clear_button)
+        self.open_output_button = QPushButton('Open Output'); self.open_output_button.clicked.connect(self.open_selected_output); secondary_buttons.addWidget(self.open_output_button)
+        self.open_folder_button = QPushButton('Open Folder'); self.open_folder_button.clicked.connect(self.open_selected_folder); secondary_buttons.addWidget(self.open_folder_button)
+        secondary_buttons.addStretch(1)
+        close_button = QPushButton('Close'); close_button.clicked.connect(self.close); secondary_buttons.addWidget(close_button)
+        layout.addLayout(secondary_buttons)
         self.target_combo.currentTextChanged.connect(self.refresh_target_availability)
         self.table.itemSelectionChanged.connect(self.update_button_states)
         self.update_button_states()
@@ -2585,7 +2933,10 @@ class LocalConverterDialog(QDialog):
             try:
                 target = entry['target']
                 destination = conversion_destination_for_behavior(entry['source'], target, output_dir, behavior, self._confirm_replace, reserved)
-                plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination)
+                resize_height = self.resize_combo.currentData() if output_profile(target).media_kind == 'video' else None
+                plan = build_conversion_plan(entry['source'], target, output_dir, entry['probe'], destination,
+                                             resize_height=resize_height)
+                entry['resize_height'] = resize_height
                 self.pending_jobs.append((entry, plan))
                 reserved.add(str(plan.destination.resolve()))
                 entry['state'] = 'queued'
@@ -2601,7 +2952,9 @@ class LocalConverterDialog(QDialog):
         entry, plan = self.pending_jobs.pop(0)
         self.active_job_id = entry['job_id']; entry['state'] = 'starting'
         self.table.item(entry['row'], 4).setText('Starting')
-        self.conversion_controller.start(entry['job_id'], entry['source'], plan.target_name, plan.destination.parent, plan.destination)
+        self.conversion_controller.start(entry['job_id'], entry['source'], plan.target_name,
+                                         plan.destination.parent, plan.destination,
+                                         resize_height=entry.get('resize_height'))
         self.update_button_states()
 
     def on_progress(self, job_id, snapshot):
@@ -2716,8 +3069,8 @@ class BrowserIntegrationDialog(QDialog):
         self.setWindowTitle("Browser Integration")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Copy the local authentication token into the Chrome, Edge, or Firefox extension. "
-            "The token is masked and must never be shared or logged."
+            "Connect your browser in two steps: Click Copy Token here, then open "
+            "I-DS extension settings and click Connect with copied token."
         ))
         token_field = QLineEdit(app_config.auth_token)
         token_field.setReadOnly(True)
@@ -2750,7 +3103,8 @@ class BrowserIntegrationDialog(QDialog):
 
         actions = QHBoxLayout()
         copy_button = QPushButton("Copy Token")
-        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(app_config.auth_token))
+        copy_button.setAccessibleName("Copy private browser pairing token")
+        copy_button.clicked.connect(self.copy_pairing_token)
         actions.addWidget(copy_button)
         guide_button = QPushButton("Open Extension Guide")
         guide_button.clicked.connect(self.open_guide)
@@ -2765,6 +3119,24 @@ class BrowserIntegrationDialog(QDialog):
         close_button.clicked.connect(self.accept)
         actions.addWidget(close_button)
         layout.addLayout(actions)
+        self.copy_feedback = QLabel("")
+        self.copy_feedback.setAccessibleName("Browser pairing instruction")
+        layout.addWidget(self.copy_feedback)
+        setup_hint = QLabel(
+            "New browser? Open the extension folder, then Developer mode > Load unpacked. "
+            "Choose the folder, open its settings and click Connect with copied token."
+        )
+        setup_hint.setWordWrap(True)
+        layout.addWidget(setup_hint)
+        setup_row = QHBoxLayout()
+        extension_folder = QPushButton("Open Extension Folder")
+        extension_folder.clicked.connect(self.open_extension_folder)
+        setup_row.addWidget(extension_folder)
+        for browser in ('chrome', 'edge'):
+            button = QPushButton("Set Up " + browser.title())
+            button.clicked.connect(lambda checked=False, kind=browser: self.open_browser_setup(kind))
+            setup_row.addWidget(button)
+        layout.addLayout(setup_row)
 
         layout.addWidget(QLabel(f"Paired browser origins (maximum {MAX_PAIRED_ORIGINS}):"))
         pairing_actions = QHBoxLayout()
@@ -2777,6 +3149,10 @@ class BrowserIntegrationDialog(QDialog):
         self.pairing_label = QLabel()
         layout.addWidget(self.pairing_label)
         self.refresh_origins()
+
+    def copy_pairing_token(self):
+        QApplication.clipboard().setText(self.app_config.auth_token)
+        self.copy_feedback.setText("Copied. In your I-DS extension, click Connect with copied token.")
 
     def persist_default_action(self):
         selected = self.default_action_combo.currentData()
@@ -2804,8 +3180,8 @@ class BrowserIntegrationDialog(QDialog):
         self.origin_combo.addItems(self.app_config.allowed_origins)
         count = len(self.app_config.allowed_origins)
         self.pairing_label.setText(
-            f"{count} browser origin{'s' if count != 1 else ''} paired."
-            if count else "No browser extension is currently paired."
+            f"{count} previously authorized browser origin{'s' if count != 1 else ''} (not a live connection check)."
+            if count else "No browser has been paired yet."
         )
 
     def open_guide(self):
@@ -2814,6 +3190,20 @@ class BrowserIntegrationDialog(QDialog):
                 raise OSError("The operating system did not open the guide")
         except (OSError, ValueError):
             QMessageBox.warning(self, "Guide Unavailable", "The browser extension README could not be opened.")
+
+    def open_extension_folder(self):
+        try:
+            path = browser_extension_directory()
+            if not (path / 'manifest.json').is_file():
+                raise FileNotFoundError(str(path))
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise OSError(str(path))
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Extension Folder", "I-DS extension files were not found. Reinstall the current I-DS setup.")
+
+    def open_browser_setup(self, browser):
+        if not open_browser_extensions_settings(browser):
+            QMessageBox.warning(self, "Browser Not Found", f"{browser.title()} could not be located on this PC.")
 
     def remove_selected_origin(self):
         origin = self.origin_combo.currentText()
@@ -2868,11 +3258,16 @@ class StratrumDownloadStudio(QMainWindow):
         self.init_tray_icon()
         self.load_downloads_from_file()
         self.load_recovered_queue_jobs()
+        self.download_manager.job_changed.connect(lambda *_: self.refresh_dashboard())
+        self.refresh_dashboard()
         self.init_server()
 
     def init_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        icon_path = Path(__file__).resolve().parent / 'stratum-download-studio.ico'
+        icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
         self.tray_icon.setIcon(icon)
         self.setWindowIcon(icon)
 
@@ -2923,6 +3318,15 @@ class StratrumDownloadStudio(QMainWindow):
         event.ignore(); self.hide()
 
     def force_quit(self):
+        # Keep resumable HTTP partials intact instead of destroying a live QThread.
+        for record in self.downloads:
+            worker = record.get('thread')
+            if isinstance(worker, FileDownloadThread) and worker.isRunning():
+                worker.paused = True
+                worker.wait(2500)
+                if worker.isRunning():
+                    QMessageBox.warning(self, "File Download", "A file connection is still stopping. Your partial download is preserved; please use Exit again after it stops.")
+                    return
         self.persist_ui_preferences()
         self.save_downloads_to_file(wait=True)
         self.server_thread.stop(); self.server_thread.wait(); QApplication.quit()
@@ -3038,7 +3442,8 @@ class StratrumDownloadStudio(QMainWindow):
             source = sanitize_source_url(job.source_url); source_item = QTableWidgetItem(source); source_item.setToolTip(source); self.table.setItem(row, 7, source_item)
             self.downloads.append({
                 'id': job.job_id, 'url': job.source_url, 'outtmpl': str(Path(job.save_dir) / f'%(title)s [%(id)s]-{job.job_id[:8]}.%(ext)s'),
-                'save_dir': job.save_dir, 'format': build_format_selector(job.requested_format, job.requested_resolution),
+                'save_dir': job.save_dir, 'format': ('FILE' if job.requested_format == 'FILE' else
+                    build_format_selector(job.requested_format, job.requested_resolution)),
                 'ext': job.requested_format, 'thread': None, 'row': row, 'final_path': job.final_output_path,
                 'converted_output_path': '', 'requested_resolution': job.requested_resolution, 'metadata': {}, 'job': job,
             })
@@ -3062,7 +3467,8 @@ class StratrumDownloadStudio(QMainWindow):
     def init_ui(self):
         menubar = self.menuBar()
         tasks_menu = menubar.addMenu("Tasks")
-        tasks_menu.addAction("Add new download").triggered.connect(lambda: self.open_add_dialog(""))
+        tasks_menu.addAction("Add new media download").triggered.connect(lambda: self.open_add_dialog(""))
+        tasks_menu.addAction("Download file (PDF / ZIP / installer)...").triggered.connect(self.open_file_dialog)
         tasks_menu.addAction("Convert local media...").triggered.connect(self.open_local_converter)
         batch_action = tasks_menu.addAction("Batch Download (Phase 2B)"); batch_action.setEnabled(False)
         batch_action.setToolTip("Batch input is deferred to Phase 2B.")
@@ -3093,6 +3499,9 @@ class StratrumDownloadStudio(QMainWindow):
 
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Quick Start").triggered.connect(self.show_quick_start)
+        help_menu.addAction("Set Up Chrome / Edge Extension...").triggered.connect(
+            lambda: BrowserIntegrationDialog(self.app_config, self).exec()
+        )
         help_menu.addAction("Supported Sites").triggered.connect(self.show_supported_sites)
         help_menu.addAction("Open Logs / Diagnostics").triggered.connect(self.export_diagnostics)
         help_menu.addAction(f"About {APP_NAME}").triggered.connect(self.show_about)
@@ -3106,31 +3515,116 @@ class StratrumDownloadStudio(QMainWindow):
         self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(self.toolbar)
 
-        self.toolbar.addAction("➕\nAdd URL").triggered.connect(lambda: self.open_add_dialog(""))
-        self.toolbar.addAction("🎞\nConverter").triggered.connect(self.open_local_converter)
-        self.toolbar_resume_action = self.toolbar.addAction("▶\nResume"); self.toolbar_resume_action.triggered.connect(self.resume_download)
-        self.toolbar_pause_action = self.toolbar.addAction("⏸\nPause"); self.toolbar_pause_action.triggered.connect(self.pause_download)
-        self.toolbar_stop_action = self.toolbar.addAction("⏹\nCancel"); self.toolbar_stop_action.triggered.connect(self.cancel_selected_download)
-        self.toolbar.addAction("🛑\nPause All").triggered.connect(self.pause_all_downloads)
-        self.toolbar_delete_action = self.toolbar.addAction("❌\nDelete"); self.toolbar_delete_action.triggered.connect(self.delete_download)
-        self.toolbar.addAction("🗑\nClear Done").triggered.connect(self.delete_completed)
-        self.toolbar.addAction("⚙\nOptions").triggered.connect(lambda: self.show_dummy_msg("Options"))
-        self.toolbar.addAction("🔗\nShare").triggered.connect(self.share_link)
+        # Cohesive local SVG icons; existing QAction references and handlers preserved.
+        actions = [
+            ("video", "Add media", lambda: self.open_add_dialog("")),
+            ("file", "Download file", self.open_file_dialog),
+            ("convert", "Converter", self.open_local_converter),
+            ("play", "Resume", self.resume_download),
+            ("pause", "Pause", self.pause_download),
+            ("cancel", "Cancel", self.cancel_selected_download),
+            ("pause-all", "Pause all", self.pause_all_downloads),
+            ("trash", "Delete", self.delete_download),
+            ("clear", "Clear done", self.delete_completed),
+            ("settings", "Options", lambda: self.show_dummy_msg("Options")),
+            ("share", "Share", self.share_link),
+        ]
+        self.toolbar_actions = {}
+        for glyph, label, callback in actions:
+            action = self.toolbar.addAction(ids_icon(glyph, size=38), label)
+            action.setToolTip(label)
+            action.triggered.connect(callback)
+            self.toolbar_actions[label] = action
+        self.toolbar_resume_action = self.toolbar_actions["Resume"]
+        self.toolbar_pause_action = self.toolbar_actions["Pause"]
+        self.toolbar_stop_action = self.toolbar_actions["Cancel"]
+        self.toolbar_delete_action = self.toolbar_actions["Delete"]
+
+        self.sidebar_toggle_button = QToolButton(self)
+        self.sidebar_toggle_button.setObjectName("idsBannerToggle")
+        self.sidebar_toggle_button.setIcon(ids_icon("sidebar", "#ffffff", size=36))
+        self.sidebar_toggle_button.setIconSize(QSize(23, 23))
+        self.sidebar_toggle_button.setToolTip("Show or hide categories")
+        self.sidebar_toggle_button.setAccessibleName("Show or hide categories")
+        self.sidebar_toggle_button.clicked.connect(lambda: sidebar_action.setChecked(not sidebar_action.isChecked()))
+        self.text_scale_combo = QComboBox(self)
+        self.text_scale_combo.setToolTip("Interface text size")
+        self.text_scale_combo.setAccessibleName("Interface text size")
+        for label, value in (("100%", 100), ("115%", 115), ("130%", 130)):
+            self.text_scale_combo.addItem(label, value)
+        scale_index = self.text_scale_combo.findData(self.app_config.ui_text_scale)
+        self.text_scale_combo.setCurrentIndex(max(0, scale_index))
+        self.text_scale_combo.setMaximumWidth(89)
+        self.text_scale_combo.currentIndexChanged.connect(self.set_text_scale)
+
+        workspace = QWidget(self)
+        workspace.setObjectName("idsWorkspace")
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(13, 11, 13, 9)
+        workspace_layout.setSpacing(11)
+        self.brand_header, self.dashboard_metrics, self.brand_subtitle = make_banner(workspace)
+        self.brand_header.layout().addWidget(self.sidebar_toggle_button)
+        self.brand_header.layout().addWidget(self.text_scale_combo)
+        workspace_layout.addWidget(self.brand_header)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(self.splitter)
+        self.splitter.setHandleWidth(8)
+        self.splitter.setChildrenCollapsible(False)
+        self.sidebar_panel = QFrame(self)
+        self.sidebar_panel.setObjectName("idsSidebarPanel")
+        self.sidebar_panel.setMinimumWidth(162)
+        sidebar_layout = QVBoxLayout(self.sidebar_panel)
+        sidebar_layout.setContentsMargins(10, 11, 6, 10)
+        sidebar_layout.setSpacing(9)
+        sidebar_heading = QHBoxLayout()
+        sidebar_title = QLabel("Library")
+        sidebar_title.setObjectName("idsSidebarTitle")
+        sidebar_heading.addWidget(sidebar_title)
+        sidebar_heading.addStretch()
+        for glyph, tip, width in (
+            ("narrow", "Compact category sidebar", 174),
+            ("wide", "Wider category sidebar", 275),
+        ):
+            button = QToolButton(self.sidebar_panel)
+            button.setIcon(ids_icon(glyph, size=31))
+            button.setIconSize(QSize(20, 20))
+            button.setToolTip(tip)
+            button.setAccessibleName(tip)
+            button.clicked.connect(lambda checked=False, amount=width: self.set_sidebar_width(amount))
+            sidebar_heading.addWidget(button)
+        sidebar_layout.addLayout(sidebar_heading)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
+        self.tree.setAccessibleName("Download categories")
         root_all = QTreeWidgetItem(["All Downloads"])
-        QTreeWidgetItem(root_all, ["Video"]); QTreeWidgetItem(root_all, ["Audio"]); QTreeWidgetItem(root_all, ["Compressed"]); QTreeWidgetItem(root_all, ["Documents"])
-        self.tree.addTopLevelItem(root_all); self.tree.addTopLevelItem(QTreeWidgetItem(["Unfinished"])); self.tree.addTopLevelItem(QTreeWidgetItem(["Finished"]))
+        root_all.setIcon(0, ids_icon("folder", size=30))
+        root_all.setToolTip(0, "All Downloads")
+        for category, glyph in (
+            ("Video", "video"), ("Audio", "audio"),
+            ("Compressed", "archive"), ("Documents", "document"),
+        ):
+            child = QTreeWidgetItem(root_all, [category])
+            child.setIcon(0, ids_icon(glyph, size=30))
+            child.setToolTip(0, category)
+        self.tree.addTopLevelItem(root_all)
+        for label, glyph in (("Unfinished", "clock"), ("Finished", "check")):
+            child = QTreeWidgetItem([label])
+            child.setIcon(0, ids_icon(glyph, size=30))
+            child.setToolTip(0, label)
+            self.tree.addTopLevelItem(child)
         root_all.setExpanded(True)
+        self.tree.setCurrentItem(root_all)
         self.tree.itemClicked.connect(self.filter_by_category)
-        self.splitter.addWidget(self.tree)
+        sidebar_layout.addWidget(self.tree)
+        self.splitter.addWidget(self.sidebar_panel)
 
         self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"])
+        self.table.setHorizontalHeaderLabels([
+            "File Name", "Q", "Size", "Status",
+            "Time Left", "Transfer Rate", "Last Try Date", "Description",
+        ])
+        self.table.setAccessibleName("Download jobs and progress")
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -3141,10 +3635,41 @@ class StratrumDownloadStudio(QMainWindow):
         self.table.itemSelectionChanged.connect(self.update_action_capabilities)
         self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
 
-        self.splitter.addWidget(self.table)
+        self.download_pages = QStackedWidget(self)
+        self.empty_page = make_empty_state(
+            lambda: self.open_add_dialog(""), self.open_file_dialog, self.open_local_converter, self,
+        )
+        self.download_pages.addWidget(self.empty_page)
+        self.download_pages.addWidget(self.table)
+        self.splitter.addWidget(self.download_pages)
+        self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes(self.app_config.splitter_sizes[:2])
-        sidebar_action.toggled.connect(self.tree.setVisible)
+        workspace_layout.addWidget(self.splitter, 1)
+
+        self.dashboard_footer = QFrame(self)
+        self.dashboard_footer.setObjectName("idsFooter")
+        footer_layout = QHBoxLayout(self.dashboard_footer)
+        footer_layout.setContentsMargins(12, 3, 10, 3)
+        self.dashboard_footer_text = QLabel("Ready for a new download")
+        self.dashboard_footer_text.setObjectName("idsFooterText")
+        footer_layout.addWidget(self.dashboard_footer_text)
+        footer_layout.addStretch()
+        self.help_button = QToolButton(self)
+        self.help_button.setIcon(ids_icon("help", size=30))
+        self.help_button.setIconSize(QSize(20, 20))
+        self.help_button.setToolTip("Quick start guide")
+        self.help_button.setAccessibleName("Quick start guide")
+        self.help_button.clicked.connect(self.show_quick_start)
+        footer_layout.addWidget(self.help_button)
+        workspace_layout.addWidget(self.dashboard_footer)
+        self.setCentralWidget(workspace)
+
+        sidebar_action.setChecked(self.app_config.sidebar_visible)
+        self.sidebar_panel.setVisible(self.app_config.sidebar_visible)
+        sidebar_action.toggled.connect(self.set_sidebar_visible)
         toolbar_view_action.toggled.connect(self.toolbar.setVisible)
+        self.apply_text_scale(self.app_config.ui_text_scale, persist=False)
+        self.refresh_dashboard()
 
         columns_menu = view_menu.addMenu("Columns")
         for index, name in enumerate(["File Name", "Q", "Size", "Status", "Time Left", "Transfer Rate", "Last Try Date", "Description"]):
@@ -3156,6 +3681,90 @@ class StratrumDownloadStudio(QMainWindow):
             for index, width in enumerate(self.app_config.column_widths[:self.table.columnCount()]):
                 self.table.setColumnWidth(index, max(40, int(width)))
         self.update_action_capabilities()
+
+    def set_sidebar_visible(self, visible):
+        self.sidebar_panel.setVisible(bool(visible))
+        self.app_config.sidebar_visible = bool(visible)
+        self.sidebar_toggle_button.setToolTip("Hide categories" if visible else "Show categories")
+        self.app_config.persist()
+
+    def set_sidebar_width(self, width):
+        if not self.sidebar_panel.isVisible():
+            self.sidebar_panel.show()
+            self.app_config.sidebar_visible = True
+        total = max(500, sum(self.splitter.sizes()))
+        chosen = max(self.sidebar_panel.minimumWidth(), min(int(width), total - 340))
+        self.splitter.setSizes([chosen, total - chosen])
+        self.app_config.splitter_sizes = list(self.splitter.sizes())
+        self.app_config.persist()
+
+    def set_text_scale(self, index):
+        self.apply_text_scale(self.text_scale_combo.itemData(index))
+
+    def apply_text_scale(self, value, persist=True):
+        scale = int(value) if value in (100, 115, 130) else 100
+        app = QApplication.instance()
+        if app:
+            font = QFont("Segoe UI", 10)
+            font.setPointSize({100: 10, 115: 12, 130: 13}[scale])
+            app.setFont(font)
+        self.app_config.ui_text_scale = scale
+        if hasattr(self, 'sidebar_panel'):
+            self.sidebar_panel.setMinimumWidth({100: 162, 115: 187, 130: 225}[scale])
+        if persist:
+            self.app_config.persist()
+        if hasattr(self, 'table'):
+            self.table.verticalHeader().setDefaultSectionSize(int(37 * scale / 100))
+
+    def refresh_dashboard(self):
+        if not hasattr(self, 'dashboard_metrics'):
+            return
+        jobs = [record['job'] for record in self.downloads if record.get('job')]
+        active_states = {
+            JobState.CONNECTING.value, JobState.RESOLVING.value,
+            JobState.DOWNLOADING.value, JobState.MERGING.value,
+            JobState.VERIFYING.value, JobState.CONVERTING.value,
+        }
+        counts = {
+            'active': sum(job.state in active_states for job in jobs),
+            'waiting': sum(job.state in {JobState.QUEUED.value, JobState.PAUSED.value} for job in jobs),
+            'done': sum(job.state == JobState.COMPLETED.value for job in jobs),
+        }
+        for key, word in (('active', 'Active'), ('waiting', 'Waiting'), ('done', 'Finished')):
+            self.dashboard_metrics[key].setText(f"{word}  {counts[key]}")
+            self.dashboard_metrics[key].setAccessibleName(f"{word}: {counts[key]} downloads")
+        self.download_pages.setCurrentIndex(1 if self.table.rowCount() else 0)
+        if counts['active']:
+            status = f"{counts['active']} download{'s' if counts['active'] != 1 else ''} in progress"
+        elif counts['waiting']:
+            status = f"{counts['waiting']} download{'s' if counts['waiting'] != 1 else ''} waiting"
+        elif jobs:
+            status = "All current downloads are idle"
+        else:
+            status = "Ready for a new download"
+        self.dashboard_footer_text.setText(status)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'toolbar') and hasattr(self, 'dashboard_metrics'):
+            compact = self.width() < 1090
+            self.toolbar.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly if compact else
+                Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+            )
+            self.dashboard_metrics['done'].setVisible(self.width() >= 1000)
+            self.brand_subtitle.setVisible(self.width() >= 820)
+            very_narrow = self.width() < 840
+            self.toolbar.setIconSize(QSize(22, 22) if very_narrow else QSize(30, 30))
+            self.toolbar.setStyleSheet(
+                "QToolBar {padding:2px 6px;} QToolButton {min-width:31px;"
+                "min-height:29px;padding:3px 5px;}" if very_narrow else ""
+            )
+            self.brand_header.setMinimumHeight(75 if very_narrow else 91)
+            self.brand_header.layout().setContentsMargins(
+                14 if very_narrow else 22, 8 if very_narrow else 12,
+                14 if very_narrow else 20, 8 if very_narrow else 12
+            )
 
     def selected_record(self):
         rows = self.table.selectionModel().selectedRows() if hasattr(self, 'table') else []
@@ -3204,13 +3813,13 @@ class StratrumDownloadStudio(QMainWindow):
         return capabilities
 
     def show_quick_start(self):
-        QMessageBox.information(self, "Quick Start", "Add an authorized media URL, choose a real output profile and available resolution, then select Start Download. Use the job popup to pause, limit speed, or choose a completion action.")
+        QMessageBox.information(self, "Quick Start", "Use Add URL for video/audio. Use File Download for PDF, ZIP, installers and other direct HTTP/HTTPS files. You can pause, resume and choose a save folder.")
 
     def show_supported_sites(self):
-        QMessageBox.information(self, "Supported Sites", "Stratum uses yt-dlp extractors for authorized HTTP/HTTPS media. Site availability can change; test the URL in the Add Download dialog. The general HTTP file engine is deferred to Phase 2B.")
+        QMessageBox.information(self, "Supported Sites", "Video and audio use supported yt-dlp extractors. General files use the direct HTTP(S) downloader. Website authorization, redirects and supported formats vary; DRM is unsupported.")
 
     def show_about(self):
-        QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME} — Phase 2A.6B media download foundation. Download only content you own or are authorized to save.")
+        QMessageBox.information(self, f"About {APP_NAME}", f"{APP_NAME}\nTool by InShaLIve.os\n\nMedia downloads and conversions are supported. General browser file interception is in development.")
 
     def export_diagnostics(self):
         logs_dir = self.app_config.app_data_root / 'logs'
@@ -3219,8 +3828,9 @@ class StratrumDownloadStudio(QMainWindow):
         payload = {
             'application': APP_NAME,
             'jobs': [{
-                **job.to_dict(),
+                **{k: v for k, v in job.to_dict().items() if k != 'original_source_url'},
                 'source_url': sanitize_source_url(job.source_url),
+                'original_source_url': sanitize_source_url(job.original_source_url),
                 'error_summary': clean_error_summary(job.error_summary),
             } for job in self.download_manager.jobs.values()],
         }
@@ -3235,12 +3845,12 @@ class StratrumDownloadStudio(QMainWindow):
             QMessageBox.information(self, "Properties", "Select a download job first.")
             return
         job = record['job']
-        editable = job_capabilities(job)['edit']
+        editable = job_capabilities(job)['edit'] and job.requested_format != 'FILE'
         dialog = QDialog(self); dialog.setWindowTitle("Download Properties"); dialog.setMinimumWidth(620)
         layout = QVBoxLayout(dialog); form = QFormLayout()
         source_field = QLineEdit(sanitize_source_url(job.original_source_url)); source_field.setReadOnly(True)
         folder_field = QLineEdit(job.save_dir); folder_field.setEnabled(editable)
-        format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES)); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
+        format_combo = QComboBox(); format_combo.addItems(list(OUTPUT_PROFILES) + (['FILE'] if job.requested_format == 'FILE' else [])); format_combo.setCurrentText(job.requested_format); format_combo.setEnabled(editable)
         resolution_combo = QComboBox(); resolution_combo.addItem("Best available", None)
         for height, label in RESOLUTION_LABELS.items(): resolution_combo.addItem(label, height)
         idx = resolution_combo.findData(job.requested_resolution); resolution_combo.setCurrentIndex(max(0, idx)); resolution_combo.setEnabled(editable and output_profile(job.requested_format).media_kind == 'video')
@@ -3460,13 +4070,25 @@ class StratrumDownloadStudio(QMainWindow):
             if record and record['job'].state == JobState.COMPLETED.value:
                 self.downloads.remove(record)
                 self.table.removeRow(row)
+                self.download_manager.jobs.pop(record['id'], None)
+                if record['id'] in self.download_manager.queue:
+                    self.download_manager.queue.remove(record['id'])
                 for other in self.downloads:
-                    if other['row'] > row: other['row'] -= 1
+                    if other['row'] > row:
+                        other['row'] -= 1
+        self.download_manager.persist()
+        self.refresh_dashboard()
 
     def init_server(self):
         self.server_thread = ServerThread(self.app_config)
         self.server_thread.download_requested.connect(self.handle_browser_request)
+        self.server_thread.file_requested.connect(self.handle_file_handoff)
+        self.server_thread.failed.connect(self.browser_bridge_failed)
         self.server_thread.start()
+
+    def browser_bridge_failed(self, message):
+        self.statusBar().showMessage(message)
+        self.tray_icon.showMessage("I-DS Browser Connection", message, QSystemTrayIcon.MessageIcon.Warning, 6000)
 
     def handle_browser_request(self, url, action, request_context=None):
         if action not in EXTENSION_ACTIONS:
@@ -3515,13 +4137,88 @@ class StratrumDownloadStudio(QMainWindow):
 
     def open_add_dialog(self, url="", request_foreground=False, request_context=None):
         if isinstance(url, bool): url = ""
-        self.show_normal(request_foreground=request_foreground)
+        # Browser handoffs should foreground ONLY the small options dialog,
+        # not pull the entire download manager across the browser window.
+        if not request_foreground:
+            self.show_normal(request_foreground=False)
         dialog = DownloadFileInfoDialog(self, prefill_url=url, app_config=self.app_config, request_context=request_context)
         if request_foreground:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             QTimer.singleShot(0, lambda: self.request_foreground(dialog))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             final_url, save_dir, requested_height, target_ext, metadata = dialog.get_data()
             if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata, dialog.request_context_for(final_url))
+
+    def open_file_dialog(self):
+        default = self.quick_download_defaults()[0] if self.quick_download_defaults_valid() else str(Path.home())
+        dialog = StandardFileDownloadDialog(
+            self, default_folder=default, recent_folders=self.app_config.recent_folders
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            url, folder, file_name = dialog.get_data()
+            if not self.start_http_download(url, folder, filename_hint=file_name, show_popup=True):
+                QMessageBox.warning(self, "File Download", "Cannot queue the file. Check its URL and save folder.")
+
+    def handle_file_handoff(self, url, request_context, file_name_hint, receipt):
+        # Queued Qt slot executes on the GUI thread. A timed-out request is
+        # rejected atomically and must not create a late/duplicate file job.
+        receipt.resolve(lambda: self.start_http_download(url, filename_hint=file_name_hint))
+
+    def start_http_download(self, url, save_dir=None, filename_hint="", show_popup=False):
+        valid, _ = validate_url(url)
+        if not valid:
+            return False
+        if save_dir is None:
+            try:
+                save_dir = self.quick_download_defaults()[0]
+            except ValueError:
+                return False
+        try:
+            folder = Path(save_dir).expanduser().resolve(strict=True)
+        except (OSError, ValueError):
+            return False
+        if not folder.is_dir():
+            return False
+        job_id = uuid.uuid4().hex
+        hint = safe_file_name(filename_hint) if filename_hint else ''
+        job = DownloadJob(
+            job_id=job_id, source_url=url, save_dir=str(folder),
+            requested_format='FILE', file_name_hint=hint, state=JobState.QUEUED.value,
+        )
+        self.download_manager.add_job(job)
+        self.app_config.add_recent_folder(folder)
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setFormat("Queued")
+        self.table.setItem(row, 0, QTableWidgetItem(hint or "File download"))
+        self.table.setItem(row, 1, QTableWidgetItem("0"))
+        self.table.setItem(row, 2, QTableWidgetItem("Calculating"))
+        self.table.setCellWidget(row, 3, bar)
+        self.table.setItem(row, 4, QTableWidgetItem("--:--"))
+        self.table.setItem(row, 5, QTableWidgetItem("0 B/s"))
+        self.table.setItem(row, 6, QTableWidgetItem(datetime.now().strftime("%b %d %H:%M:%S %Y")))
+        source_display = sanitize_source_url(url)
+        source_item = QTableWidgetItem(source_display)
+        source_item.setToolTip(source_display)
+        self.table.setItem(row, 7, source_item)
+        record = {
+            'id': job_id, 'url': url, 'outtmpl': str(folder / (hint or 'download.bin')),
+            'save_dir': str(folder), 'format': 'FILE', 'ext': 'FILE', 'thread': None,
+            'row': row, 'final_path': '', 'converted_output_path': '',
+            'requested_resolution': None, 'metadata': {}, 'job': job,
+        }
+        self.downloads.append(record)
+        if show_popup:
+            popup = DownloadProgressPopup(hint or "File download", source_display, self, job_id, self.app_config)
+            popup.pause_requested.connect(self.pause_job)
+            popup.resume_requested.connect(self.resume_job)
+            popup.cancel_requested.connect(self.cancel_job)
+            popup.speed_limit_changed.connect(self.set_job_speed_limit)
+            popup.set_details("General HTTP file download. Existing files will not be overwritten.")
+            self.popups[job_id] = popup
+            popup.show()
+        self.start_queued_jobs()
+        return True
 
     def start_new_download(self, url, save_dir, requested_height, target_ext, metadata=None, request_context=None):
         download_id = uuid.uuid4().hex
@@ -3574,6 +4271,18 @@ class StratrumDownloadStudio(QMainWindow):
         self.start_queued_jobs()
 
     def create_download_thread(self, record):
+        if record['job'].requested_format == 'FILE':
+            thread = FileDownloadThread(
+                record['id'], record['url'], record['save_dir'],
+                record['job'].file_name_hint, self.app_config.speed_limit_bps,
+            )
+            thread.progress.connect(self.update_progress)
+            thread.status.connect(self.update_status)
+            thread.result_ready.connect(self.download_finished)
+            thread.finished.connect(lambda id=record['id'], worker=thread: self.file_thread_stopped(id, worker))
+            thread.size_updated.connect(self.update_size)
+            thread.metrics.connect(self.update_job_metrics)
+            return thread
         thread = DownloadThread(
             record['id'], record['url'], record['outtmpl'], record['format'], record['ext'],
             record.get('requested_resolution'), record.get('metadata'), record['save_dir'],
@@ -3599,6 +4308,13 @@ class StratrumDownloadStudio(QMainWindow):
             if pending['id'] in self.popups:
                 self.popups[pending['id']].set_job_state(JobState.RESOLVING.value)
             thread.start()
+
+    def file_thread_stopped(self, job_id, worker):
+        record = self.get_download_by_id(job_id)
+        if record and record.get('thread') is worker:
+            record['thread'] = None
+            if record['job'].state == JobState.QUEUED.value:
+                self.start_queued_jobs()
 
     def get_download_by_id(self, id): return next((d for d in self.downloads if d['id'] == id), None)
 
@@ -3638,7 +4354,7 @@ class StratrumDownloadStudio(QMainWindow):
                 state_map[status] = JobState.DOWNLOADING
             if status in state_map and id in self.download_manager.jobs:
                 self.download_manager.set_state(id, state_map[status])
-            if status == 'Paused':
+            if status == 'Paused' and d['job'].requested_format != 'FILE':
                 d['thread'] = None
             if id in self.popups:
                 self.popups[id].set_job_state(state_map.get(status, status).value if isinstance(state_map.get(status), JobState) else status)
@@ -3722,6 +4438,11 @@ class StratrumDownloadStudio(QMainWindow):
                         open_download_folder(d)
                     except (OSError, ValueError):
                         QMessageBox.warning(self, "Error", "The completed file can no longer be located safely.")
+                # The completion dialog is the final step. One click also closes
+                # this job's progress window, not the main download manager.
+                # An explicit close takes precedence over the auto-close setting.
+                if popup:
+                    self.close_completed_popup(id, popup)
             else:
                 cancelled = str(error_msg).lower() == 'cancelled'
                 state = JobState.CANCELLED if cancelled else JobState.FAILED
@@ -3732,8 +4453,11 @@ class StratrumDownloadStudio(QMainWindow):
                     self.popups[id].set_details(f"State: {state.value}\nSafe error: {clean_error_summary(error_msg)}\nPartial files were retained unless removal was explicitly requested.")
                 if not cancelled:
                     QMessageBox.warning(self, "Download Failed", clean_error_summary(error_msg))
+                if popup := self.popups.pop(id, None):
+                    popup.close()
             d['thread'] = None
             self.save_downloads_to_file()
+            self.refresh_dashboard()
             self.update_action_capabilities()
             self.start_queued_jobs()
 
@@ -3787,6 +4511,7 @@ class StratrumDownloadStudio(QMainWindow):
                 self.download_manager.persist()
                 for other in self.downloads:
                     if other['row'] > row: other['row'] -= 1
+        self.refresh_dashboard()
 
     def trigger_conversion(self, target_ext):
         record = self.selected_record()
@@ -3874,7 +4599,7 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(list(argv) if argv is not None else sys.argv)
     app.setStyleSheet(MODERN_STYLE)
     app.setStyle("Fusion")
-    app.setFont(QFont("Segoe UI", 9))
+    app.setFont(QFont("Segoe UI", 10))
     window = StratrumDownloadStudio(runtime_config)
     window.show()
     return app.exec()

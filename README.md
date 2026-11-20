@@ -1,113 +1,67 @@
-# ⚡ Stratum Download Studio
+# I-DS — I.os Download Support
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![yt--dlp](https://img.shields.io/badge/Media%20Engine-yt--dlp-red.svg)](https://github.com/yt-dlp/yt-dlp)
-[![Browser Support](https://img.shields.io/badge/Extensions-Chrome%20%7C%20Firefox-orange.svg)](#-browser-integration)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+**Tool by InShaLIve.os** · Open-source Windows downloader · Python / PyQt6
 
-An advanced, open-source **desktop Internet Download Manager (IDM)** alternative built with Python and PyQt6. Features native Chrome & Firefox browser extensions, multi-segmented accelerated downloading, media stream sniffing, and integrated FFmpeg format transcoding.
+> Active development. Media downloading and direct HTTP file downloading now work in a Phase 2B beta, but the extension and network recovery still need real-world acceptance before this replaces IDM.
 
----
+![I-DS download mark](stratum-download-studio-logo.svg)
 
-## 🌟 Key Capabilities
+## What works today
 
-### 1. 🚀 Accelerated Multi-Connection Engine
-* **Segmented Chunk Downloading**: Splits files into parallel chunks to saturate available bandwidth.
-* **Resilient Pause & Resume**: Seamlessly resumes broken or interrupted downloads without losing data.
-* **Automatic Retry & Reconnection**: Handles network dropouts gracefully with exponential backoff.
+- **Desktop media URLs:** Add a supported video/audio URL, choose a real output format and available resolution, and start downloading through the controlled yt-dlp engine.
+- **Direct file downloads (Phase 2B beta):** Desktop **File Download** supports HTTP/HTTPS PDFs, ZIPs, images, installers and other files, with progress, safe unique filenames and resumable partials when the server provides validators. Interruption, validator changes and parallel files passed recovery tests. The installed Edge executable with an isolated extension profile preserved its native download when I-DS was absent; when connected, Edge cancelled its copy and I-DS saved a verified public PDF (13,264 bytes). Real owner-profile Chrome/Edge acceptance remains pending.
+- **Chrome/Edge browser companion:** Detect supported on-page media, show an in-player I-DS button, right-click a file link, or opt in to automatic handoff of supported general-file downloads.
+- **Download management:** Status, pause/cancel, queue history/recovery logic, speed controls, and completion actions are implemented. Reliability still needs live long-session testing.
+- **Media converter:** FFmpeg-based conversions with format validation, progress/cancellation and **Video size** presets (Original, up to 1080p / 720p / 480p / 360p / 240p). Resizing preserves aspect ratio and never upscales. A real FFmpeg 640×480 to 480×360 conversion passed FFprobe and frame decoding.
+- **Local pairing:** The extension sends authenticated requests to a loopback-only desktop endpoint. Pairing tokens stay local.
 
-### 2. 🌐 Native Browser Integration
-* **Chrome / Edge Extension** (`browser_extension/`): Manifest V3 extension capturing file downloads and web video streams directly from your browser.
-* **Firefox Extension** (`firefox_extension/`): Native Firefox add-on with web media detection hooks.
-* **Local WebSocket Bridge**: Instant, low-latency communication between browser tabs and the desktop application on `127.0.0.1`.
+The underlying source and compatibility filenames still use the historical Stratum names to preserve existing configurations and tooling. **On Windows, use `00 - OPEN I-DS` to start the GUI with the I-DS product icon and no persistent command window.** A broken old Start Stratum shortcut was moved to a reversible local backup; do not remove the internal source files.
 
-### 3. 🎥 Universal Video & Audio Extraction
-* **Powered by yt-dlp**: Extracts high-resolution streams from thousands of websites (YouTube, Vimeo, TikTok, Facebook, Twitter/X, Instagram, and more).
-* **Format & Quality Picker**: Select video resolutions (4K, 1440p, 1080p, 720p) or extract audio tracks directly.
-* **Cookie & Session Authentication**: Seamlessly authenticates with logged-in browser sessions for private or member-only media.
+## Still in development
 
-### 4. 🎛️ Post-Download Media Converter
-* Automatically transcodes completed downloads using FFmpeg:
-  * **Video**: MP4 (H.264/AAC), MKV, WebM (VP9/Opus)
-  * **Audio**: MP3, M4A, FLAC, WAV
-* **Faststart Optimization**: Automatically injects MP4 `+faststart` moov flags for immediate web playback.
+- Manual Chrome/Edge installed-extension acceptance of opt-in PDF/ZIP/installer handoff and correct resume-to-browser fallback after failed desktop acceptance. Chrome downloads requiring session cookies may not transfer successfully.
+- Extended HTTP retry/recovery stress testing, especially large authenticated or expiring signed links (**Phase 2B.1**).
+- Further video-detection and site compatibility checks, particularly **YouTube HTTP 403**. The one-time Android-client retry completed both a verified MP4 and a **5.05 MiB MP3** through the actual I-DS worker. FFmpeg lookup was repaired for Windows WinGet links and frozen builds. Other websites/videos and owner-profile downloads remain unverified. DRM-protected content is not supported.
+- A private unsigned **I-DS-Setup.exe** installer has been built and passed sandbox installation, startup, shortcut and uninstall tests without Python or FFmpeg on the test PATH. **Code signing, bundled third-party license/source compliance review, a separate clean Windows PC, Chrome owner-profile acceptance and browser-store publication** remain pending.
 
----
+**Do not install from unrelated websites.** GitHub currently provides the source, not a signed public installer. The tested private setup candidate is deliberately not attached to a release until the remaining acceptance checks pass.
 
-## 📂 Repository Structure
+## Quick start on Windows
 
-```
-Stratum-Download-Studio/
-├── stratum_download_studio.py     # Main PyQt6 desktop application (3,800+ lines)
-├── stratum_dependency_policy.py   # Secure dependency isolation and yt-dlp bridge
-├── StratumDownloadStudio.pyw      # Windowless launcher entrypoint
-├── START STRATUM DOWNLOADER.cmd   # Windows 1-Click launcher
-├── browser_extension/             # Chrome / Chromium Manifest V3 extension
-├── firefox_extension/             # Mozilla Firefox extension
-├── docs/                          # Architecture documentation & design handoffs
-├── test_*.py                      # Automated test suite (security, converter, detection)
-├── requirements.txt               # Python dependencies
-├── .gitignore
-├── LICENSE                        # MIT License
-└── README.md
-```
+1. Install **Python 3.14** (recommended; Python 3.10+ is supported where compatible wheels exist) and **FFmpeg** for media conversions.
+2. Download this branch using **Code → Download ZIP** and extract it, or clone the repository.
+3. Double-click **`SETUP I-DS.cmd`** once (internet required). It checks the desktop GUI and installs verified, isolated media dependencies if needed.
+4. Double-click **`00 - OPEN I-DS`** (product logo, no persistent terminal). Setup creates the shortcut. The older `START I-DS.cmd` and `START STRATUM DOWNLOADER.cmd` remain available for compatibility.
 
----
+To download supported media, select **Add media**. For a direct PDF, ZIP or installer URL, select **Download file**, enter the URL, optionally name the file, and select the save folder using **Browse**. Existing files are not overwritten. Renaming a file extension never converts its contents.
 
-## 🚀 Quick Start Guide
+**New interface:** The first screen offers **Media**, **Files** and **Convert**. The header shows Active / Waiting / Finished jobs. Use the header sidebar icon to collapse or reopen categories, the small sidebar width controls to adjust it, and the **100% / 115% / 130%** control to enlarge text. These preferences are saved.
 
-### 1. Prerequisites
-* **Windows 10 / 11**, macOS, or Linux
-* **Python 3.10+**
-* **FFmpeg**: Installed on system PATH (or placed in application folder) for video remuxing and conversions.
+## Chrome / Edge extension
 
-### 2. Installation
-Clone the repository and install requirements:
+1. In the **private installer completion screen**, choose **Open Extension Folder** and **Set Up Chrome/Edge**; after installation you can also open **Help → Set Up Chrome / Edge Extension** in I-DS. If running from source, use the repository's `browser_extension` folder.
+2. In `chrome://extensions` (or `edge://extensions`), enable **Developer mode**, choose **Load unpacked**, and select the installed **`%LOCALAPPDATA%\Programs\I-DS\Browser Extension`** folder (or the source directory).
+3. In I-DS desktop, open **Options → Browser Integration → Copy Token**.
+4. Click the I-DS browser icon and choose **Connect with copied token**. If browser clipboard access is unavailable, expand the manual section and paste the token normally.
 
-```bash
-git clone https://github.com/inshalstratrum/Stratum-Download-Studio.git
-cd Stratum-Download-Studio
-pip install -r requirements.txt
-```
+The on-video **I-DS** button opens **Download with Options**. Its grip lets you drag it; **−/+** compacts or expands it, and **×** dismisses it for that player. Right-click **Quick Download with I-DS** remains the fast-start alternative. Use **Download file with I-DS** on ordinary links. Under extension settings, optionally enable **Automatically use I-DS for supported browser files**. It is off by default; a failed desktop handoff resumes Chrome. Avoid enabling it for private downloads that depend on browser cookies until live compatibility testing is complete.
 
-### 3. Launching Application
-Double-click `START STRATUM DOWNLOADER.cmd`, or run:
+The extension requests broad HTTP/HTTPS site access to detect media; browser-side request observations do not copy passwords, cookies, or authorization headers.
 
-```bash
-python stratum_download_studio.py
-```
+## Windows installer development
 
----
+- Repeatable local build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1` (PyInstaller, locked dependencies and FFmpeg/FFprobe required on the builder). Generated executables stay inside ignored `dist/`; nothing is published automatically. On successful builds the script removes its disposable working copies by default and keeps only the setup; use `-KeepIntermediates` when debugging.
+- The staged `I-DS-Setup.exe` installs to the current Windows user's Programs folder, creates **Start Menu and Desktop** shortcuts, bundles the browser companion into a stable **Browser Extension** folder, and preserves user downloads/settings during uninstall. **Open I-DS** closes the installer after launching the app; the installer also provides a separate Close action and guided Chrome/Edge next steps. The branded executable includes FFmpeg/FFprobe and Deno; source-mode setup remains separate.
+- Windows SmartScreen may warn about unsigned builds. Complete code signing, license checks and owner acceptance before creating a public release. **The bundled Gyan FFmpeg binary is GPLv3**, and the legal notice/source-availability review in [docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md](docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md) remains a release blocker.
 
-## 🧩 Browser Extension Setup
+## Developer checks
 
-### Google Chrome / Microsoft Edge / Brave
-1. Open `chrome://extensions` in your browser.
-2. Enable **Developer mode** (toggle in top right).
-3. Click **Load unpacked** and select the `browser_extension/` folder from this repository.
-4. Pin the Stratum extension to your toolbar.
+- Python regressions: `python -m pytest -q`
+- Browser tests: `node --test browser_extension/*.test.js`
+- Read project ownership rules in [AGENTS.md](AGENTS.md) and current verified status in [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
 
-### Mozilla Firefox
-1. Open `about:debugging#/runtime/this-firefox` in Firefox.
-2. Click **Load Temporary Add-on...**.
-3. Select `manifest.json` inside the `firefox_extension/` folder.
+## Community
 
----
+Reports, ideas, and tested site compatibility improvements are welcome through GitHub Issues and pull requests. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and do not post passwords, private links, tokens, or personal download histories.
 
-## 🧪 Running Automated Tests
-
-Run the test suite to verify media detection, converter controls, and security sandboxing:
-
-```bash
-python -m unittest test_media_detection.py
-python -m unittest test_converter_controls.py
-python -m unittest test_security.py
-```
-
----
-
-## 📄 License
-
-This software is released under the [MIT License](LICENSE).
-Built with the open-source power of [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [PyQt6](https://riverbankcomputing.com/software/pyqt/).
+Licensed under [MIT](LICENSE). Download only content you own or have permission to save.

@@ -74,11 +74,12 @@ def test_customer_labels_never_use_source_number_disambiguation():
     assert "Source ${" not in model
 
 
-def test_one_token_and_desktop_default_action_are_unchanged():
+def test_one_token_and_browser_overlay_opens_download_options():
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
     assert background.count('"authToken"') == 1
     assert '"X-Stratrum-Auth": token' in background
-    assert 'sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl))' in background
+    # The on-video button should show download options, not silently quick-start.
+    assert 'sendToDesktopApp(selected.url, "download_with_options", trustedHandoff(selected, pageUrl))' in background
 
 
 def test_complete_source_policy_and_fragment_evidence_contract():
@@ -176,7 +177,7 @@ def test_manifest_frame_and_webrequest_detection_contract():
         assert "webRequest" in manifest["permissions"]
         assert "http://*/*" in manifest["host_permissions"]
         assert "https://*/*" in manifest["host_permissions"]
-    assert firefox["background"]["scripts"] == ["media_candidates.js", "background.js"]
+    assert firefox["background"]["scripts"] == ["media_candidates.js", "file_interception.js", "background.js"]
 
 
 def test_response_observation_is_non_blocking_and_private():

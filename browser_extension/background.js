@@ -1,30 +1,41 @@
 if (!globalThis.StratumMediaCandidates && typeof importScripts === "function") {
-  importScripts("media_candidates.js");
+  importScripts("media_candidates.js", "file_interception.js");
 }
 
 const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
+const fileInterceptApi = globalThis.IDSFileInterception;
 const candidateStore = new candidateApi.CandidateStore({ maxCandidates: 200, ttlMs: 30 * 60 * 1000 });
 const framePageUrls = new Map();
 const frameGenerations = new Map();
 const blockedFrames = new Set();
 const playerRegistry = new candidateApi.PlayerRegistry({ maxOwners: 400, ttlMs: 2 * 60 * 1000, leaseMs: 15 * 1000 });
 const quarantineStore = new candidateApi.QuarantineStore({ maxItems: 100, ttlMs: 30 * 1000 });
-const DESKTOP_ENDPOINT = "http://127.0.0.1:8000/add_download";
+const DESKTOP_ENDPOINT = "http://127.0.0.1:18765/add_download";
 
 extensionApi.runtime.onInstalled.addListener(async () => {
   await extensionApi.contextMenus.removeAll();
   extensionApi.contextMenus.create({
     id: "quick-download-stratum",
-    title: "Quick Download with Stratum Download Studio",
+    title: "Quick Download with I-DS",
     contexts: ["link", "video", "audio"]
   });
   extensionApi.contextMenus.create({
+    id: "download-file-i-ds",
+    title: "Download file with I-DS",
+    contexts: ["link"]
+  });
+  extensionApi.contextMenus.create({
     id: "download-options-stratum",
-    title: "Download with Options in Stratum Download Studio",
+    title: "Download with Options in I-DS",
     contexts: ["link", "video", "audio"]
   });
 });
+
+// The toolbar mark opens pairing/settings; it never starts a download by itself.
+if (extensionApi.action && extensionApi.action.onClicked) {
+  extensionApi.action.onClicked.addListener(() => extensionApi.runtime.openOptionsPage());
+}
 
 async function readLocalStorage(keys) {
   return await extensionApi.storage.local.get(keys);
@@ -33,7 +44,7 @@ async function readLocalStorage(keys) {
 async function sendToDesktopApp(url, action, handoff = {}) {
   const safeUrl = candidateApi.safeUrl(url);
   if (!safeUrl) {
-    return { success: false, code: "invalid_url", message: "Stratum rejected an unsafe or unsupported URL." };
+    return { success: false, code: "invalid_url", message: "I-DS rejected an unsupported URL." };
   }
   const stored = await readLocalStorage(["authToken"]);
   const token = stored.authToken || "";
@@ -41,12 +52,12 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     return {
       success: false,
       code: "missing_token",
-      message: "Open Stratum extension Options and save the desktop authentication token."
+      message: "Open I-DS extension Options and save the desktop pairing token."
     };
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  const timeoutId = setTimeout(() => controller.abort(), 9000);
   try {
     const response = await fetch(DESKTOP_ENDPOINT, {
       method: "POST",
@@ -56,6 +67,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
       },
       body: JSON.stringify({
         url: safeUrl.href, action,
+        fileName: handoff.fileName || "",
         sourcePage: handoff.sourcePage || "",
         contentType: handoff.contentType || "",
         requestContext: handoff.requestContext || {}
@@ -64,7 +76,17 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     });
 
     if (response.ok) {
-      return { success: true, message: "Sent to Stratum Download Studio." };
+      // A different local service can occupy a port. Only trust our expected acknowledgment.
+      let reply = null;
+      try {
+        reply = await response.json();
+      } catch (error) {
+        return { success: false, code: "invalid_bridge_response", message: "The local endpoint is not responding as I-DS. Restart the desktop app." };
+      }
+      if (reply && reply.status === "success") {
+        return { success: true, message: "Sent to I-DS." };
+      }
+      return { success: false, code: "invalid_bridge_response", message: "The local endpoint did not confirm an I-DS download." };
     }
     if (response.status === 403) {
       return {
@@ -89,7 +111,7 @@ async function sendToDesktopApp(url, action, handoff = {}) {
     return {
       success: false,
       code: "desktop_unavailable",
-      message: "Stratum Download Studio is unavailable. Start the desktop app and try again."
+      message: "I-DS is unavailable. Start the desktop app and try again."
     };
   } finally {
     clearTimeout(timeoutId);
@@ -220,7 +242,8 @@ function promoteQuarantinedEvidence(tabId, frameId, documentGeneration, playerId
 extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
   const actions = {
     "quick-download-stratum": "quick_download",
-    "download-options-stratum": "download_with_options"
+    "download-options-stratum": "download_with_options",
+    "download-file-i-ds": "http_download"
   };
   if (!actions[info.menuItemId]) {
     return;
@@ -310,7 +333,7 @@ extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, code: "invalid_candidate", message: "No complete downloadable media detected." });
       return false;
     }
-    sendToDesktopApp(selected.url, "default", trustedHandoff(selected, pageUrl)).then(sendResponse);
+    sendToDesktopApp(selected.url, "download_with_options", trustedHandoff(selected, pageUrl)).then(sendResponse);
     return true;
   }
   return false;
@@ -359,4 +382,73 @@ if (extensionApi.webRequest && extensionApi.webRequest.onHeadersReceived) {
       evidence: details.type === "main_frame" ? "webRequest-main-frame" : "webRequest-response"
     }, details.tabId, frameId);
   }, { urls: ["http://*/*", "https://*/*"] }, ["responseHeaders"]);
+}
+
+
+// Phase 2B: opt-in native browser handoff. On any failure Chrome keeps its job.
+if (extensionApi.downloads && extensionApi.downloads.onCreated && fileInterceptApi) {
+  const PENDING_IDS = "iDsPausedNativeDownloadIds";
+  let pendingWrite = Promise.resolve();
+
+  function rememberPaused(id, add) {
+    pendingWrite = pendingWrite.catch(() => {}).then(async () => {
+      const state = await readLocalStorage([PENDING_IDS]);
+      const list = Array.isArray(state[PENDING_IDS]) ? state[PENDING_IDS].filter(Number.isInteger) : [];
+      const next = add ? Array.from(new Set([...list, id])).slice(-100) : list.filter((value) => value !== id);
+      await extensionApi.storage.local.set({ [PENDING_IDS]: next });
+    });
+    return pendingWrite;
+  }
+
+  async function findNativeDownload(id) {
+    const records = await extensionApi.downloads.search({ id });
+    return Array.isArray(records) ? records[0] : null;
+  }
+
+  async function recoverPausedNativeDownloads() {
+    const values = await readLocalStorage([PENDING_IDS]);
+    const ids = Array.isArray(values[PENDING_IDS]) ? values[PENDING_IDS] : [];
+    for (const id of ids) {
+      try {
+        const item = await findNativeDownload(id);
+        if (item && item.state === "in_progress" && item.paused) {
+          await extensionApi.downloads.resume(id);
+        }
+      } catch (error) {
+        // A removed or interrupted native job cannot be resumed.
+      } finally {
+        await rememberPaused(id, false);
+      }
+    }
+  }
+
+  if (extensionApi.runtime.onStartup) {
+    extensionApi.runtime.onStartup.addListener(() => { recoverPausedNativeDownloads().catch(() => {}); });
+  }
+
+  extensionApi.downloads.onCreated.addListener(async (item) => {
+    if (!fileInterceptApi.eligible(item)) return;
+    try {
+      const options = await readLocalStorage(["interceptGeneralDownloads"]);
+      if (options.interceptGeneralDownloads !== true) return;
+      const result = await fileInterceptApi.transfer(item, {
+        pause: (id) => extensionApi.downloads.pause(id),
+        resume: (id) => extensionApi.downloads.resume(id),
+        cancel: (id) => extensionApi.downloads.cancel(id),
+        isPaused: async (id) => {
+          const current = await findNativeDownload(id);
+          return Boolean(current && current.state === "in_progress" && current.paused);
+        },
+        remember: rememberPaused,
+        send: (url, fileName) => sendToDesktopApp(url, "http_download", { fileName }),
+      });
+      if (result.status === "desktop") {
+        await showResultInTab(item.tabId, { success: true, message: "File transferred to I-DS." });
+      } else if (result.status === "native") {
+        await showResultInTab(item.tabId, { success: false, message: "I-DS handoff unavailable. Chrome download resumed." });
+      }
+    } catch (error) {
+      // The native browser job was never cancelled on this path.
+    }
+  });
 }

@@ -1,6 +1,7 @@
 const extensionApi = globalThis.browser || globalThis.chrome;
 const candidateApi = globalThis.StratumMediaCandidates;
 const mediaControls = new Map();
+const dismissedControls = new WeakSet();
 const elementCandidateIds = new WeakMap();
 const elementPlayerIds = new WeakMap();
 const elementEvidence = new WeakMap();
@@ -304,7 +305,7 @@ async function requestDownload(candidate, button) {
     showStatus(result && result.message ? result.message : "The extension did not receive a response.", result && result.success ? "success" : "error");
     button.textContent = result && result.success ? "Sent ✓" : originalText;
   } catch (error) {
-    showStatus("Stratum extension communication failed. Open extension Options and try again.");
+    showStatus("I-DS extension communication failed. Open extension Options and try again.");
     button.textContent = originalText;
   } finally {
     button.disabled = false;
@@ -373,7 +374,7 @@ async function handleControlClick(element, button) {
       }
     }
   } catch (error) {
-    showStatus("Stratum could not load detected media choices.");
+    showStatus("I-DS could not load detected media choices.");
     button.textContent = originalText;
     return;
   }
@@ -387,12 +388,18 @@ async function handleControlClick(element, button) {
   }
 }
 
+function removeOverlayControl(button) {
+  if (!button) return;
+  for (const tool of button.idsTools || []) tool.remove();
+  button.remove();
+}
+
 function positionControls() {
   positionFrame = null;
   const activeModal = visibleModal();
   for (const [element, button] of mediaControls) {
     if (!element.isConnected) {
-      button.remove(); mediaControls.delete(element); removeElementCandidates(element); retirePlayer(element);
+      removeOverlayControl(button); mediaControls.delete(element); removeElementCandidates(element); retirePlayer(element);
       if (mediaResizeObserver) mediaResizeObserver.unobserve(element);
       continue;
     }
@@ -401,10 +408,19 @@ function positionControls() {
     const usefulSize = rect.width >= 160 && rect.height >= minimumHeight;
     const playerVisible = usefulSize && rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
     button.hidden = !candidateApi.shouldShowPlayerOverlay({ playerVisible, modalOpen: Boolean(activeModal), playerInModal: Boolean(activeModal && composedContains(activeModal, element)) });
+    for (const tool of button.idsTools || []) tool.hidden = button.hidden;
     if (!button.hidden) {
       if (!elementCandidateIds.has(element)) observeElement(element, elementEvidence.get(element) || "dom-media");
-      button.style.top = `${Math.max(4, rect.top + 8)}px`;
-      button.style.left = `${Math.max(4, rect.right - button.offsetWidth - 8)}px`;
+      const totalWidth = button.offsetWidth + 80;
+      const saved = button.idsPosition;
+      const left = Math.max(4, Math.min(window.innerWidth - totalWidth - 4, saved ? saved.left : rect.right - totalWidth - 8));
+      const top = Math.max(4, Math.min(window.innerHeight - 44, saved ? saved.top : rect.top + 8));
+      button.style.top = `${top}px`;
+      button.style.left = `${left}px`;
+      for (const [index, tool] of (button.idsTools || []).entries()) {
+        tool.style.top = `${top + 2}px`;
+        tool.style.left = `${left + button.offsetWidth + 5 + index * 25}px`;
+      }
     }
   }
 }
@@ -423,17 +439,82 @@ function visibleModal() {
 }
 
 function attachControl(element, options = {}) {
-  if (!showMediaButtons || mediaControls.has(element) || !element.isConnected) return;
+  if (!showMediaButtons || mediaControls.has(element) || dismissedControls.has(element) || !element.isConnected) return;
   if (options.frameProxy) element.dataset.stratumFrameProxy = "true";
   elementSourceKeys.set(element, sourceFingerprint(element));
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = "↓ Stratum";
-  button.setAttribute("aria-label", "Choose detected media for Stratum Download Studio");
+  button.textContent = "↓ I-DS";
+  button.setAttribute("aria-label", "Choose detected media for I-DS");
+  button.dataset.idsOverlay = "download";
   Object.assign(button.style, {
-    position: "fixed", zIndex: "2147483646", padding: "5px 9px", border: "1px solid #ffffff",
-    borderRadius: "5px", color: "#ffffff", background: "#0067b8", boxShadow: "0 2px 8px rgba(0,0,0,.35)",
-    cursor: "pointer", font: "600 12px/1.2 system-ui, sans-serif"
+    position: "fixed", zIndex: "2147483646", minHeight: "35px", padding: "7px 12px",
+    border: "1px solid #77e5da", borderRadius: "11px", color: "#ffffff",
+    background: "linear-gradient(115deg, #0b3457, #087e86)",
+    boxShadow: "0 5px 18px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.24)",
+    cursor: "pointer", font: "700 13px/1.25 system-ui, sans-serif",
+    letterSpacing: ".02em", transition: "filter .15s ease", userSelect: "none"
+  });
+  button.addEventListener("mouseenter", () => { button.style.filter = "brightness(1.18)"; });
+  button.addEventListener("mouseleave", () => { button.style.filter = "none"; });
+
+  const tool = (label, name, title) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.dataset.idsOverlay = name;
+    item.textContent = label;
+    item.setAttribute("aria-label", title);
+    item.title = title;
+    Object.assign(item.style, {
+      position: "fixed", zIndex: "2147483646", width: "23px", minHeight: "31px",
+      padding: "0", border: "1px solid rgba(255,255,255,.42)",
+      borderRadius: "7px", color: "#ffffff", background: "#124864",
+      boxShadow: "0 4px 13px rgba(0,0,0,.26)",
+      textAlign: "center", font: "700 16px system-ui, sans-serif",
+      cursor: name === "drag" ? "grab" : "pointer", touchAction: "none"
+    });
+    item.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); });
+    document.documentElement.appendChild(item);
+    return item;
+  };
+  const drag = tool("⠿", "drag", "Drag I-DS button");
+  const compact = tool("−", "compact", "Compact or expand I-DS");
+  const dismiss = tool("×", "dismiss", "Dismiss I-DS for this video");
+  button.idsTools = [drag, compact, dismiss];
+  let start = null;
+  drag.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const rect = button.getBoundingClientRect();
+    start = { id: event.pointerId, pointerX: event.clientX, pointerY: event.clientY,
+              left: rect.left, top: rect.top };
+    drag.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  drag.addEventListener("pointermove", (event) => {
+    if (!start || start.id !== event.pointerId) return;
+    button.idsPosition = {
+      left: start.left + event.clientX - start.pointerX,
+      top: start.top + event.clientY - start.pointerY
+    };
+    schedulePositionUpdate();
+  });
+  const stopDrag = () => { start = null; };
+  drag.addEventListener("pointerup", stopDrag);
+  drag.addEventListener("pointercancel", stopDrag);
+  compact.addEventListener("click", () => {
+    const isCompact = button.dataset.compact !== "true";
+    button.dataset.compact = String(isCompact);
+    button.textContent = isCompact ? "↓" : "↓ I-DS";
+    compact.textContent = isCompact ? "+" : "−";
+    schedulePositionUpdate();
+  });
+  dismiss.addEventListener("click", () => {
+    dismissedControls.add(element);
+    removeOverlayControl(button);
+    mediaControls.delete(element);
+    removeElementCandidates(element);
+    retirePlayer(element);
+    if (mediaResizeObserver) mediaResizeObserver.unobserve(element);
   });
   button.addEventListener("click", (event) => {
     event.preventDefault(); event.stopPropagation(); handleControlClick(element, button);
@@ -511,7 +592,7 @@ function queryFrameCapability(frame) {
 function removeFrameProxy(frame) {
   if (!frame || frame.dataset.stratumFrameProxy !== "true") return;
   const button = mediaControls.get(frame);
-  if (button) button.remove();
+  if (button) removeOverlayControl(button);
   removeElementCandidates(frame);
   retirePlayer(frame);
   mediaControls.delete(frame);
@@ -536,7 +617,7 @@ window.addEventListener("message", (event) => {
 function removeAllControls() {
   closePicker();
   for (const [element, button] of mediaControls) {
-    button.remove();
+    removeOverlayControl(button);
     removeElementCandidates(element);
     retirePlayer(element);
     if (mediaResizeObserver) mediaResizeObserver.unobserve(element);
@@ -649,7 +730,7 @@ if (supportedPageUrl()) {
     removeElementCandidates(event.target);
     retirePlayer(event.target);
     const button = mediaControls.get(event.target);
-    if (button) button.remove();
+    if (button) removeOverlayControl(button);
     if (mediaResizeObserver) mediaResizeObserver.unobserve(event.target);
     mediaControls.delete(event.target);
   }, true);
