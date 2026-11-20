@@ -93,3 +93,47 @@ def test_browser_options_foreground_without_main_window(tmp_path):
             window.tray_icon.hide()
             window.hide()
     """, tmp_path)
+
+
+def test_completed_file_close_closes_progress_once_and_preserves_manager(tmp_path):
+    _run_qt_check("""
+        import sys
+        from pathlib import Path
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        import stratum_download_studio as s
+        app = QApplication.instance() or QApplication([])
+        conf = s.initialize_runtime(app_data_root=sys.argv[1], auth_token='e'*64)
+        conf.keep_completed_window_open = True
+        s.StratrumDownloadStudio.init_server = lambda self: None
+        s.StratrumDownloadStudio.start_queued_jobs = lambda self: None
+        window = s.StratrumDownloadStudio(conf)
+        destination = Path(sys.argv[1]) / 'test-downloads'
+        destination.mkdir()
+        file = destination / 'manual.pdf'
+        file.write_bytes(b'%PDF-1.4\\nsynthetic-fixture\\n%%EOF')
+        selected = []
+        def choose_close(dialog):
+            button = next(b for b in dialog.buttons() if b.text() == 'Close')
+            selected.append('Close')
+            button.click()
+            return 0
+        QMessageBox.exec = choose_close
+        try:
+            window.show()
+            assert window.start_http_download('https://example.org/manual.pdf', destination, show_popup=True)
+            app.processEvents()
+            record = window.downloads[-1]
+            popup = window.popups[record['id']]
+            assert popup.isVisible()
+            window.download_finished(record['id'], True, '', str(file))
+            app.processEvents()
+            assert selected == ['Close']
+            assert record['id'] not in window.popups
+            assert not popup.isVisible()
+            assert window.isVisible(), 'the main app should remain open'
+            assert record['job'].state == 'completed'
+            assert file.read_bytes().startswith(b'%PDF-1.4')
+        finally:
+            window.tray_icon.hide()
+            window.hide()
+    """, tmp_path)

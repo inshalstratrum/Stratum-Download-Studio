@@ -2,15 +2,19 @@ I-DS — I.os Download Support
 Tool by InShaLIve.os
 
 OPEN THE APP
-    Double-click: 00 - OPEN I-DS
-    This uses the I-DS logo and runs WITHOUT a terminal.
+    Installed private I-DS-Setup.exe: use the I-DS Desktop icon or Start Menu.
+    Source-only mode: double-click 00 - OPEN I-DS (no terminal).
 
 FIRST-TIME SETUP (only once, on a new Windows PC)
     Double-click: SETUP I-DS.cmd
     Then double-click: 00 - OPEN I-DS
 
 CONNECT YOUR BROWSER
-    1. In Chrome/Edge extensions, load the browser_extension folder.
+    After installation choose "Open Extension Folder" and "Set Up Chrome/Edge"
+    on the completion screen, or use I-DS -> Help -> Set Up Chrome / Edge.
+    Installed folder: LOCALAPPDATA\Programs\I-DS\Browser Extension
+    1. Enable Developer mode, then Load unpacked; select that folder.
+       Source-only mode: select the repository's browser_extension folder.
     2. In desktop I-DS -> Options -> Browser Integration -> Copy Token.
     3. In browser I-DS settings -> Connect with copied token.
     4. Enable automatic file handoff for IDM-like left-click downloads.

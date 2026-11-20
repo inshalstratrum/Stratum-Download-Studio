@@ -465,9 +465,16 @@ def initialize_runtime(app_data_root=None, auth_token=None, allowed_origin=None,
     return runtime
 
 
+def browser_extension_directory(base_directory=None):
+    if base_directory is not None:
+        return Path(base_directory) / 'browser_extension'
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent / 'Browser Extension'
+    return Path(__file__).resolve().parent / 'browser_extension'
+
+
 def browser_extension_guide_path(base_directory=None):
-    base = Path(base_directory) if base_directory is not None else Path(__file__).resolve().parent
-    extension_directory = base / 'browser_extension'
+    extension_directory = browser_extension_directory(base_directory)
     readme_path = extension_directory / 'README.md'
     if readme_path.is_file():
         return readme_path.resolve()
@@ -482,6 +489,23 @@ def open_browser_extension_guide(opener=None, base_directory=None):
         opener(guide_path)
         return True
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path)))
+
+
+def open_browser_extensions_settings(browser, opener=None):
+    if browser not in ('chrome', 'edge'):
+        return False
+    app = 'Google/Chrome/Application/chrome.exe' if browser == 'chrome' else 'Microsoft/Edge/Application/msedge.exe'
+    roots = [os.environ.get('ProgramFiles', ''), os.environ.get('ProgramFiles(x86)', ''), os.environ.get('LOCALAPPDATA', '')]
+    for root in roots:
+        candidate = Path(root) / Path(app) if root else None
+        if candidate is not None and candidate.is_file():
+            url = browser + '://extensions'
+            if opener is not None:
+                opener(str(candidate), url)
+            else:
+                subprocess.Popen([str(candidate), url], close_fds=True)
+            return True
+    return False
 
 
 def validate_extension_origin(origin):
@@ -2233,6 +2257,87 @@ class DownloadThread(QThread):
 # ==========================================
 # 4. STRATRUM DOWNLOAD STUDIO UI
 # ==========================================
+class StandardFileDownloadDialog(QDialog):
+    """One clear file-download form; browser auto-handoff keeps its opt-in flow."""
+
+    def __init__(self, parent=None, default_folder="", recent_folders=None):
+        super().__init__(parent)
+        self.setWindowTitle("Download a File - I-DS")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        info = QLabel("Choose a file link, optional name, and where to save it.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        fields = QFormLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://example.com/file.pdf")
+        self.url_edit.setAccessibleName("File download URL")
+        fields.addRow("File URL", self.url_edit)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Use website filename (recommended)")
+        self.name_edit.setAccessibleName("Optional custom filename")
+        fields.addRow("File name", self.name_edit)
+        destination = QHBoxLayout()
+        self.folder_combo = QComboBox()
+        self.folder_combo.setEditable(True)
+        self.folder_combo.setAccessibleName("Destination folder")
+        folders = [str(item) for item in (recent_folders or []) if str(item).strip()]
+        if default_folder and default_folder not in folders:
+            folders.insert(0, default_folder)
+        self.folder_combo.addItems(folders)
+        if default_folder:
+            self.folder_combo.setCurrentText(default_folder)
+        destination.addWidget(self.folder_combo, 1)
+        browse = QPushButton("Browse...")
+        browse.setAccessibleName("Browse for save folder")
+        browse.clicked.connect(self.browse_folder)
+        destination.addWidget(browse)
+        fields.addRow("Save to", destination)
+        layout.addLayout(fields)
+        safety = QLabel("Existing files are kept: I-DS creates a unique filename when necessary.")
+        safety.setWordWrap(True)
+        layout.addWidget(safety)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.start_button = QPushButton("Start Download")
+        self.start_button.clicked.connect(self.validate_and_accept)
+        self.start_button.setDefault(True)
+        actions.addWidget(cancel)
+        actions.addWidget(self.start_button)
+        layout.addLayout(actions)
+
+    def browse_folder(self):
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose Download Folder", self.folder_combo.currentText()
+        )
+        if selected:
+            self.folder_combo.setCurrentText(selected)
+
+    def validate_and_accept(self):
+        url = self.url_edit.text().strip()
+        if not validate_url(url)[0]:
+            QMessageBox.warning(self, "File URL", "Enter a valid HTTP or HTTPS file link.")
+            return
+        selected = self.folder_combo.currentText().strip()
+        try:
+            folder = Path(selected).expanduser().resolve(strict=True) if selected else None
+        except (OSError, ValueError):
+            folder = None
+        if folder is None or not folder.is_dir():
+            QMessageBox.warning(self, "Save Folder", "Choose an existing destination folder.")
+            return
+        self.accept()
+
+    def get_data(self):
+        return (
+            self.url_edit.text().strip(),
+            self.folder_combo.currentText().strip(),
+            safe_file_name(self.name_edit.text().strip()) if self.name_edit.text().strip() else "",
+        )
+
+
 class DownloadFileInfoDialog(QDialog):
     def __init__(self, parent=None, prefill_url="", app_config=None, request_context=None):
         super().__init__(parent)
@@ -3017,6 +3122,21 @@ class BrowserIntegrationDialog(QDialog):
         self.copy_feedback = QLabel("")
         self.copy_feedback.setAccessibleName("Browser pairing instruction")
         layout.addWidget(self.copy_feedback)
+        setup_hint = QLabel(
+            "New browser? Open the extension folder, then Developer mode > Load unpacked. "
+            "Choose the folder, open its settings and click Connect with copied token."
+        )
+        setup_hint.setWordWrap(True)
+        layout.addWidget(setup_hint)
+        setup_row = QHBoxLayout()
+        extension_folder = QPushButton("Open Extension Folder")
+        extension_folder.clicked.connect(self.open_extension_folder)
+        setup_row.addWidget(extension_folder)
+        for browser in ('chrome', 'edge'):
+            button = QPushButton("Set Up " + browser.title())
+            button.clicked.connect(lambda checked=False, kind=browser: self.open_browser_setup(kind))
+            setup_row.addWidget(button)
+        layout.addLayout(setup_row)
 
         layout.addWidget(QLabel(f"Paired browser origins (maximum {MAX_PAIRED_ORIGINS}):"))
         pairing_actions = QHBoxLayout()
@@ -3060,8 +3180,8 @@ class BrowserIntegrationDialog(QDialog):
         self.origin_combo.addItems(self.app_config.allowed_origins)
         count = len(self.app_config.allowed_origins)
         self.pairing_label.setText(
-            f"{count} browser origin{'s' if count != 1 else ''} paired."
-            if count else "No browser extension is currently paired."
+            f"{count} previously authorized browser origin{'s' if count != 1 else ''} (not a live connection check)."
+            if count else "No browser has been paired yet."
         )
 
     def open_guide(self):
@@ -3070,6 +3190,20 @@ class BrowserIntegrationDialog(QDialog):
                 raise OSError("The operating system did not open the guide")
         except (OSError, ValueError):
             QMessageBox.warning(self, "Guide Unavailable", "The browser extension README could not be opened.")
+
+    def open_extension_folder(self):
+        try:
+            path = browser_extension_directory()
+            if not (path / 'manifest.json').is_file():
+                raise FileNotFoundError(str(path))
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise OSError(str(path))
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Extension Folder", "I-DS extension files were not found. Reinstall the current I-DS setup.")
+
+    def open_browser_setup(self, browser):
+        if not open_browser_extensions_settings(browser):
+            QMessageBox.warning(self, "Browser Not Found", f"{browser.title()} could not be located on this PC.")
 
     def remove_selected_origin(self):
         origin = self.origin_combo.currentText()
@@ -3365,6 +3499,9 @@ class StratrumDownloadStudio(QMainWindow):
 
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Quick Start").triggered.connect(self.show_quick_start)
+        help_menu.addAction("Set Up Chrome / Edge Extension...").triggered.connect(
+            lambda: BrowserIntegrationDialog(self.app_config, self).exec()
+        )
         help_menu.addAction("Supported Sites").triggered.connect(self.show_supported_sites)
         help_menu.addAction("Open Logs / Diagnostics").triggered.connect(self.export_diagnostics)
         help_menu.addAction(f"About {APP_NAME}").triggered.connect(self.show_about)
@@ -4013,15 +4150,14 @@ class StratrumDownloadStudio(QMainWindow):
             if final_url: self.start_new_download(final_url, save_dir, requested_height, target_ext, metadata, dialog.request_context_for(final_url))
 
     def open_file_dialog(self):
-        url, accepted = QInputDialog.getText(self, "Download a File", "HTTP/HTTPS file URL:")
-        if not accepted or not url.strip():
-            return
-        folder = QFileDialog.getExistingDirectory(
-            self, "Choose where to save the file",
-            self.quick_download_defaults()[0] if self.quick_download_defaults_valid() else str(Path.home())
+        default = self.quick_download_defaults()[0] if self.quick_download_defaults_valid() else str(Path.home())
+        dialog = StandardFileDownloadDialog(
+            self, default_folder=default, recent_folders=self.app_config.recent_folders
         )
-        if folder and not self.start_http_download(url.strip(), folder, show_popup=True):
-            QMessageBox.warning(self, "File Download", "The URL or save folder is not valid. Use an HTTP/HTTPS file link and an existing folder.")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            url, folder, file_name = dialog.get_data()
+            if not self.start_http_download(url, folder, filename_hint=file_name, show_popup=True):
+                QMessageBox.warning(self, "File Download", "Cannot queue the file. Check its URL and save folder.")
 
     def handle_file_handoff(self, url, request_context, file_name_hint, receipt):
         # Queued Qt slot executes on the GUI thread. A timed-out request is
@@ -4302,6 +4438,11 @@ class StratrumDownloadStudio(QMainWindow):
                         open_download_folder(d)
                     except (OSError, ValueError):
                         QMessageBox.warning(self, "Error", "The completed file can no longer be located safely.")
+                # The completion dialog is the final step. One click also closes
+                # this job's progress window, not the main download manager.
+                # An explicit close takes precedence over the auto-close setting.
+                if popup:
+                    self.close_completed_popup(id, popup)
             else:
                 cancelled = str(error_msg).lower() == 'cancelled'
                 state = JobState.CANCELLED if cancelled else JobState.FAILED

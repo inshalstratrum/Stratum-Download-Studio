@@ -71,12 +71,15 @@ try {
         (Join-Path $project 'LICENSE'),
         (Join-Path $project 'THIRD_PARTY_NOTICES.txt'),
         $licenses,
-        (Join-Path $project '00 - START HERE.txt')
+        (Join-Path $project '00 - START HERE.txt'),
+        (Join-Path $project 'stratum-download-studio.ico'),
+        (Join-Path $project 'browser_extension')
     )
     foreach($file in $extras){
         if(-not(Test-Path $file)){ throw "Required setup asset missing: $file" }
         $setupArgs+='--add-data'
-        $setupArgs+=("$file;.")
+        $destination=if((Get-Item -LiteralPath $file).PSIsContainer){'browser_extension'}else{'.'}
+        $setupArgs+=("$file;$destination")
     }
     $setupArgs+=(Join-Path $project 'scripts\ids_installer_gui.py')
     $setupLog=Join-Path $WorkRoot 'setup-build.log'

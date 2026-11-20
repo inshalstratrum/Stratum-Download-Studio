@@ -6,7 +6,7 @@ This is the unpacked Manifest V3 extension source for I-DS (development version 
 
 ## Install for development
 
-1. Start I-DS using **00 - OPEN I-DS** (created by setup); the legacy command file still works.
+1. Launch I-DS using its **Desktop** or **Start Menu** shortcut. In the desktop app choose **Help > Set Up Chrome / Edge Extension**. The private installer keeps extension files in **I-DS\Browser Extension** under the installed app folder. Source-only users can use this repository's `browser_extension` folder.
 2. Open **chrome://extensions** or **edge://extensions** and enable Developer mode.
 3. Choose **Load unpacked** and select this **browser_extension** directory, not a ZIP.
 4. Click the I-DS extension toolbar icon to open settings.

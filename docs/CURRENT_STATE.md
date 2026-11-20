@@ -1,8 +1,11 @@
 ---
 type: project-status
 title: I-DS Current State
-updated_at: "2026-11-20T00:14:53+05:00"
+updated_at: "2026-11-21T03:35:37+05:00"
 revisions:
+  - at: "2026-11-21T03:35:37+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Completed six installer/download UX corrections, native 200% rendering, full 342 Python/52 JS regression and packaged private installer acceptance with safe cleanup."
   - at: "2026-11-20T00:14:53+05:00"
     by: "chatgpt/gpt-6"
     change: "Verified second independent GitHub-hosted clean Windows VM: 336 Python, 52 JS, plus synthetic installer copy, shortcut, hash, uninstall, data preservation all passed."
@@ -24,6 +27,20 @@ revisions:
   - at: "2026-11-18T21:27:05+05:00"
     by: "chatgpt/gpt-6"
     change: "Recorded Phase 2B.1 recovery tests, converter resizing, isolated real Edge/Qt handoff, and remaining release blockers."
+---
+
+# Current State — Six owner-reported installer and download UX fixes (2026-11-21)
+
+- **Starting point:** `feature/i-ds-foundation` at `0053da6`, draft PR #1. Inspected and preserved earlier uncommitted `StandardFileDownloadDialog`, completion Close change and regression test, plus unrelated `scratch/`. Made proportional pre-edit backups in `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261121-six-fixes`. Did not modify existing installed I-DS, browser profiles, live downloads or original private setup.
+- **Fixes 01–02 (installer):** After verified installation, `Open I-DS` launches the installed EXE and closes the installer; reentrant launches are blocked and spawn errors remain visible. Distinct `Close` persists. The native setup success screen now gives short guided browser steps, with buttons for folder, Chrome and Edge. Source Qt lifecycle tests PASS; owner real-session click acceptance pending.
+- **Fix 03 (extension):** The new private setup includes the existing Chrome/Edge Manifest V3 extension in `%LOCALAPPDATA%\Programs\I-DS\Browser Extension`. After install, the GUI exposes **Open Extension Folder** and **Set Up Chrome / Edge**; the desktop application's Help menu and Browser Integration dialog provide reusable setup controls and pairing instructions. Browser security preferences are not modified automatically; tokens remain private. Packaged archive paths and manifest 1.5 verified, and actual packaged setup installed the files in an isolated Windows folder.
+- **Fix 04 (shortcuts):** Installer creates branded Start Menu and Desktop shortcuts using the actual Windows DesktopDirectory (supports redirected Desktop). Conflicting unrelated shortcuts are not overwritten. Uninstall removes only matching owned links. Synthetic and packaged Windows install/uninstall tests passed with simulated redirected Desktop.
+- **Fix 05 (files):** Wired existing `StandardFileDownloadDialog` into the original `start_http_download` queue with optional sanitized filename, editable folder, recent folders, Browse, validation, error feedback, safe unique filenames and no Quick Download interception changes. Existing media Browse remains. Qt unit/queue tests PASS.
+- **Fix 06 (completion):** The completed-job dialog's Open/Open Folder/Close now also closes only the associated progress popup, preserving the main app, completed file/history and other jobs. Previous failed/cancelled popup behavior remains. Isolated Qt regression PASS.
+- **Testing:** **342/342 Python tests** plus **52/52 JavaScript** PASS; Python, PowerShell parser and Git diff checks PASS. Native Qt Windows installer success UI rendered/inspected at 200% scaling (`580x500` logical, `1160x1000` physical), no clipping; offscreen layout smoke at 100%, 150%, 200%. New unsigned **I-DS-Setup.exe** is **334,461,057 bytes**, SHA-256 `d05cb8ae73fed48ee9ba96d1502961589c89f7d01702bccd44f0545f34ea6684`, stored privately under `C:\Users\ROC STORE\Documents\Stratum_Safety_Backups\i-ds-20261121-six-fixes\release`. Its packaged extension, icon and **35,147-byte GPLv3 license** verified. Actual packaged setup installed standalone **297,468,491-byte I-DS.exe**, Start Menu/Desktop links and extension files in a synthetic profile; packaged app launched and opened loopback bridge **without system Python/FFmpeg on PATH**, then uninstalled while retaining synthetic user data. The original private installer remains intact as rollback.
+- **Storage:** Verified removal of **678.65 MiB** of inactive QA/build directories, **0.52 MiB** generated repo cache and **18.19 MiB** idle pytest temp, totaling **697.36 MiB**, without removing the source, `.deps`, `.tools`, downloaded files, browser profiles, or `scratch/`. New installer retained; at cleanup **C: 35.06 GiB, E: 17.50 GiB** free.
+- **Still pending:** Owner-profile Chrome/Edge extension install, live pairing and handoff (read-only metadata showed no matching extension in 18 Chrome profiles/one Edge profile), manual acceptance of upgraded installed app, actual separate clean Windows test of the **compiled** setup EXE, code signing, and GPLv3 corresponding-source and dependent-library notice review. Prior clean Windows GitHub CI verified source and synthetic scripts, not this private installer. No PR merge, store publication or public release.
+
 ---
 
 # Current State — GitHub-hosted clean Windows verification (2026-11-20)

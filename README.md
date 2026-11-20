@@ -33,14 +33,14 @@ The underlying source and compatibility filenames still use the historical Strat
 3. Double-click **`SETUP I-DS.cmd`** once (internet required). It checks the desktop GUI and installs verified, isolated media dependencies if needed.
 4. Double-click **`00 - OPEN I-DS`** (product logo, no persistent terminal). Setup creates the shortcut. The older `START I-DS.cmd` and `START STRATUM DOWNLOADER.cmd` remain available for compatibility.
 
-To download supported media, select **Add media**. For a direct PDF, ZIP or installer URL, select **Download file**, paste the link and choose the save folder. Existing files are not overwritten.
+To download supported media, select **Add media**. For a direct PDF, ZIP or installer URL, select **Download file**, enter the URL, optionally name the file, and select the save folder using **Browse**. Existing files are not overwritten. Renaming a file extension never converts its contents.
 
 **New interface:** The first screen offers **Media**, **Files** and **Convert**. The header shows Active / Waiting / Finished jobs. Use the header sidebar icon to collapse or reopen categories, the small sidebar width controls to adjust it, and the **100% / 115% / 130%** control to enlarge text. These preferences are saved.
 
 ## Chrome / Edge extension
 
-1. Open `chrome://extensions` (or `edge://extensions`), enable **Developer mode**, and choose **Load unpacked**.
-2. Select the repository's **`browser_extension`** folder.
+1. In the **private installer completion screen**, choose **Open Extension Folder** and **Set Up Chrome/Edge**; after installation you can also open **Help → Set Up Chrome / Edge Extension** in I-DS. If running from source, use the repository's `browser_extension` folder.
+2. In `chrome://extensions` (or `edge://extensions`), enable **Developer mode**, choose **Load unpacked**, and select the installed **`%LOCALAPPDATA%\Programs\I-DS\Browser Extension`** folder (or the source directory).
 3. In I-DS desktop, open **Options → Browser Integration → Copy Token**.
 4. Click the I-DS browser icon and choose **Connect with copied token**. If browser clipboard access is unavailable, expand the manual section and paste the token normally.
 
@@ -51,7 +51,7 @@ The extension requests broad HTTP/HTTPS site access to detect media; browser-sid
 ## Windows installer development
 
 - Repeatable local build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1` (PyInstaller, locked dependencies and FFmpeg/FFprobe required on the builder). Generated executables stay inside ignored `dist/`; nothing is published automatically. On successful builds the script removes its disposable working copies by default and keeps only the setup; use `-KeepIntermediates` when debugging.
-- The staged `I-DS-Setup.exe` installs to the current Windows user's Programs folder, adds Start Menu shortcuts, and preserves user downloads/settings during uninstall. The branded executable includes FFmpeg/FFprobe and Deno; source-mode setup remains separate.
+- The staged `I-DS-Setup.exe` installs to the current Windows user's Programs folder, creates **Start Menu and Desktop** shortcuts, bundles the browser companion into a stable **Browser Extension** folder, and preserves user downloads/settings during uninstall. **Open I-DS** closes the installer after launching the app; the installer also provides a separate Close action and guided Chrome/Edge next steps. The branded executable includes FFmpeg/FFprobe and Deno; source-mode setup remains separate.
 - Windows SmartScreen may warn about unsigned builds. Complete code signing, license checks and owner acceptance before creating a public release. **The bundled Gyan FFmpeg binary is GPLv3**, and the legal notice/source-availability review in [docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md](docs/03_DEPENDENCY_AND_LICENCE_AUDIT.md) remains a release blocker.
 
 ## Developer checks
