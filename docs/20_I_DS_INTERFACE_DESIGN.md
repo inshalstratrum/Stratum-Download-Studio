@@ -1,8 +1,11 @@
 ---
 type: Project UI design contract
 title: I-DS desktop and browser interface
-updated_at: "2026-11-21T03:35:37+05:00"
+updated_at: "2026-11-21T03:39:57+05:00"
 revisions:
+  - at: "2026-11-21T03:39:57+05:00"
+    by: "chatgpt/gpt-6"
+    change: "Verified native Windows 200% rendering of standard file download dialog and fresh Windows CI at commit 29bdc1b."
   - at: "2026-11-21T03:35:37+05:00"
     by: "chatgpt/gpt-6"
     change: "Verified native private installer browser-setup screen and new standard file dialog; captured six owner-requested interactions and acceptance limits."
@@ -47,7 +50,7 @@ revisions:
 | Windows installer at 200% DPI | Short notice, readable text, 44px+ tall buttons, no text clipping at 480×340 logical / 960×680 physical | Actual native Windows Qt rendered and inspected 2026-11-19, PASS; end-user acceptance pending |
 | Installer completion | Guided browser setup steps, stable extension folder, real Chrome/Edge extensions pages, separate Close and Open app auto-close | Qt source rendered at 200%, automated Qt tests, private packaged installation PASS; owner clicks UNTESTED |
 | Desktop launcher | Branded icon on redirected Desktop and Start Menu, no terminal, owned-only uninstall cleanup | Synthetic + actual private setup sandbox PASS |
-| Direct file download | One dialog for URL, safe custom name, folder selection, Browse, validation | Qt form + existing queue regression PASS, native file dialog rendering inspected offscreen |
+| Direct file download | One dialog for URL, safe custom name, folder selection, Browse, validation | Qt form + existing queue regression PASS, actual native Windows Qt hidden-render at 200% (`1120x740` px) inspected, no clipping |
 | Completion popup lifecycle | Close/Open/Open Folder closes completed job progress, not main window; no duplicate cancel prompts | Isolated Qt regression PASS |
 
 **Not applicable:** custom canvas zoom/pan and a resizable multiline composer (this product has neither a spatial canvas nor a text editor). Desktop app is Windows-native; mobile responsive checks apply to the browser settings page, not a nonexistent mobile desktop client.
